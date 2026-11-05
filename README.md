@@ -1,0 +1,504 @@
+# kennet
+
+The command line for Kennet, Metaphi AI's RL infrastructure. Sign in and twin agent traces.
+
+## Install
+
+```sh
+curl -fsSL https://github.com/metaphi-labs/kennet-cli/releases/latest/download/install.sh | sh
+```
+
+macOS and Linux, x86_64 and arm64, no root; it needs `ssh-keygen` (OpenSSH), which both have. It checks that the
+latest release's `checksums.txt` is signed by Metaphi AI's release key, that the binary matches it and that it
+starts, then puts it in `~/.local/share/kennet/versions/<version>/` with `~/.local/bin/kennet` (or
+`$KENNET_INSTALL_DIR/kennet`) a symlink to it. It says the line to add if that directory is not on your `PATH`, and
+at a terminal, asks before setting Kennet up in the coding agents it finds (`kennet agents install`, below; the
+answer defaults to no). It never touches an agent's configuration in CI or without a terminal to ask at, as in a
+container or a sandbox image; `KENNET_SETUP_AGENTS=1` answers yes ahead of time, `0` no. Run it again to upgrade; a plain-file install from an
+earlier version is moved to this layout. The binary then keeps itself current (below).
+
+```sh
+brew install metaphi-labs/tap/kennet    # Homebrew, macOS and Linux
+pip install kennet                      # Python 3.10+, with the library
+```
+
+Or download the binary for your platform from the
+[latest release](https://github.com/metaphi-labs/kennet-cli/releases/latest), and check `checksums.txt.sig`
+(`ssh-keygen -Y verify -n kennet-release`, the key is in `install.sh`) and `checksums.txt`. A binary put there by
+hand does not update itself; the notice names install.sh.
+
+
+### Staying current
+
+`kennet --version` prints the version. Once a day `kennet` looks at the releases, on a thread that never holds a
+command up, and when a newer one is out says so once, on stderr after the command's output, with the upgrade command
+for how this copy was installed:
+
+| Installed with | Upgrade |
+| --- | --- |
+| `install.sh` | nothing: it updates itself (below), or `kennet update` now |
+| Homebrew | `brew upgrade metaphi-labs/tap/kennet` |
+| `pip`, `pipx`, `uv tool` | `pip install -U kennet`, `pipx upgrade kennet`, `uv tool upgrade kennet` |
+| a release binary put somewhere by hand | the install.sh line above |
+
+The notice is never shown under `--json`, when stderr is not a terminal, in CI (`CI` set), or with
+`KENNET_NO_UPDATE_NOTIFIER=1`, and at most once a day.
+
+What install.sh installed updates itself in the background, as Claude Code does. The new version goes in a
+directory of its own, only once its `checksums.txt` carries Metaphi AI's release signature, its archive matches,
+and it answers `--version`; then the `kennet` symlink is flipped to it in one rename. A command already running
+keeps running on its own version, and old versions are removed once nothing runs them (the last two are kept).
+Downloads go to GitHub only. It never touches a Homebrew or pip install, is off in CI, and
+`KENNET_DISABLE_AUTOUPDATE=1` turns it off for a pinned version. A failure says nothing on screen; it is a line in
+`~/.config/metaphi/update.log`. `kennet update` looks and installs now, or prints the command for any other
+install; when it cannot, it says why in one line with the next step (`update_unreachable` is worth a retry; a
+signature or checksum refusal is not).
+
+When the service no longer serves your version, every command fails with `upgrade_required` (exit 5), and
+`next_step` is the upgrade command above.
+
+## Quickstart (2 minutes)
+
+```sh
+kennet login                  # opens the browser; confirm the code you see in the terminal
+kennet twin trace.json        # writes trace.twin.json
+```
+
+Working through a coding agent? `kennet agents install`, then ask it to twin the file: see
+[Driving it from an agent](#driving-it-from-an-agent).
+
+`kennet login` signs you in as yourself and hands this machine your organization's keys: a live key (`mai_sk_...`)
+and a test key (`mai_sk_test_...`). They are kept in the config file (`~/.config/metaphi/config.json`, mode 600) and are never printed. No OS keychain is used: it prompts a person, and an agent cannot answer. Logging in again
+replaces them; `kennet logout` revokes them. If your organization has no twinning access yet, the sign-in still
+works and says why no key was saved.
+
+`kennet twin trace.json --test` runs on the test key. Test runs go through the same pipeline but cost nothing; files
+can be at most 2 MiB and an organization gets one test run in all, so use it on a representative file. Test twins and live twins never see each other.
+
+## Driving it from an agent
+
+```sh
+kennet agents install         # once per machine: every coding agent here now knows this CLI and Kennet's tools
+```
+
+That puts two things in each harness it finds on the machine (by its command on the `PATH` or its config
+directory): the `kennet` skill, where that harness reads skills, and Kennet's MCP server
+(`https://kennet.metaphi.ai/mcp/`, for authoring tasks), the way that harness takes one. A person's own config goes
+through the harness's own `mcp add` where it has one that does not stop to sign in, else its config file; `--project` writes this repository's files instead, to commit
+for a team, at the root of the repository you are in (never your home directory).
+
+| Harness | Skill (you / `--project`) | MCP server (you / `--project`) | Sign in |
+| --- | --- | --- | --- |
+| Claude Code | `~/.claude/skills` / `.claude/skills` | `claude mcp add --scope user` / `.mcp.json` | `claude mcp login kennet` |
+| Codex | `~/.agents/skills` / `.agents/skills` | `~/.codex/config.toml` / `.codex/config.toml` | `codex mcp login kennet` |
+| Hum | `~/.hum/skills` / `.agents/skills` | `hum mcp add` / `.hum/config.toml` | `hum mcp login kennet` |
+| Gemini CLI | `~/.agents/skills` / `.agents/skills` | `gemini mcp add --scope user` / `.gemini/settings.json` | `/mcp auth kennet` |
+| GitHub Copilot CLI | `~/.agents/skills` / `.agents/skills` | `copilot mcp add` / `.mcp.json` | `/mcp auth kennet` |
+| Cursor | `~/.agents/skills` / `.agents/skills` | `~/.cursor/mcp.json` / `.cursor/mcp.json` | Cursor's MCP settings |
+| opencode | `~/.agents/skills` / `.agents/skills` | `$XDG_CONFIG_HOME/opencode/opencode.json[c]` (or `$OPENCODE_CONFIG`) / `opencode.json[c]` | `opencode mcp auth kennet` |
+
+A folder several harnesses read (`~/.agents/skills`, the [Agent Skills](https://agentskills.io) standard's, and
+`.mcp.json`) is written once. `--harness <name>` (repeatable: `claude`, `codex`, `hum`, `gemini`, `copilot`,
+`cursor`, `opencode`) picks harnesses instead of every one found. Running it again changes nothing. Nothing of
+anyone else's is replaced: a skill file kennet did not write stays (`--force` replaces it), and a server named
+`kennet` that kennet did not add stays as it is, and a config file that does not parse (or would not, with the
+server added) is not written: the row says what to add to it by hand. `kennet agents remove` takes away exactly what
+install added: a folder or file another installed harness still reads stays until that one is removed too, and a
+file is deleted only when kennet made it. `kennet agents list` says, per harness, what is there. With `--json` each
+harness is a row: `skill_state` (`written`, `kept`), `mcp` (`added`, `installed`, `present`, `skipped` with
+`mcp_detail`) and `sign_in`; `next_step` is the first `sign_in` that is a command. When no harness got either
+piece, it fails (exit 1, `nothing_installed`) with the rows beside the error.
+
+Then ask the agent for what you want: "twin `trace.jsonl` before I send it to the vendor". The skill is a pointer:
+it tells the agent to run `kennet skill show`, which prints the guide for the version installed, so the guide never
+goes stale. Any other agent can be handed the output of `kennet skill show`. `kennet skill install` is the same as
+`kennet agents install`.
+
+The CLI is made to be run by a coding agent (Claude Code and the like) as much as typed. Away from a terminal
+nothing waits on a question, and every command takes `--json`: stdout is then the result, or the error object,
+alone, and progress goes to stderr. An error that one command clears names it: `Next: <command>` on stderr,
+`next_step` in the JSON.
+
+```sh
+kennet login --json           # {"verification_uri", "user_code", "expires_in", "next_step": "kennet login --complete"}
+                               # the person opens the page and confirms the code
+kennet login --complete       # waits for the approval (60 s away from a terminal) and saves the keys; safe to run again
+kennet whoami --json          # asks the servers: email, organization, balance, and whether each key works
+kennet twin trace.json --no-wait --json    # {"id", "status", "next_step": "kennet twins wait twin_..."}
+kennet twins wait twin_... --json          # {"output", "id"} once it ends
+kennet twins list --json      # the organization's twins, newest first
+```
+
+Away from a terminal `kennet login` is `--no-wait` by itself: it prints the page and the code and returns, so the
+agent can show them to its person. `--wait` keeps the old behaviour, one call that waits for the approval.
+`--json` never opens a browser: it implies `--no-browser`, so a program's call never opens a tab on someone's
+screen.
+
+Whatever goes wrong ends in one line on stderr and a next step, never a traceback, and under `--json` in the error
+object. A request that never got an answer is `network` (`retryable`, exit 4): `error: can't reach
+app.metaphi.ai: the connection timed out`. Anything the CLI did not expect is `internal` (exit 1): one line,
+and the path of the debug log (`~/.config/metaphi/debug.log`) to report it with, beside `kennet --version`.
+
+A twin started is the service's, not the terminal's. Ctrl-C, a closed session or `--timeout` stop the waiting, never
+the twin, and say how to come back: `kennet twins wait <id>` (add `--test` for a test twin), from any machine
+holding the organization's key.
+
+## Use it from your servers
+
+A server or CI job has no browser: an owner or admin makes it a key of its own, with `kennet keys create <name>`
+(below) or in the console, and hands it over as a secret.
+
+```sh
+export METAPHI_API_KEY=mai_sk_...
+kennet twin trace.json -o out.json --json
+```
+
+`METAPHI_API_KEY` overrides whatever is saved. A key you already have can also be saved with
+`kennet login --with-api-key`, which reads it from stdin (or prompts without echo), so it never lands in your shell
+history or the process list.
+
+One trace file in, one twinned file out, in the same format. `--json` prints `{"output", "id"}` on stdout, with
+progress on stderr. Or from Python:
+
+```python
+from pathlib import Path
+from metaphi.twin import twin
+
+result = twin(Path("trace.json"), Path("out.json"), api_key="mai_sk_...")
+result["output"]   # where the twinned trace was written
+```
+
+One key per environment (`prod`, `staging`) or per customer is a good default. Revoking one stops only that key.
+
+### Twin options
+
+| Flag | What it does |
+| --- | --- |
+| `-o, --output` | Where the twinned trace goes. Default: `<name>.twin<ext>` beside the input. |
+| `--out <dir>` | The directory the twin goes in, as `<name>.twin<ext>`; made if missing. |
+| `--key-file <path>` | A file holding the consistency key (64 hex characters). The same key gives a person the same stand-in in every trace, so a corpus stays consistent. `KENNET_CONSISTENCY_KEY` is read when no file is named. Default: a fresh key per trace. (`--key <64 hex>` takes it as an argument, where the process list shows it.) |
+| `--confidential <org>` | Replaces an organization even though it is public, e.g. your customer. Repeatable. |
+| `--test` | Runs on the test key `kennet login` saved: free, small, apart from live twins. |
+| `--no-wait` | Starts the twin and returns its id; `kennet twins wait <id>` comes back for it. |
+| `--timeout <seconds>` | How long to wait for the twin. The twin goes on past it. |
+
+The organization key comes from `METAPHI_API_KEY`, then the saved key. (`--api-key` still works but is deprecated: an
+argument is visible in shell history and to other processes.)
+
+People, private organizations, accounts and secrets are always replaced, each with one consistent synthetic value of
+the same kind, and the trace keeps its structure. An adversarial pass then reads the output for anything still real.
+
+### Errors
+
+Every error from the service carries a stable `code`. Switch on the code or the exception class, never on the
+message. On a failure the CLI prints:
+
+```
+error: This organization's prepaid balance is used up; add credits to continue. Nothing was started. (code: out_of_credit, request: req_5f1c...)
+```
+
+With `--json`, stdout also gets the error object:
+`{"error": {"type", "code", "message", "retryable", "next_step", "request_id"}}`, plus `run_id` when a run failed,
+`action_url` when a page fixes it and `retry_after_s` when the service said how long to wait. `next_step` is the
+command that clears the error, or `null` when none does. Quote the `request_id` to support.
+
+The exit status says what kind of end it was:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Done. |
+| 1 | Failed. |
+| 2 | The command line was wrong. |
+| 3 | A sign-in or a key is needed (`auth_error`). |
+| 4 | The same call may work later: the service is unavailable, a limit is reached, or a wait ran out. |
+| 5 | This version is too old for the service (`upgrade_required`); `next_step` upgrades it. |
+
+A request that fails in transit or with a retryable error is sent again at most twice, within 5 seconds in all;
+a longer `Retry-After` is handed back as `retry_after_s`, not waited out.
+
+From Python, each error `type` raises its own class from `metaphi.errors`. All of them subclass `MetaphiError`:
+
+```python
+from pathlib import Path
+from metaphi.errors import BillingError, MetaphiError, RateLimitError
+from metaphi.twin import twin
+
+try:
+    twin(Path("trace.json"))
+except BillingError:            # out_of_credit
+    ...                         # add credit: `kennet credits buy`
+except RateLimitError as e:     # rate_limited_concurrent, rate_limited_daily
+    ...                         # e.retryable is True: try again when a run ends
+except MetaphiError as e:
+    print(e.code, e.request_id, e.retryable)
+```
+
+| Class | `type` | Codes, for example |
+| --- | --- | --- |
+| `BillingError` | `billing_error` | `out_of_credit` |
+| `AuthError` | `auth_error` | `no_organization` |
+| `RateLimitError` | `rate_limit_error` | `rate_limited_concurrent`, `rate_limited_daily` |
+| `InvalidRequestError` | `invalid_request_error` | `invalid_key`, `upload_already_run`, `task_not_found` |
+| `RunError` | `run_error` | `twin_unclean`, `not_text`, `too_large`, `session_failed`, `budget_exceeded` |
+| `IdempotencyError` | `idempotency_error` | `idempotency_key_reused`, `idempotency_key_in_use` |
+| `APIError` | `api_error` | `unavailable`, `balance_unavailable`, `run_unavailable` |
+
+`retryable` says whether making the same call again later may succeed. For a failed run, it means uploading the same
+trace again.
+
+The CLI says a few errors itself, each with the command that clears it as `next_step`. They are `auth_error`s,
+but for the last:
+
+| Code | When | `next_step` |
+| --- | --- | --- |
+| `not_signed_in` | no sign-in on this machine, or the server has ended it | `kennet login` |
+| `authorization_pending` | `login --complete` returned before the code was approved (`retryable`) | `kennet login --complete` |
+| `no_api_key` | signed in, but the sign-in was handed no key; the message says why, and `reason` which it is (below). Keys come with a sign-in, so `kennet login` picks them up once the organization has access | `kennet org join <org>` when an organization has invited you (`invitation_pending`); `kennet org create <name>` when you are in no organization and none has; `null` when you were taken out of yours (`removed`: an owner of it adds you back), while yours waits for approval, and from `login` itself; else `kennet login` |
+| `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
+| `confirmation_required` | `kennet keys revoke` away from a terminal, or under `--json`, without `--yes` | the same revoke, by id, with `--yes` |
+| `no_key`, `ambiguous_key` | `kennet keys revoke` names no live key, or a name several live keys share | `kennet keys list`; the revoke of one by id |
+| `secret_destination_required` | `kennet keys create --json` without `--show-secret`: nothing is made | the pipe form |
+| `name_taken`, `scope_not_held`, `too_many_keys` | `kennet keys create` with a name a live key holds, a scope the organization does not hold, or at its cap of live keys | `null`; `null`; `kennet keys list` |
+| `test_runs_used` | `--test` once the organization's free test run is spent (exit 1) | the same `kennet twin <file>` and flags, live; `--api-key` and `--key` are left out |
+| `no_invitation` | `kennet org join` found no open invitation from that organization: it expired or was taken back | `null` |
+| `invitation_for_another_address` | the invitation `kennet org join` names was sent to another address than the one signed in: `kennet logout`, then `kennet login` as that address | `null` |
+| `unreachable` (`api_error`) | the twin service did not answer (`retryable`) | `null` |
+| `service_unavailable` (`api_error`) | a gateway or proxy answered for accounts (an HTML 502, a captive portal): `the service answered HTTP <status>; try again in a minute` (`retryable`, exit 4, `retry_after_s` when sent) | `null` |
+| `interrupted` | Ctrl-C or a signal stopped the command (exit 130; under `--json` the error object says so) | `null` |
+| `network` (`api_error`) | no answer from a server at all: the message names the host and why (`retryable`, exit 4) | `null` |
+| `internal` (`api_error`) | something the CLI did not expect; `debug_log` beside the error is the file to report it with | `null` |
+| `login_expired`, `login_refused` | the sign-in code ran out, or was declined | `kennet login` |
+| `upgrade_required` (`upgrade_error`) | the service no longer serves this version (exit 5) | the upgrade command for this install |
+| `step_up_required` | a change to the organization's members or keys needs a sign-in more recent than this one | `kennet login` (signs in afresh) |
+| `timed_out` (`api_error`) | the wait ended before the twin did; it goes on | `kennet twins wait <id>` |
+
+Any other error the CLI says itself, such as a file that is not there, is a plain `MetaphiError` with `code` `None`.
+
+## Task deliveries
+
+The task sets your organization holds, each a versioned set of Harbor tasks with its images pinned by digest.
+
+```sh
+kennet delivery list                         # what you hold, newest first
+kennet delivery show eswe-mini@0.1.0         # tasks, images, download size, what a run asks
+kennet pull eswe-mini@0.1.0                  # into ./eswe-mini-0.1.0; run again and it fetches only what differs
+kennet verify ./eswe-mini-0.1.0              # against its lock, offline; exit 1 if anything differs
+kennet delivery diff eswe-mini@0.1.0 eswe-mini@0.1.1    # what changed, and whether a task's grading did
+kennet delivery diff ./eswe-mini-0.1.0 eswe-mini@0.1.1  # either side can be a pulled directory
+kennet registry login                        # sign docker in to your image repository, for an hour; no key is stored
+kennet registry token                        # the token alone, for a pull secret or another client
+```
+
+A pulled delivery is `delivery.lock.json`, `SHA256SUMS` and `tasks/<task>/`. The lock names each task's tree hash
+and its images by digest; `verify` needs that directory and nothing else. A version never changes: a fix is a new
+version, shown as `newer` by `list`. You run the tasks with Harbor on your own machines.
+
+## Follow a run
+
+```sh
+kennet tail acme/tasks 20261028T072322Z-db0eea              # each trial's timeline, redrawn as it runs
+kennet tail acme/tasks 20261028T072322Z-db0eea --trial <name>   # one trial alone
+kennet tail acme/tasks 20261028T072322Z-db0eea --plain      # a line per event, for a log; --json: an event a line
+```
+
+```
+20261028T072322Z-db0eea  18:03  3 trials · 1 ended · 2 running
+
+  carla-route-driver__wZRsaKP  ░░░░░░░░░░░░░░░░░░░░░░▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  grading 11:49
+                               image cached 0:04 · sandbox 6:06
+  carla-route-driver__dvBSvmr  ░░░░░░░░░░░░░░░░░░░░░█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓      ✓ reward 0.00
+                               image cached 0:04 · sandbox 5:58
+
+  ░ setting up   █ agent   ▓ grading
+
+  wZRsaKP │ route 7/10 HazardAtSideLane  score 77.0  420 s
+```
+
+A row is a trial on the run's clock: setting its sandbox up (the image read from cache or built, the sandbox
+made and its image loaded), the agent, then grading. Under the rows, the last lines its sandboxes wrote. It ends
+once every trial has ended and the run is quiet; ^C ends it sooner. A run is your organization's to follow:
+anyone else's reads as not there.
+
+### Runs side by side
+
+```sh
+kennet tail acme/tasks <run-id> <run-id>                # the same task on two providers, built as it runs
+kennet tail acme/tasks <run-id> <run-id> --speed 30     # ended runs played back, each from its own start
+```
+
+Two or more runs set side by side, their first trial each. Above, a tower per run standing on one ground: a slab
+per stage (image, placing, ready, agent, grading), as tall as its time on a scale every tower shares, the stage
+under way growing as the clock runs. A tower is its provider's colour, Modal green and Thunder blue, any other
+one of its own, and its stages are shades of it; red is a stage the infra failed, ⏱ an agent stopped at its time
+limit. Below, a row per stage and a column per run: the sandbox given, the image (named, cached or built) and
+each stage's time, the refusals a provider gave before it placed one, the agent's steps, what the sandbox used
+(CPU and GPU as they ran, peak memory) and what the trial cost.
+
+```
+           20261029T200817Z-f02a9c                          20261029T200846Z-cfd296
+
+sandbox    modal · A100-80GB                                thunder · A100XL
+           8 CPU · 32 GB                                    8 CPU · 32 GB
+image      named 0:00                                       cached 0:01
+placing    0:00                                             0:03
+ready      0:06                                             0:02
+agent      5:01 · 23 steps                                  5:06 · 18 steps
+grading    2:20                                             0:03 ✗
+cpu        ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆ 5.6/8
+memory     peak 4.3/32 GB
+gpu        ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 0% · 0.0 GB
+cost       $0.70 (model $0.30 · sandbox $0.40)              $0.49 (model $0.23 · sandbox $0.27)
+total      7:43                                             5:44
+```
+
+## Profile a codebase
+
+```sh
+kennet profile-codebase ./core ./billing
+kennet profile-codebase https://github.com/acme/core.git
+kennet profile-codebase ./core --dry-run
+kennet profile-codebase ./core --build 'make' --test 'make test'
+kennet profile-codebase ./core --deep
+```
+
+The metadata is shared with Metaphi AI for screening for a formal pilot. If you do not have a signed MNDA in place, please contact your Metaphi AI SPOC
+
+`--test` and `--build` run in a temporary copy of the repository. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). Logs go to `./kennet-test-logs/<id>/` (`--test-logs <dir>`); a failed run prints its last lines, and `--stream` prints everything. A failed send keeps a file for `--send`.
+
+Every run, `--dry-run` included, needs `kennet login` with an organization that may send a profile.
+
+## Your organization
+
+`kennet whoami` asks the servers who you are: each organization you are in, with your role and what it may do, what you may spend now (`you:`: what is left under your monthly limit or the organization's balance, or no limit), the balance when you may see it, and which key calls run on (the saved one, or
+`METAPHI_API_KEY`), by its last four characters. It asks the twin service whether each key works, and exits 0 only
+when the one in use does.
+If an organization has invited you, `kennet login` and `kennet whoami` say so (`invitation_pending`) and name the
+command that accepts it:
+
+```sh
+kennet org join acme          # or the invitation's id, inv_...; you join in the role it names, and its keys are saved
+```
+
+If you are in no organization and none has invited you, make yours: `kennet org create "Acme Robotics"`. You own
+it. During the private beta Metaphi AI approves each new organization; you are mailed when yours is, and
+`kennet login` then saves its keys, with no second sign-in. `kennet whoami` says so while it waits.
+
+A sign-in handed no key clears the keys and organization saved before it and keeps why, so `kennet whoami`
+says that reason again rather than a refused key. If an owner or admin takes you out of your organization, its keys stop working and the CLI says so (`removed`):
+only an owner of it can add you back. When a saved key is refused, `kennet whoami` says why from what it may read, and
+changes no key: an invitation to accept, a key replaced by a sign-in elsewhere, or no organization at all; `kennet
+login` then says the rest.
+
+A sign-in the server has ended is an error, not a name read back from a file.
+
+Owners and admins manage the organization's members from here:
+
+```sh
+kennet org request kennet:runs --reason "evals"  # ask for more; with no scope, what you asked for so far
+kennet org domain add acme.com                   # prints a TXT record; then `kennet org domain verify acme.com`
+kennet org members                              # members and open invitations, with each one's role
+kennet org members add bob@acme.com             # in as a member; --role owner|admin|billing|member
+kennet org members role bob@acme.com admin      # change a member's role
+kennet org members remove bob@acme.com          # take them out, or take back their invitation
+```
+
+An address on a domain your organization claims joins at once. Any other address is mailed an invitation, which
+the person accepts signed in as that address, within a week. Only an owner makes, changes or removes an owner,
+and the organization always keeps one. A change needs a recent sign-in: when yours is too old, `kennet` offers a
+fresh one at a terminal and tries again; elsewhere it fails with `step_up_required` and `kennet login` signs in
+afresh. `--org <id>` picks the organization when you manage several.
+
+And its service keys, the ones CI and servers call with (also on the console's keys page,
+<https://app.metaphi.ai/console>):
+
+```sh
+kennet keys list                                # live keys: name, id, last four, scopes, last use; --all adds revoked
+kennet keys create github-ci | gh secret set METAPHI_API_KEY   # all the org holds; --scope less, --test
+kennet keys revoke github-ci                    # by name or id; asks first at a terminal, --yes elsewhere
+```
+
+`create` shows the key once: at a terminal with a warning, and down a pipe alone on stdout, so it goes straight
+into a secret store (what it made and the warning are on stderr). `--json` carries it only with `--show-secret`;
+without the flag it makes nothing (`secret_destination_required`).
+Accounts keeps only its hash. Like a change to members, it needs a recent sign-in.
+
+## Credits
+
+Each completed trace draws your organization's credit; a run that fails costs nothing. When the balance
+reaches zero, new runs are refused until credit is added.
+
+```sh
+kennet credits                       # the balance (owners, admins and billing members)
+kennet credits buy --amount 200      # pay through Stripe Checkout in the browser; waits until it lands
+```
+
+Only owners and billing members can buy; a billing member sees the balance and buys credit, nothing else.
+
+### Running out of credit
+
+When `kennet twin` is refused with `out_of_credit` at a terminal, and you may buy for your organization, it offers to
+add credit there and then, opens Stripe Checkout, and carries on with the same run once the payment lands:
+
+```
+$ kennet twin trace.json
+acme is out of credit.
+Add credit now? Amount in $ [100]:
+Pay in the browser:
+  https://checkout.stripe.com/c/pay/...
+Paid. acme: balance $100.00
+uploaded trace.json (48,112 bytes)
+```
+
+Enter takes $100; `n` or Ctrl-C declines. The run is retried once, under the Idempotency-Key of the first attempt, so
+it can never start twice. If you may not buy, it names who can and where.
+
+In CI, a pipe or with `--json` nothing is asked. The command exits 1 with the error and one more line on stderr:
+
+```
+Add credit: https://app.metaphi.ai/console?add=credit  or run: kennet credits buy --amount <amount>
+```
+
+With `--json` the error object carries the same two things: `action_url`, the page, and `next_step`,
+`kennet credits buy`, which prints a Stripe Checkout link and waits until it is paid.
+
+The library never prompts: `twin()` raises `BillingError`, whose `action_url` is the add-credit page when the service
+sent one.
+
+## Metaphi AI's admins
+
+An account holding `metaphi:admin` runs accounts' admin from here, on its own `kennet login`: `metaphi:admin:read`
+reads, `metaphi:admin` also changes, and accounts writes every change to its audit under your name.
+
+```sh
+kennet admin orgs                                  # every organization: access, members, keys, credit, grants
+kennet admin requests                              # what organizations asked for; --status all is every decision
+kennet admin create-org "Acme"                     # its id is given (org_…); holds nothing until you approve scopes
+kennet admin org acme approve --scope kennet:twin  # pre-approve, or --preset standard
+kennet admin org acme approve --request req_x      # settle a request; --scope for part of it
+kennet admin org acme deny --request req_x --reason "..."    # it may ask again; block: it may not
+kennet admin org acme                              # what it holds, who is in it; then a verb:
+kennet admin org acme add bob@acme.com --role owner    # in, or moved from another organization
+kennet admin org acme grant kennet:twin            # ungrant takes it back, from its keys too; revoke-all
+kennet admin org acme billing invoiced --credit-limit 500   # prepaid | invoiced | internal; funds-members on|off
+kennet admin org acme transactions                 # its ledger, newest first, and its balance
+kennet admin grants sme@gmail.com                  # a person's scopes; grant and revoke <email> <scope>
+kennet admin credit org:acme 500 --days 90         # or a person's address; --note; end <subject> <grant id>
+kennet admin limits bob@acme.com --usd 200         # a monthly cap; --product, --clear
+kennet admin models org:acme 'anthropic/*'         # the models it may call; --none, --clear
+kennet admin audit --actor ac@metaphi.ai           # the changes admins made
+```
+
+## Configuration
+
+| Variable | Default |
+| --- | --- |
+| `METAPHI_API_KEY` | the key saved by `kennet login` (or `kennet login --with-api-key`) |
+| `METAPHI_API` | `https://api.metaphi.ai/v1/kennet`, the Kennet API |
+| `METAPHI_HOME` | `~/.config/metaphi` (directory mode 700, config file mode 600) |
+| `METAPHI_TWIN_TIMEOUT` | `7200`: seconds `kennet twin` waits for its twin to end (`--timeout` per call) |
+| `METAPHI_ALLOW_CUSTOM_HOST` | unset: the CLI talks only to `https://*.metaphi.ai`; `1` allows another https host |
+| `KENNET_NO_UPDATE_NOTIFIER` | unset: `1` turns the daily new-release notice off |
+| `KENNET_DISABLE_AUTOUPDATE` | unset: `1` stops the release binary from updating itself |
+
+Sign out with `kennet logout`. It ends this sign-in everywhere it is used, revokes the keys `kennet login`
+handed out, and clears the saved keys from this machine.
