@@ -634,3 +634,62 @@ def test_setup_again(monkeypatch, tmp_path):
     got = codebase_checks.run(tmp_path, "r", "tip", commits, order, [1, 2], 1, plan, lambda s: None, tip, [1, 1],
                               lambda era, sha, tail: tip)
     assert [r["post"]["build"]["exit"] for r in got["commits"]] == [1, 1]
+
+
+def test_sites():
+    from metaphi import codebase_sites as cs
+    go = 'x := "a == b" // c < d\nif a == b && c < d { return a + b > 3 && true }\nch <- 1; i++; m[k]--\n/* || */\n'
+    assert cs.counts(go, "go") == {"cmp": 3, "logic": 2, "arith": 1, "bool": 1}
+    py = 'def f(a):\n    """a == b"""\n    # a or b\n    return a - 1 if a and not b else -a\n'
+    assert cs.counts(py, "py") == {"cmp": 0, "logic": 1, "arith": 1, "bool": 0}
+    assert cs.swapped(py, "py", "logic", 0).endswith("if a or not b else -a\n")
+    assert cs.swapped(go, "go", "cmp", 2) == go.replace("+ b > 3", "+ b >= 3")
+    assert cs.swapped(go, "go", "cmp", 3) is None and cs.counts("a == b", "md") is None
+    rs = "fn f<'a>(x: &'a str) -> bool { let c = 'x'; x.len() > 1 && true }"
+    assert cs.counts(rs, "rs") == {"cmp": 1, "logic": 1, "arith": 0, "bool": 1}
+
+
+@pytest.fixture
+def planted(tmp_path):
+    r = tmp_path / "falcon_sums"
+    (r / "tests").mkdir(parents=True)
+    git(r, "init", "-q", "-b", "main")
+    (r / "sums.py").write_text("def add(a, b):\n    return a + b\ndef pos(a):\n    return a > 0\n"
+                               "def neg(a):\n    return a - 1  # hunter2 == x\n")
+    (r / "tests/test_sums.py").write_text("from sums import *\ndef test_add():\n    assert add(1, 2) == 3\n"
+                                          "def test_pos():\n    assert pos(1) and not pos(0)\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "sums")
+    return r
+
+
+def test_ops_counted(planted):
+    doc = codebase_profile.document([str(planted)], hide_names=True, say=lambda s: None)
+    rows = [f for f in doc["repos"][0]["files"] if f["at_tip"]]
+    assert [f["ops"] for f in rows if "ops" in f] == [{"cmp": 1, "logic": 0, "arith": 2, "bool": 0}]
+    assert "hunter2" not in json.dumps(doc)
+
+
+def test_breaks(planted):
+    import sys
+
+    from metaphi import codebase_checks
+    plan = codebase_checks.Plan(test=PYTEST.format(py=sys.executable))
+    with codebase_profile.profiled([str(planted)], hide_names=True, say=lambda s: None) as (_doc, kept):
+        f = next(i for i, p in kept[0]["paths"].items() if p == "sums.py")
+        breaks = [{"file": f, "op": "arith", "nth": 0}, {"file": f, "op": "cmp", "nth": 0},
+                  {"file": f, "op": "arith", "nth": 1}, {"file": f, "op": "logic", "nth": 0}]
+        lines: list[str] = []
+        got = codebase_profile.checked(kept, {"runs": 2, "repos": [[]], "breaks": [breaks]}, plan, lines.append)
+    out = got["repos"][0]
+    assert out["stopped"] == "done" and out["commits"] == []
+    rows = out["breaks"]
+    assert [(r["file"], r["op"], r["nth"]) for r in rows] == [(b["file"], b["op"], b["nth"]) for b in breaks]
+    assert [r.get("caught") for r in rows] == [1, 1, 0, None] and rows[3]["broke"]
+    assert rows[2]["kept"] == 2 and rows[0]["gone"] == 0 and len(rows[0]["post"]["tests"]) == 2
+    assert rows[0]["post"]["tests"][0]["exit"] == 1 and rows[2]["post"]["tests"][0]["exit"] == 0
+    assert (planted / "sums.py").read_text().count("a + b") == 1
+    sent = json.dumps(got)
+    for word in ("hunter2", "sums", "test_add", "assert"):
+        assert word not in sent, word
+    assert not any("assert" in line for line in lines) and sum("-tip build ok (" in x for x in lines) == 3

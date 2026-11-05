@@ -167,9 +167,11 @@ def _tested(code: int | None, took: float, cases: dict[str, bool] | None, log: P
 
 
 def _side(repo: Path, tree: dict, into: Path, plan: Plan, env: dict[str, str], runs: int, logs: _Logs, label: str,
-          say: Callable[[str], None], found: tuple[Recipe, str | None] | None = None, jobs: int = 1
-          ) -> tuple[dict[str, Any], list[dict[str, bool] | None]]:
+          say: Callable[[str], None], found: tuple[Recipe, str | None] | None = None, jobs: int = 1,
+          edit: Callable[[Path], None] | None = None) -> tuple[dict[str, Any], list[dict[str, bool] | None]]:
     _write(repo, tree, into / "src")
+    if edit:
+        edit(into / "src")
     junit = into / "junit"
     junit.mkdir()
     recipe, engine = found or (None, None)
@@ -237,6 +239,37 @@ def _compared(pre: list[dict[str, bool] | None], post: list[dict[str, bool] | No
     return {"fail_to_pass": len(f2p), "pass_to_pass": len(passing - f2p), "flaky": len(keys - steady)}
 
 
+def _caught(tip: dict[str, bool] | None, post: list[dict[str, bool] | None], runs: int) -> dict[str, int | None]:
+    if not tip or len(post) < runs or not post or any(r is None for r in post):
+        return {"caught": None, "kept": None, "flaky": None, "gone": None}
+    passing = {k for k, v in tip.items() if v}
+    seen = set().union(*post)
+    steady = {k for k in passing if all(k in r for r in post) and len({r[k] for r in post}) == 1}
+    caught = {k for k in steady if not post[0][k]}
+    return {"caught": len(caught), "kept": len(steady - caught), "flaky": len(passing & seen - steady),
+            "gone": len(passing - seen)}
+
+
+def _swap(path: Path, ext: str, op: str, nth: int) -> None:
+    from metaphi.codebase_sites import swapped
+    got = swapped(path.read_bytes().decode("latin-1"), ext, op, nth)
+    if got is None:
+        raise LookupError(f"{op} {nth}")
+    path.write_bytes(got.encode("latin-1"))
+
+
+def _planted(repo: Path, tree: dict, plan: Plan, runs: int, logs: _Logs, label: str, path: str, op: str, nth: int,
+             tip: dict[str, bool] | None, found: tuple[Recipe, str | None] | None, jobs: int) -> dict[str, Any]:
+    from metaphi.codebase_profile import _ext
+    with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch:
+        post, cases = _side(repo, tree, Path(scratch), plan, {**os.environ, "KENNET_TESTS": ""}, runs, logs, label,
+                            lambda _s: None, found, jobs, lambda src: _swap(src / path, _ext(path), op, nth))
+    for n, t in enumerate(post["tests"]):
+        if t["exit"] != 0:
+            t["why"] = reading.why(t["exit"], logs.root / f"{label}.test-{n + 1}.log")
+    return {"post": post, **_caught(tip, cases, runs)}
+
+
 def _changed(repo: Path, parent: str, sha: str) -> tuple[list[str], str]:
     from metaphi.codebase_profile import SOURCE, _ext, _kind, _out
     changed = _out(repo, "diff-tree", "-r", "-z", "--no-renames", "--name-only", parent, sha).split(b"\0")
@@ -292,23 +325,26 @@ def _neither_built(row: dict) -> bool:
 
 def run(repo: Path, name: str, tip: str, commits: list[dict], order: dict[str, int], picks: list[int], runs: int,
         plan: Plan, say: Callable[[str], None], found: tuple[Recipe, str | None] | None = None,
-        eras: list[int | None] | None = None, repair: Repair | None = None) -> dict[str, Any]:
+        eras: list[int | None] | None = None, repair: Repair | None = None, breaks: list[dict] | None = None,
+        paths: dict[int, str] | None = None) -> dict[str, Any]:
     shas = {i: sha for sha, i in order.items()}
     by_id = {c["commit"]: c for c in commits}
     deadline = time.monotonic() + plan.hours * 3600
     logs = _Logs((plan.logs or Path.cwd() / "kennet-test-logs") / name)
     given = plan.test is not None
     out: dict[str, Any] = {"from": "tip", "runs": runs, "build_given": plan.build is not None, "test_given": given,
-                           "stopped": "done", "commits": []}
+                           "stopped": "done", "commits": [], "breaks": []}
     at_once, jobs = (1, os.cpu_count() or 1) if given else workers(len(picks))
     if not given and found is None:
         out["commits"] = [{"commit": i, "broke": True} for i in picks]
+        out["breaks"] = [{**b, "broke": True} for b in breaks or []]
         return out
     say(f"{name}: running; logs in {logs.root}")
+    tip_cases: list[dict[str, bool] | None] = []
     try:
         with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch, \
                 plan.steps.step("tip"):
-            out["tip"], _ = _side(repo, _tree(repo, tip), Path(scratch) / "tip", plan,
+            out["tip"], tip_cases = _side(repo, _tree(repo, tip), Path(scratch) / "tip", plan,
                                   {**os.environ, "KENNET_TESTS": ""}, 1, logs, "000-tip", say, found, jobs)
         said = out["tip"]
         built = "build" not in said or said["build"]["exit"] == 0
@@ -370,6 +406,28 @@ def run(repo: Path, name: str, tip: str, commits: list[dict], order: dict[str, i
                 if row is not None and not _neither_built(row):
                     rows[k] = row
     out["commits"] = rows
+    if breaks:
+        tip_tree, paths = _tree(repo, tip), paths or {}
+
+        def planted(n: int, b: dict) -> dict | None:
+            if time.monotonic() > deadline:
+                return None
+            label = f"{n:03d}-tip"
+            try:
+                row = {**b, **_planted(repo, tip_tree, plan, runs, logs, label, paths[b["file"]], b["op"], b["nth"],
+                                       (tip_cases or [None])[0], found, jobs)}
+                built = (row["post"].get("build") or {}).get("exit", 0)
+                say(f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n}/{len(breaks)})")
+                return row
+            except Exception as e:   # noqa: BLE001
+                say(f"    {label}: could not run ({type(e).__name__}: {e})")
+                return {**b, "broke": True}
+        with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("breaks", at_once=at_once):
+            done = list(pool.map(planted, range(len(picks) + 1, len(picks) + len(breaks) + 1), breaks))
+        if None in done:
+            out["stopped"] = "hours"
+            done = done[:done.index(None)]
+        out["breaks"] = done
     return out
 
 
