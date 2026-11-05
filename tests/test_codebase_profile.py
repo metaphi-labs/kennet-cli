@@ -733,3 +733,49 @@ def test_candidates_gitlab_travis():
     assert [(r.image, r.test) for r in got] == [("maven:3-eclipse-temurin-17", "bash -ec 'mvn -B test'"),
                                                ("python:3.9", "bash -ec 'python -m unittest'")]
     assert "requirements.txt" in got[1].setup
+
+
+@pytest.mark.parametrize("files,image,test", [
+    ({"project.clj": b"(defproject x)"}, "clojure:lein", "lein test"),
+    ({"mix.exs": b""}, "elixir:1.17", "mix test"),
+    ({"x.sln": b"", "src/x.csproj": b""}, "mcr.microsoft.com/dotnet/sdk:8.0", "dotnet test --no-build x.sln"),
+    ({"Package.swift": b""}, "swift:6.0", "swift test"),
+    ({"Project.toml": b"", "test/runtests.jl": b""}, "julia:1.11", "julia --project=. -e 'using Pkg; Pkg.test()'"),
+    ({"DESCRIPTION": b"", "tests/testthat/test-a.R": b""}, "rocker/r-ver:4.4",
+     "Rscript -e 'testthat::test_local(reporter=\"check\")'"),
+    ({"composer.json": b"{}", "phpunit.xml.dist": b""}, "composer:2", "vendor/bin/phpunit"),
+    ({"build.sbt": b""}, "eclipse-temurin:21", "sbt -batch test"),
+    ({"dune-project": b""}, "ocaml/opam:debian-12-ocaml-5.2", "opam exec -- dune runtest"),
+    ({"pubspec.yaml": b"name: x\n"}, "dart:stable", "dart test"),
+    ({"pubspec.yaml": b"dependencies:\n  flutter:\n    sdk: flutter\n"}, "ghcr.io/cirruslabs/flutter:stable", "flutter test"),
+    ({"x-1.0-1.rockspec": b""}, "buildpack-deps:noble", "busted"),
+])
+def test_candidates_by_ecosystem(files, image, test):
+    from metaphi import codebase_recipes as cr
+    got = cr.candidates(set(files), files.get)
+    assert (got[0].image, got[0].test) == (image, test)
+
+
+def test_ci_test_workflows_first():
+    from metaphi import codebase_recipes as cr
+    flow = (b"on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n"
+            b"      - uses: erlef/setup-beam@v1\n        with: {elixir-version: '1.16'}\n      - run: mix test\n")
+    files = {".github/workflows/a-release.yml": flow.replace(b"mix test", b"mix test --only slow"),
+             ".github/workflows/tests.yml": flow}
+    got = cr.candidates(set(files), files.get)
+    assert got[0].image == "elixir:1.16" and got[0].test == "bash -ec 'mix test'"
+
+
+def test_find_keeps_going_past_a_thin_suite(tmp_path, monkeypatch):
+    from metaphi import codebase_recipes as cr
+    thin, full = cr.Recipe("true", "true", "thin", None), cr.Recipe("true", "true", "full", None)
+    monkeypatch.setattr(cr, "candidates", lambda paths, read: [thin, full])
+    counts = {"thin": 1, "full": 40}
+    monkeypatch.setattr(cr, "_tried", lambda r, *a: (
+        f"ran\ntaken. {counts[r.test]} tests counted (junit), {counts[r.test]} passed", "img", None, "junit"))
+    paths = {f"tests/test_{i}.py" for i in range(8)}
+    got, how = cr.find(lambda d: d.mkdir(parents=True), lambda p: None, paths, "", "docker", tmp_path, lambda s: None, 1.0)
+    assert got.test == "full" and how["steps"] == 2
+    counts["thin"] = 9
+    got, how = cr.find(lambda d: d.mkdir(parents=True), lambda p: None, paths, "", "docker", tmp_path, lambda s: None, 1.0)
+    assert got.test == "thin" and how["steps"] == 1

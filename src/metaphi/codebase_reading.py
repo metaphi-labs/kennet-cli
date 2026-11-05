@@ -106,6 +106,70 @@ def _tap(t: str) -> tuple[int, int] | None:
     return int(p[-1]) + int(f[-1] if f else 0), int(p[-1])
 
 
+def _all(pattern: str, t: str) -> list[tuple[str, ...]]:
+    return re.findall(pattern, t, re.MULTILINE)
+
+
+def _lein(t: str) -> tuple[int, int] | None:
+    m = _all(r"^Ran (\d+) tests? containing \d+ assertions?\.\s*\n(\d+) failures?, (\d+) errors?", t)
+    return (int(m[-1][0]), max(0, int(m[-1][0]) - int(m[-1][1]) - int(m[-1][2]))) if m else None
+
+
+def _julia(t: str) -> tuple[int, int] | None:
+    head = list(re.finditer(r"^Test Summary:\s*\|([^\n]*)\n([^\n]*)", t, re.MULTILINE))
+    if not head:
+        return None
+    cols = head[-1][1].split()
+    nums = [int(x) for x in re.findall(r"\b\d+\b", head[-1][2].split("|", 1)[-1])]
+    got = dict(zip(cols[-len(nums):], nums)) if nums and len(nums) <= len(cols) else {}
+    total = got.get("Total") or sum(v for k, v in got.items() if k in ("Pass", "Fail", "Error", "Broken"))
+    return (total, got.get("Pass", 0)) if total else None
+
+
+def _mix(t: str) -> tuple[int, int] | None:
+    if not re.search(r"^Finished in [\d.]+ seconds", t, re.MULTILINE):
+        return None
+    m = _all(r"^(?:\d+ doctests?, )?(?:\d+ propert(?:y|ies), )?(\d+) tests?, (\d+) failures?", t)
+    return (int(m[-1][0]), int(m[-1][0]) - int(m[-1][1])) if m else None
+
+
+def _dotnet(t: str) -> tuple[int, int] | None:
+    m = _all(r"^\s*(?:Passed|Failed)!\s+- Failed:\s+(\d+), Passed:\s+(\d+), Skipped:\s+\d+, Total:\s+\d+", t)
+    return (sum(int(f) + int(p) for f, p in m), sum(int(p) for _, p in m)) if m else None
+
+
+def _xctest(t: str) -> tuple[int, int] | None:
+    m = _all(r"Executed (\d+) tests?, with (\d+) failures?", t)
+    return (int(m[-1][0]), int(m[-1][0]) - int(m[-1][1])) if m else None
+
+
+def _testthat(t: str) -> tuple[int, int] | None:
+    m = _all(r"\[ FAIL (\d+) \| WARN \d+ \| SKIP \d+ \| PASS (\d+) \]", t)
+    return (int(m[-1][0]) + int(m[-1][1]), int(m[-1][1])) if m else None
+
+
+def _phpunit(t: str) -> tuple[int, int] | None:
+    if m := _all(r"^OK \((\d+) tests?, \d+ assertions?\)", t):
+        return int(m[-1]), int(m[-1])
+    m = _all(r"^Tests: (\d+), Assertions: \d+(?:, Errors: (\d+))?(?:, Failures: (\d+))?", t)
+    return (int(m[-1][0]), int(m[-1][0]) - int(m[-1][1] or 0) - int(m[-1][2] or 0)) if m else None
+
+
+def _sbt(t: str) -> tuple[int, int] | None:
+    m = _all(r"(?:Passed|Failed): Total (\d+), Failed (\d+), Errors (\d+)", t)
+    return (sum(int(n) for n, _, _ in m), sum(int(n) - int(f) - int(e) for n, f, e in m)) if m else None
+
+
+def _dart(t: str) -> tuple[int, int] | None:
+    m = _all(r"\+(\d+)(?: ~\d+)?(?: -(\d+))?: (?:All tests passed!|Some tests failed\.)", t)
+    return (int(m[-1][0]) + int(m[-1][1] or 0), int(m[-1][0])) if m else None
+
+
+def _busted(t: str) -> tuple[int, int] | None:
+    m = _all(r"^(\d+) successes? / (\d+) failures? / (\d+) errors?", t)
+    return (sum(map(int, m[-1])), int(m[-1][0])) if m else None
+
+
 READERS = (
     _pytest,
     _unittest,
@@ -117,6 +181,16 @@ READERS = (
     _maven,
     _jest,
     _tap,
+    _lein,
+    _julia,
+    _mix,
+    _dotnet,
+    _xctest,
+    _testthat,
+    _phpunit,
+    _sbt,
+    _dart,
+    _busted,
 )
 
 

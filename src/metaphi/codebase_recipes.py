@@ -21,6 +21,9 @@ except ImportError:   # Python 3.10
     tomllib = None
 
 TRIES = 6
+SUITE = 5
+COUNTED = re.compile(r"(\d+) tests counted")
+SOURCE = re.compile(r"\.(py|go|rs|java|kt|scala|clj|exs?|cs|fs|swift|jl|R|php|ml|dart|lua|js|ts|jsx|tsx|mjs|c|cc|cpp|rb)$")
 MINUTES = 60.0
 
 PY = "python:3.12"
@@ -30,6 +33,21 @@ NODE = "node:22"
 JDK = "21"
 C = "gcc:14"
 BASE = "buildpack-deps:noble"
+LEIN = "clojure:lein"
+ELIXIR = "elixir:1.17"
+DOTNET = "mcr.microsoft.com/dotnet/sdk:8.0"
+SWIFT = "swift:6.0"
+JULIA = "julia:1.11"
+R = "rocker/r-ver:4.4"
+PHP = "composer:2"
+OCAML = "ocaml/opam:debian-12-ocaml-5.2"
+DART = "dart:stable"
+FLUTTER = "ghcr.io/cirruslabs/flutter:stable"
+CRAN = "https://cloud.r-project.org"
+SBT = ("command -v sbt >/dev/null || (curl -fsSL https://github.com/sbt/sbt/releases/download/v1.10.7/sbt-1.10.7.tgz"
+       " | tar -xz -C /opt && ln -s /opt/sbt/bin/sbt /usr/local/bin/sbt)")
+LUA = ("command -v busted >/dev/null || (apt-get update -qq && apt-get install -y -qq lua5.4 liblua5.4-dev luarocks"
+       " && luarocks install busted)")
 JOBS = "${KENNET_JOBS:-2}"
 VENV = ".kennet-venv"
 
@@ -96,10 +114,16 @@ def _split(lines: list[str]) -> tuple[list[str], list[str], str] | None:
 
 
 def _fallback(paths: set[str]) -> str:
-    return (GO if "go.mod" in paths else RUST if "Cargo.toml" in paths else
-            f"maven:3-eclipse-temurin-{JDK}" if "pom.xml" in paths else f"eclipse-temurin:{JDK}" if "gradlew" in paths
-            else NODE if "package.json" in paths else
-            PY if paths & {"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"} else BASE)
+    for marker, image in (("go.mod", GO), ("Cargo.toml", RUST), ("pom.xml", f"maven:3-eclipse-temurin-{JDK}"),
+                          ("gradlew", f"eclipse-temurin:{JDK}"), ("build.sbt", f"eclipse-temurin:{JDK}"),
+                          ("project.clj", LEIN), ("mix.exs", ELIXIR), ("Package.swift", SWIFT),
+                          ("Project.toml", JULIA), ("DESCRIPTION", R), ("composer.json", PHP),
+                          ("dune-project", OCAML), ("pubspec.yaml", DART), ("package.json", NODE)):
+        if marker in paths:
+            return image
+    if any(p.endswith((".sln", ".csproj", ".fsproj")) for p in paths):
+        return DOTNET
+    return PY if paths & {"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"} else BASE
 
 
 def _image_of(uses: list[tuple[str, dict]], matrix: dict, paths: set[str]) -> str:
@@ -115,6 +139,18 @@ def _image_of(uses: list[tuple[str, dict]], matrix: dict, paths: set[str]) -> st
             return f"maven:3-eclipse-temurin-{v}" if "pom.xml" in paths else f"eclipse-temurin:{v}"
         if name in ("dtolnay/rust-toolchain", "actions-rs/toolchain"):
             return RUST
+        if name == "erlef/setup-beam" and (v := _version(args.get("elixir-version"), matrix)):
+            return f"elixir:{v}"
+        if name == "julia-actions/setup-julia" and (v := _version(args.get("version"), matrix)):
+            return f"julia:{v}"
+        if name == "actions/setup-dotnet" and (v := _version(args.get("dotnet-version"), matrix)):
+            return f"mcr.microsoft.com/dotnet/sdk:{'.'.join((v.split('.') + ['0'])[:2])}"
+        if name == "swift-actions/setup-swift" and (v := _version(args.get("swift-version"), matrix)):
+            return f"swift:{v}"
+        if name == "r-lib/actions/setup-r" and (v := _version(args.get("r-version"), matrix)):
+            return f"rocker/r-ver:{v}"
+        if name == "subosito/flutter-action":
+            return FLUTTER
     return _fallback(paths)
 
 
@@ -245,6 +281,44 @@ def _node(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe]:
     return [Recipe("true", build, f"CI=true {run} test", NODE)]
 
 
+def _others(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe]:
+    out: list[Recipe] = []
+    if "project.clj" in paths:
+        out.append(Recipe("true", "lein deps", "lein test", LEIN))
+    elif "deps.edn" in paths and b":test" in (read("deps.edn") or b""):
+        out.append(Recipe("true", "clojure -P -X:test", "clojure -X:test", "clojure:temurin-21-tools-deps"))
+    if "mix.exs" in paths:
+        out.append(Recipe("mix local.hex --force && mix local.rebar --force", "mix deps.get && MIX_ENV=test mix compile",
+                          "mix test", ELIXIR))
+    solutions = sorted(p for p in paths if p.endswith(".sln") and "/" not in p)
+    if solutions or any(p.endswith((".csproj", ".fsproj")) for p in paths):
+        target = shlex.quote(solutions[0]) if len(solutions) == 1 else ""
+        out.append(Recipe("true", f"dotnet build {target}".strip(), f"dotnet test --no-build {target}".strip(), DOTNET))
+    if "Package.swift" in paths:
+        out.append(Recipe("true", "swift build --build-tests", "swift test", SWIFT))
+    if "Project.toml" in paths and "test/runtests.jl" in paths:
+        out.append(Recipe("true", "julia --project=. -e 'using Pkg; Pkg.instantiate()'",
+                          "julia --project=. -e 'using Pkg; Pkg.test()'", JULIA))
+    if "DESCRIPTION" in paths and any(p.startswith("tests/testthat") for p in paths):
+        out.append(Recipe(f"Rscript -e 'install.packages(c(\"remotes\", \"testthat\"), repos=\"{CRAN}\")'",
+                          f"Rscript -e 'remotes::install_deps(dependencies=TRUE, repos=\"{CRAN}\")' && R CMD INSTALL .",
+                          "Rscript -e 'testthat::test_local(reporter=\"check\")'", R))
+    if "composer.json" in paths and paths & {"phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"}:
+        out.append(Recipe("true", "composer install --no-interaction --prefer-dist", "vendor/bin/phpunit", PHP))
+    if "build.sbt" in paths:
+        out.append(Recipe(SBT, "sbt -batch Test/compile", "sbt -batch test", f"eclipse-temurin:{JDK}"))
+    if "dune-project" in paths:
+        out.append(Recipe("true", "opam install . --deps-only --with-test -y && opam exec -- dune build",
+                          "opam exec -- dune runtest", OCAML))
+    if "pubspec.yaml" in paths:
+        flutter = b"flutter:" in (read("pubspec.yaml") or b"")
+        tool = "flutter" if flutter else "dart"
+        out.append(Recipe("true", f"{tool} pub get", f"{tool} test", FLUTTER if flutter else DART))
+    if any(p.endswith(".rockspec") and "/" not in p for p in paths) or ".busted" in paths:
+        out.append(Recipe(LUA, "true", "busted", BASE))
+    return out
+
+
 def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe]:
     out: list[Recipe] = []
     if "go.mod" in paths:
@@ -264,6 +338,7 @@ def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recip
     if "package.json" in paths:
         out += _node(paths, read)
     out += _python(paths, read)
+    out += _others(paths, read)
     if "CMakeLists.txt" in paths:
         out.append(Recipe("command -v cmake >/dev/null || (apt-get update -qq && apt-get install -y -qq cmake)",
                           f"cmake -S . -B build -DBUILD_TESTING=ON && cmake --build build -j {JOBS}",
@@ -286,7 +361,8 @@ def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recip
 
 def candidates(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe]:
     got: list[Recipe] = []
-    for p in sorted(p for p in paths if p.startswith(".github/workflows/") and p.endswith((".yml", ".yaml"))):
+    flows = [p for p in paths if p.startswith(".github/workflows/") and p.endswith((".yml", ".yaml"))]
+    for p in sorted(flows, key=lambda p: (not re.search(r"test|ci|build|check", p.rsplit("/", 1)[-1], re.IGNORECASE), p)):
         if body := read(p):
             got += _github(body, paths)
     if ".gitlab-ci.yml" in paths and (body := read(".gitlab-ci.yml")):
@@ -327,7 +403,10 @@ def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], pat
     chosen = [contained(r) for r in every] if engine else [h for r in every if (h := hosted(r))]
     chosen = [r for r in chosen if not skip or (r.setup, r.build, r.test) != (skip.setup, skip.build, skip.test)]
     (logs / "candidates.json").write_text(json.dumps([r.__dict__ for r in chosen], indent=1))
+    from metaphi.codebase_profile import TEST
+    suite = min(SUITE, sum(1 for p in paths if TEST.search(p) and SOURCE.search(p)))
     found: Recipe | None = None
+    best = -1
     why: Why | None = None if chosen else "none_found"
     report: str | None = None
     tried = 0
@@ -342,11 +421,16 @@ def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], pat
             junit.mkdir(parents=True)
             say(f"    trying commands ({tried} of {min(len(chosen), TRIES)})")
             with steps.step("setup_proposals", turn=tried):
-                _said, kept, why, report = _tried(r, engine, (src, junit), tests, logs, tried, run_minutes, _run,
-                                                  _junit, cache)
-            if kept is not False:
-                found = Recipe(r.setup, r.build, r.test, kept or None, r.uncounted)
-                break
+                said, kept, why_, report_ = _tried(r, engine, (src, junit), tests, logs, tried, run_minutes, _run,
+                                                   _junit, cache)
+            if kept is False:
+                why = why if found else why_
+            else:
+                ran = int(m.group(1)) if (m := COUNTED.search(said.rsplit("\ntaken.", 1)[-1])) else 0
+                if ran > best:
+                    found, best, report = Recipe(r.setup, r.build, r.test, kept or None, r.uncounted), ran, report_
+                if ran >= suite:
+                    break
             shutil.rmtree(scratch / f"try-{tried:02d}", ignore_errors=True)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
