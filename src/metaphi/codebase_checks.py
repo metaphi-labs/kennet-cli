@@ -32,20 +32,73 @@ class Plan:
     deep: bool = False
 
 
-def _tree(repo: Path, sha: str) -> dict[str, tuple[str, str]]:
+class Tree(dict):
+    links: dict[str, str]
+
+    def __init__(self, *a: Any, links: dict[str, str] | None = None, **k: Any) -> None:
+        super().__init__(*a, **k)
+        self.links = links or {}
+
+
+def _tree(repo: Path, sha: str) -> Tree:
     from metaphi.codebase_profile import _out
-    tree = {}
+    tree = Tree()
     for entry in _out(repo, "ls-tree", "-r", "-z", sha).split(b"\0"):
         if b"\t" in entry:
             meta, _, path = entry.partition(b"\t")
             mode, kind, blob = meta.decode().split()
+            name = path.decode("utf-8", "surrogateescape")
             if kind == "blob":
-                tree[path.decode("utf-8", "surrogateescape")] = (mode, blob)
+                tree[name] = (mode, blob)
+            elif kind == "commit":
+                tree.links[name] = blob
     return tree
+
+
+def _git(*args: str | Path, cwd: Path) -> bool:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_AUTHOR_NAME": "kennet", "GIT_AUTHOR_EMAIL": "kennet@localhost",
+           "GIT_COMMITTER_NAME": "kennet", "GIT_COMMITTER_EMAIL": "kennet@localhost"}
+    try:
+        return subprocess.run(["git", *map(str, args)], cwd=cwd, env=env, capture_output=True, timeout=600, check=False).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _urls(into: Path) -> dict[str, str]:
+    try:
+        got = subprocess.run(["git", "config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.(path|url)$"],
+                             cwd=into, capture_output=True, text=True, timeout=30, check=False).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    named: dict[str, dict[str, str]] = {}
+    for line in got.splitlines():
+        key, _, value = line.partition(" ")
+        name, _, field = key[len("submodule."):].rpartition(".")
+        named.setdefault(name, {})[field] = value
+    return {v["path"]: v["url"] for v in named.values() if "path" in v and "url" in v}
+
+
+def _linked(repo: Path, links: dict[str, str], into: Path) -> None:
+    urls = _urls(into) if links else {}
+    for path, sha in links.items():
+        local, dst = repo / path, into / path
+        source = str(local) if (local / ".git").exists() else urls.get(path, "")
+        if not source or source.startswith(("./", "../")) or not dst.resolve().is_relative_to(into.resolve()):
+            continue
+        dst.mkdir(parents=True, exist_ok=True)
+        if _git("init", "-q", cwd=dst) and _git("fetch", "-q", "--depth", "1", source, sha, cwd=dst):
+            _git("checkout", "-q", "FETCH_HEAD", cwd=dst)
+
+
+def _committed(into: Path) -> None:
+    if not (into / ".git").exists() and _git("init", "-q", cwd=into):
+        _git("add", "-A", cwd=into)
+        _git("-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "tip", cwd=into)
 
 
 def _write(repo: Path, tree: dict[str, tuple[str, str]], into: Path) -> None:
     from metaphi.codebase_profile import _blobs
+    fresh = not into.exists() or not any(into.iterdir())
     into.mkdir(parents=True, exist_ok=True)
     root = into.resolve()
     by_blob: dict[str, list[tuple[str, str]]] = {}
@@ -65,6 +118,9 @@ def _write(repo: Path, tree: dict[str, tuple[str, str]], into: Path) -> None:
                 dst.write_bytes(body)
                 if mode == "100755":
                     dst.chmod(0o755)
+    if fresh:
+        _linked(repo, getattr(tree, "links", {}), into)
+        _committed(into)
 
 
 def _junit(d: Path) -> dict[str, bool] | None:
@@ -268,7 +324,8 @@ def _commit(repo: Path, plan: Plan, runs: int, logs: _Logs, label: str, parent: 
             jobs: int = 1) -> dict[str, Any]:
     tests, in_code = _changed(repo, parent, sha)
     before, after = _tree(repo, parent), _tree(repo, sha)
-    pre_tree = {p: v for p, v in before.items() if p not in tests} | {p: after[p] for p in tests if p in after}
+    pre_tree = Tree({p: v for p, v in before.items() if p not in tests} | {p: after[p] for p in tests if p in after},
+                    links=after.links)
     env = {**os.environ, "KENNET_TESTS": in_code, "KENNET_JOBS": str(jobs)}
     recipe, engine = found or (None, None)
     with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch:

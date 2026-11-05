@@ -786,3 +786,43 @@ def test_python_unittest_after_pytest():
     files = {"pyproject.toml": b"[project]\nname='x'\n", "tests/test_core.py": b""}
     got = cr.candidates(set(files), files.get)
     assert [r.test for r in got][1:] == ["python -m unittest discover -s tests -t ."] and "pytest" in got[0].test
+
+
+def test_dotnet_elixir_and_node_shims():
+    from metaphi import codebase_recipes as cr
+    files = {"src/App/App.csproj": b"<TargetFramework>net8.0</TargetFramework>", "global.json": b'{"sdk": {"version": "10.0.100"}}',
+             "tests/App.Tests/App.Tests.csproj": b"<TargetFramework>net10.0</TargetFramework>"}
+    got = cr.candidates(set(files), files.get)[0]
+    assert got.image == "mcr.microsoft.com/dotnet/sdk:10.0" and got.test == "dotnet test --no-build tests/App.Tests/App.Tests.csproj"
+    files = {"mix.exs": b'def project, do: [app: :x, elixir: "~> 1.18"]'}
+    assert cr.candidates(set(files), files.get)[0].image == "elixir:1.18"
+    files = {"package.json": b'{"scripts": {"test": "vitest"}}', "pnpm-lock.yaml": b""}
+    got = cr.candidates(set(files), files.get)[0]
+    assert "corepack enable --install-directory .kennet-bin" in got.setup and got.test.endswith("CI=true pnpm test")
+    assert ".kennet-bin" in cr.hosted(got).build
+
+
+def test_work_dir_is_a_git_repo_with_its_submodules(tmp_path):
+    import subprocess
+
+    from metaphi import codebase_checks as cc
+    def git(*a, cwd):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "protocol.file.allow=always", *a],
+                       cwd=cwd, check=True, capture_output=True)
+    lib, top = tmp_path / "lib", tmp_path / "top"
+    for d in (lib, top):
+        d.mkdir()
+        git("init", "-q", cwd=d)
+    (lib / "a.c").write_text("int a;\n")
+    git("add", "-A", cwd=lib)
+    git("commit", "-qm", "lib", cwd=lib)
+    (top / "main.c").write_text("int main;\n")
+    git("submodule", "add", "-q", str(lib), "vendor/lib", cwd=top)
+    git("commit", "-qam", "top", cwd=top)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=top, capture_output=True, text=True, check=True).stdout.strip()
+    tree = cc._tree(top, sha)
+    assert "vendor/lib" in tree.links and "vendor/lib" not in tree
+    into = tmp_path / "w"
+    cc._write(top, tree, into)
+    assert (into / "vendor/lib/a.c").read_text() == "int a;\n" and (into / ".git").is_dir()
+    assert subprocess.run(["git", "status", "--porcelain"], cwd=into, capture_output=True, text=True, check=True).stdout.strip() == ""

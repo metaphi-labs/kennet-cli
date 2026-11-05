@@ -353,7 +353,8 @@ def _held(src: Path, only: dict[str, str] | None = None) -> dict[str, str]:
             return ""
     if only is not None:
         return {p: digest(src / p) if (src / p).is_file() else "" for p in only}
-    return {str(f.relative_to(src)): digest(f) for f in src.rglob("*") if f.is_file() and not f.is_symlink()}
+    return {str(f.relative_to(src)): digest(f) for f in src.rglob("*")
+            if f.is_file() and not f.is_symlink() and ".git" not in f.relative_to(src).parts}
 
 
 def _tried(recipe: Recipe, engine: str | None, dirs: tuple[Path, Path], tests: str, logs: Path, turn: int,

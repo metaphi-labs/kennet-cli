@@ -30,6 +30,13 @@ from metaphi import codebase_reading
       "Failed!  - Failed:     2, Passed:     5, Skipped:     0, Total:     7, Duration: 1 s - B.dll\n"), (19, 17)),
     ("Test Suite 'All tests' failed at 2026-01-01.\n\t Executed 30 tests, with 3 failures (0 unexpected)\n", (30, 27)),
     ("[ FAIL 1 | WARN 0 | SKIP 2 | PASS 88 ]\n", (89, 88)),
+    (("[info] Tests: succeeded 335, failed 0, canceled 0, ignored 0, pending 0\n"
+      "\x1b[32m[info] Tests: succeeded 5, failed 2, canceled 0, ignored 1, pending 0\x1b[0m\n"), (342, 340)),
+    ("  4714 passing (46s)\n  43 pending\n  3 failing\n", (4717, 4714)),
+    ("....\nRan: 85 tests in: 0.20 seconds.\nOK\n", (85, 85)),
+    ("Ran: 10 tests in: 0.20 seconds.\nFAILED: Cases: 10 Tried: 10 Errors: 1 Failures: 2 Skip:  0\n", (10, 7)),
+    ("Test Successful in 0.104s. 2 tests run.\n1 failure! in 0.003s. 3 tests run.\n", (5, 4)),
+    ("Test Summary:           | Pass  Total     Time\nPowerModelsDistribution | 1082   1082  8m10.5s\n", (1082, 1082)),
     ("OK (25 tests, 70 assertions)\n", (25, 25)),
     ("FAILURES!\nTests: 25, Assertions: 70, Errors: 1, Failures: 2.\n", (25, 22)),
     ("[info] Passed: Total 40, Failed 0, Errors 0, Passed 40\n[error] Failed: Total 10, Failed 2, Errors 1, Passed 7\n",

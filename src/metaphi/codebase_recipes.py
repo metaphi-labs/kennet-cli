@@ -278,11 +278,38 @@ def _node(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe]:
     scripts = pkg.get("scripts") if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) else {}
     if not isinstance(scripts.get("test"), str) or NO_TESTS in scripts["test"]:
         return []
-    run, install = (("pnpm", "corepack enable && pnpm install --frozen-lockfile") if "pnpm-lock.yaml" in paths else
-                    ("yarn", "corepack enable && (yarn install --immutable || yarn install)") if "yarn.lock" in paths
+    run, install = (("pnpm", "pnpm install --frozen-lockfile") if "pnpm-lock.yaml" in paths else
+                    ("yarn", "(yarn install --immutable || yarn install)") if "yarn.lock" in paths
                     else ("npm", "npm ci" if "package-lock.json" in paths else "npm install"))
     build = install + (f" && {run} run build" if isinstance(scripts.get("build"), str) else "")
     return [Recipe("true", build, f"CI=true {run} test", NODE)]
+
+
+def _dotnet_target(paths: set[str]) -> str | None:
+    def depth(p: str) -> tuple[int, str]:
+        return p.count("/"), p
+    solutions = sorted((p for p in paths if p.endswith((".sln", ".slnx"))), key=depth)
+    if solutions:
+        return solutions[0]
+    tests = sorted((p for p in paths if p.endswith((".csproj", ".fsproj")) and "test" in p.lower()), key=depth)
+    return tests[0] if tests else None
+
+
+def _dotnet_image(paths: set[str], read: Callable[[str], bytes | None]) -> str:
+    wanted = []
+    if m := re.search(rb'"version"\s*:\s*"(\d+)\.', read("global.json") or b""):
+        wanted.append(int(m.group(1)))
+    for p in sorted(p for p in paths if p.endswith((".csproj", ".fsproj", "Directory.Build.props")))[:40]:
+        wanted += [int(v) for v in re.findall(rb"<TargetFrameworks?>[^<]*?net(\d+)\.0", read(p) or b"")]
+    return f"mcr.microsoft.com/dotnet/sdk:{max(wanted)}.0" if wanted and max(wanted) > 8 else DOTNET
+
+
+def _shimmed(r: Recipe) -> Recipe:
+    if not re.search(r"(^|[\s;&|(])(pnpm|yarn)\s", f" {r.setup} {r.build} {r.test}"):
+        return r
+    path = 'export PATH="$PWD/.kennet-bin:$PATH"'
+    return Recipe(f"mkdir -p .kennet-bin && corepack enable --install-directory .kennet-bin && {path} && {r.setup}",
+                  f"{path} && {r.build}", f"{path} && {r.test}", r.image, r.uncounted)
 
 
 def _others(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe]:
@@ -292,12 +319,13 @@ def _others(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe
     elif "deps.edn" in paths and b":test" in (read("deps.edn") or b""):
         out.append(Recipe("true", "clojure -P -X:test", "clojure -X:test", "clojure:temurin-21-tools-deps"))
     if "mix.exs" in paths:
+        least = re.search(rb'elixir:\s*"~>\s*(\d+\.\d+)', read("mix.exs") or b"")
         out.append(Recipe("mix local.hex --force && mix local.rebar --force", "mix deps.get && MIX_ENV=test mix compile",
-                          "mix test", ELIXIR))
-    solutions = sorted(p for p in paths if p.endswith(".sln") and "/" not in p)
-    if solutions or any(p.endswith((".csproj", ".fsproj")) for p in paths):
-        target = shlex.quote(solutions[0]) if len(solutions) == 1 else ""
-        out.append(Recipe("true", f"dotnet build {target}".strip(), f"dotnet test --no-build {target}".strip(), DOTNET))
+                          "mix test", f"elixir:{least.group(1).decode()}" if least else ELIXIR))
+    if target := _dotnet_target(paths):
+        image = _dotnet_image(paths, read)
+        out.append(Recipe("true", f"dotnet build {shlex.quote(target)}", f"dotnet test --no-build {shlex.quote(target)}",
+                          image))
     if "Package.swift" in paths:
         out.append(Recipe("true", "swift build --build-tests", "swift test", SWIFT))
     if "Project.toml" in paths and "test/runtests.jl" in paths:
@@ -379,7 +407,7 @@ def candidates(paths: set[str], read: Callable[[str], bytes | None]) -> list[Rec
         key = (r.setup, r.build, r.test, r.image)
         if key not in seen:
             seen.add(key)
-            out.append(r)
+            out.append(_shimmed(r))
     return out
 
 

@@ -119,9 +119,9 @@ def _julia(t: str) -> tuple[int, int] | None:
     head = list(re.finditer(r"^Test Summary:\s*\|([^\n]*)\n([^\n]*)", t, re.MULTILINE))
     if not head:
         return None
-    cols = head[-1][1].split()
-    nums = [int(x) for x in re.findall(r"\b\d+\b", head[-1][2].split("|", 1)[-1])]
-    got = dict(zip(cols[-len(nums):], nums)) if nums and len(nums) <= len(cols) else {}
+    cols = [c for c in head[-1][1].split() if c != "Time"]
+    nums = [int(x) for x in head[-1][2].split("|", 1)[-1].split() if x.isdigit()]
+    got = dict(zip(cols, nums)) if nums and len(nums) <= len(cols) else {}
     total = got.get("Total") or sum(v for k, v in got.items() if k in ("Pass", "Fail", "Error", "Broken"))
     return (total, got.get("Pass", 0)) if total else None
 
@@ -170,6 +170,27 @@ def _busted(t: str) -> tuple[int, int] | None:
     return (sum(map(int, m[-1])), int(m[-1][0])) if m else None
 
 
+def _scalatest(t: str) -> tuple[int, int] | None:
+    m = _all(r"Tests: succeeded (\d+), failed (\d+), canceled (\d+)", t)
+    return (sum(int(a) + int(b) + int(c) for a, b, c in m), sum(int(a) for a, _, _ in m)) if m else None
+
+
+def _mocha(t: str) -> tuple[int, int] | None:
+    runs = _all(r"^\s*(\d+) passing \([^)]*\)\s*\n(?:\s*\d+ pending\s*\n)?(?:\s*(\d+) failing)?", t)
+    return (sum(int(p) + int(f or 0) for p, f in runs), sum(int(p) for p, _ in runs)) if runs else None
+
+
+def _ounit(t: str) -> tuple[int, int] | None:
+    runs = _all(r"^Ran: (\d+) tests? in: [\d.]+ seconds\.\s*\n(?:OK|FAILED: Cases: \d+ Tried: \d+ Errors: (\d+) "
+                r"Failures: (\d+))", t)
+    return (sum(int(n) for n, _, _ in runs), sum(int(n) - int(e or 0) - int(f or 0) for n, e, f in runs)) if runs else None
+
+
+def _alcotest(t: str) -> tuple[int, int] | None:
+    runs = _all(r"^(?:Test Successful|(\d+) failures?!) in [\d.]+s\. (\d+) tests? run\.", t)
+    return (sum(int(n) for _, n in runs), sum(int(n) - int(f or 0) for f, n in runs)) if runs else None
+
+
 READERS = (
     _pytest,
     _unittest,
@@ -191,11 +212,15 @@ READERS = (
     _sbt,
     _dart,
     _busted,
+    _scalatest,
+    _mocha,
+    _ounit,
+    _alcotest,
 )
 
 
 def counted(log: Path) -> tuple[int, int] | None:
-    t = _text(log)
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", _text(log)).replace("\r\n", "\n")
     for read in READERS:
         got = read(t)
         if got and got[0] > 0:
