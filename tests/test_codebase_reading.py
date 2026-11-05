@@ -33,6 +33,10 @@ from metaphi import codebase_reading
     (("[info] Tests: succeeded 335, failed 0, canceled 0, ignored 0, pending 0\n"
       "\x1b[32m[info] Tests: succeeded 5, failed 2, canceled 0, ignored 1, pending 0\x1b[0m\n"), (342, 340)),
     ("  4714 passing (46s)\n  43 pending\n  3 failing\n", (4717, 4714)),
+    ("Test run summary: Passed!\n  total: 3093\n  failed: 0\n  succeeded: 3090\n  skipped: 3\n", (3093, 3090)),
+    ("146 tests, 1805 assertions, 0 failures, 0 errors, 0 pendings, 0 omissions, 0 notifications\n", (146, 146)),
+    ("12 runs, 30 assertions, 1 failures, 1 errors, 0 skips\n", (12, 10)),
+    ("Finished in 1.2 seconds\n40 examples, 2 failures, 1 pending\n", (40, 38)),
     ("....\nRan: 85 tests in: 0.20 seconds.\nOK\n", (85, 85)),
     ("Ran: 10 tests in: 0.20 seconds.\nFAILED: Cases: 10 Tried: 10 Errors: 1 Failures: 2 Skip:  0\n", (10, 7)),
     ("Test Successful in 0.104s. 2 tests run.\n1 failure! in 0.003s. 3 tests run.\n", (5, 4)),

@@ -191,6 +191,19 @@ def _alcotest(t: str) -> tuple[int, int] | None:
     return (sum(int(n) for _, n in runs), sum(int(n) - int(f or 0) for f, n in runs)) if runs else None
 
 
+def _mtp(t: str) -> tuple[int, int] | None:
+    m = _all(r"^\s*total: (\d+)\s*\n\s*failed: (\d+)\s*\n\s*succeeded: (\d+)", t)
+    return (sum(int(n) for n, _, _ in m), sum(int(p) for _, _, p in m)) if m else None
+
+
+def _ruby(t: str) -> tuple[int, int] | None:
+    unit = _all(r"^(\d+) (?:tests|runs), \d+ assertions, (\d+) failures, (\d+) errors", t)
+    if unit:
+        return sum(int(n) for n, _, _ in unit), sum(int(n) - int(f) - int(e) for n, f, e in unit)
+    spec = _all(r"^(\d+) examples?, (\d+) failures?", t)
+    return (sum(int(n) for n, _ in spec), sum(int(n) - int(f) for n, f in spec)) if spec else None
+
+
 READERS = (
     _pytest,
     _unittest,
@@ -216,6 +229,8 @@ READERS = (
     _mocha,
     _ounit,
     _alcotest,
+    _mtp,
+    _ruby,
 )
 
 
