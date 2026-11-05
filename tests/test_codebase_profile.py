@@ -779,3 +779,10 @@ def test_find_keeps_going_past_a_thin_suite(tmp_path, monkeypatch):
     counts["thin"] = 9
     got, how = cr.find(lambda d: d.mkdir(parents=True), lambda p: None, paths, "", "docker", tmp_path, lambda s: None, 1.0)
     assert got.test == "thin" and how["steps"] == 1
+
+
+def test_python_unittest_after_pytest():
+    from metaphi import codebase_recipes as cr
+    files = {"pyproject.toml": b"[project]\nname='x'\n", "tests/test_core.py": b""}
+    got = cr.candidates(set(files), files.get)
+    assert [r.test for r in got][1:] == ["python -m unittest discover -s tests -t ."] and "pytest" in got[0].test

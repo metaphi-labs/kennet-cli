@@ -262,8 +262,12 @@ def _python(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe
     if packaged:
         pip.append("pip install -q -e " + shlex.quote(f".[{extras[0]}]" if extras else "."))
     pip += [f"pip install -q --group {g}" for g in groups[:1]]
-    pip.append("pip install -q pytest")
-    return [Recipe(" && ".join(pip), "true", PYTEST, image)]
+    out = [Recipe(" && ".join([*pip, "pip install -q pytest"]), "true", PYTEST, image)]
+    for d in ("tests", "test"):
+        if any(re.fullmatch(rf"{d}/(.+/)?test\w*\.py", p) for p in paths):
+            out.append(Recipe(" && ".join(pip), "true", f"python -m unittest discover -s {d} -t .", image))
+            break
+    return out
 
 
 def _node(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recipe]:
