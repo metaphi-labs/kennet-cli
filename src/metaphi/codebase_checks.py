@@ -4,9 +4,7 @@ import concurrent.futures
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
-import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -29,7 +27,6 @@ class Plan:
     run_minutes: float = RUN_MINUTES
     hours: float = HOURS
     logs: Path | None = None
-    stream: bool = False
     cache: Path | None = None
     steps: Steps = NONE
     deep: bool = False
@@ -88,21 +85,10 @@ def _junit(d: Path) -> dict[str, bool] | None:
     return got
 
 
-def _run(command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[bytes],
-         stream: bool = False) -> tuple[int | None, float]:
+def _run(command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[bytes]) -> tuple[int | None, float]:
     started = time.monotonic()
-    p = subprocess.Popen(command, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.PIPE if stream else log, stderr=subprocess.STDOUT, start_new_session=True)
-    pump = None
-    if stream:
-        def copy() -> None:
-            assert p.stdout
-            for line in iter(p.stdout.readline, b""):
-                log.write(line)
-                sys.stderr.buffer.write(b"    | " + line)
-                sys.stderr.flush()
-        pump = threading.Thread(target=copy, daemon=True)
-        pump.start()
+    p = subprocess.Popen(command, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                         stderr=subprocess.STDOUT, start_new_session=True)
     try:
         code: int | None = p.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
@@ -115,8 +101,6 @@ def _run(command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[b
     else:
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, check=False)
     p.wait()
-    if pump:
-        pump.join(timeout=10)
     if code is not None and not -255 <= code <= 255:
         code = 255
     return code, time.monotonic() - started
@@ -195,13 +179,13 @@ def _ran_side(shell: Shell, plan: Plan, env: dict[str, str], runs: int, logs: _L
 
     def shown(step: str, code: int | None, path: Path) -> None:
         if code != 0:
-            head = f"    {label} {step}: {'stopped at --run-minutes' if code is None else f'exit {code}'} ({path})"
-            say("\n".join([head, *([] if plan.stream else _tail(path))]))
+            head = f"    {label} {step}: {'stopped (too long)' if code is None else f'exit {code}'} ({path})"
+            say("\n".join([head, *_tail(path)]))
     if build:
         with logs.open(f"{label}.build.log") as log, plan.steps.step("build", at=label):
             path = Path(log.name)
             code, took = _run(shell.line(build, tests), shell.src, shell.env(tests) if recipe else
-                              {**env, "KENNET_JUNIT": str(junit)}, seconds, log, plan.stream)
+                              {**env, "KENNET_JUNIT": str(junit)}, seconds, log)
         side["build"] = _built(code, took, path)
         shown("build", code, path)
         if code is None:
@@ -213,7 +197,7 @@ def _ran_side(shell: Shell, plan: Plan, env: dict[str, str], runs: int, logs: _L
         with logs.open(f"{label}.test-{n + 1}.log") as log, plan.steps.step("test", at=label):
             path = Path(log.name)
             code, took = _run(shell.line(test, tests), shell.src, shell.env(tests) if recipe else
-                              {**env, "KENNET_JUNIT": str(junit)}, seconds, log, plan.stream)
+                              {**env, "KENNET_JUNIT": str(junit)}, seconds, log)
         cases.append(_junit(junit))
         try:
             shutil.copytree(junit, logs.root / f"{label}.test-{n + 1}.junit", dirs_exist_ok=True,

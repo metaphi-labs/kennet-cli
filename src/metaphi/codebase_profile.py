@@ -432,7 +432,7 @@ def repositories(paths: list[str]) -> list[str]:
 
 
 @contextlib.contextmanager
-def profiled(paths: list[str], hide_names: bool = False, say: Callable[[str], None] = print
+def profiled(paths: list[str], say: Callable[[str], None] = print
              ) -> Iterator[tuple[dict[str, Any], list[dict]]]:
     _git_ready()
     repos, skipped, used, kept = [], [], set(), []
@@ -441,7 +441,7 @@ def profiled(paths: list[str], hide_names: bool = False, say: Callable[[str], No
             url = is_url(given)
             path = None if url else Path(given).expanduser().resolve()
             base = _url_name(given) if url else path.name
-            name = f"repo-{n}" if hide_names else (re.sub(r"[^\w .@+-]", "-", base, flags=re.ASCII).strip() or f"repo-{n}")[:100]
+            name = (re.sub(r"[^\w .@+-]", "-", base, flags=re.ASCII).strip() or f"repo-{n}")[:100]
             while name in used:
                 name = f"{name[:120]}-{n}"
             used.add(name)
@@ -459,7 +459,7 @@ def profiled(paths: list[str], hide_names: bool = False, say: Callable[[str], No
                 skipped.append({"name": name, "reason": reason})
                 continue
             say(f"{name}: computing")
-            local: dict = {"name": name}
+            local: dict = {"name": name, "given": given}
             began = time.monotonic()
             try:
                 repos.append(compute(path, name, local))
@@ -471,27 +471,44 @@ def profiled(paths: list[str], hide_names: bool = False, say: Callable[[str], No
         yield {"schema": SCHEMA, "tool_version": __version__, "repos": repos, "skipped": skipped}, kept
 
 
-def document(paths: list[str], hide_names: bool = False, say: Callable[[str], None] = print) -> dict[str, Any]:
-    with profiled(paths, hide_names, say) as (doc, _kept):
+def document(paths: list[str], say: Callable[[str], None] = print) -> dict[str, Any]:
+    with profiled(paths, say) as (doc, _kept):
         return doc
 
 
 CHMOD_IMAGE = "busybox:1.37"
 
 
+def _reader(repo: Path, tree: dict[str, tuple[str, str]]) -> Callable[[str], bytes | None]:
+    def read(path: str) -> bytes | None:
+        got = tree.get(path)
+        if not got:
+            return None
+        for _sha, body in _blobs(repo, [got[1]]):
+            return body
+        return None
+    return read
+
+
 def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_checks.Plan,
             say: Callable[[str], None] = print, ref: str | None = None, steps: Steps | None = None) -> dict[str, Any]:
     import dataclasses
 
-    from metaphi import codebase_setup
-    out, images, model, box = [], [], None, None
+    from metaphi import codebase_recipes, codebase_setup
+    out, images, box, models = [], [], None, []
     steps = steps or Steps()
     if plan.test is None:
         box = codebase_setup.engine()
         say(f"Setup: {box} containers" if box else "Setup: no Docker or Podman; running on this machine")
-        if ref:
+
+    def model() -> codebase_setup.Model | None:
+        if not plan.deep or not ref:
+            return None
+        if not models or time.time() > models[-1][1] - 3600:
             with steps.step("token"):
-                model = codebase_setup.Model(setup_reach(ref))
+                reach = setup_reach(ref)
+            models.append((codebase_setup.Model(reach), reach.get("expires_at") or time.time() + 8 * 3600))
+        return models[-1][0]
     picked = picked or {"repos": [[] for _ in kept], "runs": 0}
     first = picked.get("first")
     with tempfile.TemporaryDirectory(prefix="kennet-cache-", ignore_cleanup_errors=True) as caches, \
@@ -499,41 +516,47 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
         done.callback(codebase_setup.forget, box, images)
         for n, (local, picks) in enumerate(zip(kept, picked["repos"], strict=True)):
             picks = picks[:first] if first is not None else picks
-            repo, logs = local["path"], (plan.logs or Path.cwd() / "kennet-test-logs") / local["name"]
+            repo, logs = local["path"], (plan.logs or Path.cwd() / "kennet-profile") / local["name"]
             mine = dataclasses.replace(plan, cache=Path(caches) / str(n) if box else None,
                                        steps=Steps(logs / "steps.jsonl"))
             mine.steps.total["profile"] = local.get("seconds", 0.0)
             if mine.cache:
                 mine.cache.mkdir()
-            found, setup = None, None
+            found, setup = None, [] if plan.test is None else None
+
+            def setup_at(sha: str, where: Path, era: int | None, later: tuple[codebase_setup.Recipe, str] | None,
+                         repo=repo, mine=mine, setup=setup) -> codebase_setup.Recipe | None:
+                tree = codebase_checks._tree(repo, sha)
+
+                def write(d: Path) -> None:
+                    codebase_checks._write(repo, tree, d)
+                with mine.steps.step("setup", era=era):
+                    recipe, how = codebase_recipes.find(write, _reader(repo, tree), set(tree), "", box, where, say,
+                                                        plan.run_minutes, mine.cache, mine.steps,
+                                                        skip=later[0] if later else None)
+                    setup.append({"era": era, **how})
+                    if recipe is None and (m := model()) is not None:
+                        recipe, how = codebase_setup.find(write, "", m, box, where / "model", say, plan.run_minutes,
+                                                          mine.cache, mine.steps, later=later)
+                        setup.append({"era": era, **how})
+                if recipe and recipe.image:
+                    images.append(recipe.image)
+                return recipe
             try:
-                if model is not None:
+                if plan.test is None:
                     say(f"{local['name']}: setup")
-                    tree = codebase_checks._tree(repo, local["tip"])
-                    with mine.steps.step("setup"):
-                        recipe, how = codebase_setup.find(
-                            lambda d, repo=repo, tree=tree: codebase_checks._write(repo, tree, d), "", model, box,
-                            logs / "setup", say, plan.run_minutes, mine.cache, mine.steps)
-                    setup = [{"era": None, **how}]
+                    recipe = setup_at(local["tip"], logs / "setup", None, None)
                     say(f"{local['name']}: setup {'ok' if recipe else 'failed'} ({logs / 'setup'})")
                     if recipe:
                         found = (recipe, box)
-                        if recipe.image:
-                            images.append(recipe.image)
                 era_of = (picked.get("eras") or [[]] * len(kept))[n][:len(picks)] or None
 
-                def repair(era: int, sha: str, tail: str, repo=repo, logs=logs, mine=mine, setup=setup, found=found):
-                    tree = codebase_checks._tree(repo, sha)
-                    recipe, how = codebase_setup.find(
-                        lambda d: codebase_checks._write(repo, tree, d), "", model, box, logs / f"setup-era{era}",
-                        say, plan.run_minutes, mine.cache, mine.steps, later=(found[0], tail))
-                    setup.append({"era": era, **how})
-                    if recipe and recipe.image:
-                        images.append(recipe.image)
+                def repair(era: int, sha: str, tail: str, logs=logs, found=found, setup_at=setup_at):
+                    recipe = setup_at(sha, logs / f"setup-era{era}", era, (found[0], tail))
                     return (recipe, box) if recipe else None
                 got = codebase_checks.run(repo, local["name"], local["tip"], local["commits"], local["order"], picks,
                                           picked["runs"], mine, say, found, era_of,
-                                          repair if model is not None and found and setup is not None else None,
+                                          repair if found and setup is not None else None,
                                           (picked.get("breaks") or [[]] * len(kept))[n], local.get("paths"))
             except Exception as e:   # noqa: BLE001
                 say(f"{local['name']}: tests stopped ({type(e).__name__}: {e})")
@@ -640,32 +663,5 @@ def logs_packed(root: Path, ref: str, names: list[str]) -> bytes:
     return buf.getvalue()
 
 
-def keep(body: bytes, directory: Path | None = None, what: str = "profile") -> Path:
-    out = (directory or Path.cwd()) / (f"kennet-codebase-{what}-{int(time.time())}." + ("tar.gz" if what == "logs" else "json.gz"))
-    out.write_bytes(body)
-    return out
-
-
-def readable(raw: bytes) -> tuple[str | None, bytes] | tuple[str, bytes, str]:
-    try:
-        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-            head = tar.extractfile("kennet-logs.json")
-            said = json.loads(head.read()) if head else {}
-        if said.get("schema") == LOGS_SCHEMA and isinstance(said.get("profile"), str):
-            return said["profile"], raw, "logs"
-    except (tarfile.TarError, KeyError, OSError, EOFError, ValueError):
-        pass
-    try:
-        doc = json.loads(gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw)
-    except (OSError, EOFError, ValueError):
-        doc = None
-    if isinstance(doc, dict) and doc.get("schema") == SCHEMA:
-        return None, packed(doc)
-    if isinstance(doc, dict) and doc.get("schema") == CHECKS_SCHEMA and isinstance(ref := doc.pop("profile", None), str):
-        return ref, packed(doc)
-    raise errors.MetaphiError("that file is not a document kennet profile-codebase wrote", code="not_a_document")
-
-
-__all__ = ["CHECKS_SCHEMA", "LOGS_SCHEMA", "NOTICE", "SCHEMA", "checked", "compute", "document", "keep", "key_ready",
-           "logs_packed", "packed", "post", "post_checks", "post_logs", "profiled", "readable", "sample", "setup_reach",
-           "why_not"]
+__all__ = ["CHECKS_SCHEMA", "LOGS_SCHEMA", "NOTICE", "SCHEMA", "checked", "compute", "document", "key_ready",
+           "logs_packed", "packed", "post", "post_checks", "post_logs", "profiled", "sample", "setup_reach", "why_not"]
