@@ -17,12 +17,12 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from metaphi import __version__, codebase_checks, errors
+from metaphi import __version__, codebase_checks, codebase_sites, errors
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 from metaphi.twin import UPLOAD, _client, _key, _send
 
-SCHEMA = "kennet.repo_metadata.v9"
+SCHEMA = "kennet.repo_metadata.v10"
 CHECKS_SCHEMA = "kennet.repo_checks.v1"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
@@ -273,6 +273,8 @@ def _content(body: bytes, ext: str, kind: str, resolves: Callable[[str, str], bo
             found = [x if isinstance(x, str) else next(y for y in x if y) for x in pattern.findall(text)]
             inside = sum(resolves(x, ext) for x in found)
             row.update(imports_internal=inside, imports_external=len(found) - inside)
+    if kind == "source" and (ops := codebase_sites.counts(text, ext)) is not None:
+        row["ops"] = ops
     if kind == "test":
         row.update(env_refs=len(ENV_REF.findall(text)), url_refs=len(URL_REF.findall(text)), mock_refs=len(MOCK_REF.findall(text)))
     return row
@@ -374,7 +376,8 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
     tip = _text(repo, "rev-parse", "HEAD")
     pack = re.search(r"size-pack: (\d+)", _text(repo, "count-objects", "-v"))
     if keep is not None:
-        keep.update(path=repo, tip=tip, commits=commits, order=order)
+        keep.update(path=repo, tip=tip, commits=commits, order=order,
+                    paths={row["file"]: path for path, row in rows.items() if row["at_tip"]})
     return {"name": name, "tip": tip, "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split(),
             "git": {"branches": len(_text(repo, "for-each-ref", "--format=x", "refs/heads", "refs/remotes").split()),
                     "tags": len(_text(repo, "for-each-ref", "--format=x", "refs/tags").split()),
@@ -530,11 +533,12 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                     return (recipe, box) if recipe else None
                 got = codebase_checks.run(repo, local["name"], local["tip"], local["commits"], local["order"], picks,
                                           picked["runs"], mine, say, found, era_of,
-                                          repair if model is not None and found and setup is not None else None)
+                                          repair if model is not None and found and setup is not None else None,
+                                          (picked.get("breaks") or [[]] * len(kept))[n], local.get("paths"))
             except Exception as e:   # noqa: BLE001
                 say(f"{local['name']}: tests stopped ({type(e).__name__}: {e})")
                 got = {"from": "tip", "runs": picked["runs"], "build_given": plan.build is not None,
-                       "test_given": plan.test is not None, "stopped": "error", "commits": []}
+                       "test_given": plan.test is not None, "stopped": "error", "commits": [], "breaks": []}
             if setup:
                 got["setup"] = setup
             got["seconds"] = mine.steps.seconds()
