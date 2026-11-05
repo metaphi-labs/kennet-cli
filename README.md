@@ -363,7 +363,7 @@ kennet profile-codebase ./core --deep
 
 The metadata is shared with Metaphi AI for screening for a formal pilot. If you do not have a signed MNDA in place, please contact your Metaphi AI SPOC
 
-`--test` and `--build` run in a temporary copy of the repository. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). Logs go to `./kennet-test-logs/<id>/` (`--test-logs <dir>`); a failed run prints its last lines, and `--stream` prints everything. A failed send keeps a file for `--send`.
+`--test` and `--build` run in a temporary copy of the repository, at the latest commit and at past commits. Your code stays on your machine. `--deep`, with no `--test`, has a model find the build and test, which sends file contents to Metaphi AI. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). Logs go to `./kennet-test-logs/<id>/` (`--test-logs <dir>`); a failed run prints its last lines, and `--stream` prints everything. A failed send keeps a file for `--send`.
 
 Every run, `--dry-run` included, needs `kennet login` with an organization that may send a profile.
 

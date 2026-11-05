@@ -381,19 +381,21 @@ def test_deep(tested, capsys, tmp_path, monkeypatch):
 
 
 @respx.mock
-def test_test_at_head(tested, tmp_path, monkeypatch):
+def test_test_runs_history(tested, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     ref = "cbp_" + "3" * 16
     respx.get(f"{API}/codebase-profiles/access").mock(return_value=httpx.Response(204))
     respx.post(f"{API}/codebase-profiles").mock(return_value=httpx.Response(200, json={"id": ref}))
-    picked = respx.post(f"{API}/codebase-profiles/{ref}/sample")
+    picked = respx.post(f"{API}/codebase-profiles/{ref}/sample").mock(
+        return_value=httpx.Response(200, json={"runs": 1, "repos": [[2]]}))
     setup = respx.post(f"{API}/codebase-profiles/{ref}/setup")
     checks = respx.post(f"{API}/codebase-profiles/{ref}/checks").mock(return_value=httpx.Response(200, json={"id": ref}))
     logs = respx.post(f"{API}/codebase-profiles/{ref}/logs").mock(return_value=httpx.Response(503))
     assert cli.main(["profile-codebase", str(tested), "--test", "echo SAID-BY-TESTS"]) != 0
-    assert not picked.called and not setup.called and checks.called
+    assert picked.called and not setup.called and checks.called
     sent = json.loads(gzip.decompress(checks.calls[-1].request.content))["repos"][0]
-    assert sent["commits"] == [] and sent["runs"] == 0 and sent["tip"]["tests"][0]["exit"] == 0 and sent["test_given"]
+    assert [c["commit"] for c in sent["commits"]] == [2] and sent["runs"] == 1
+    assert sent["tip"]["tests"][0]["exit"] == 0 and sent["test_given"]
     names, said = _unpacked(logs.calls[-1].request.content)
     assert logs.calls[-1].request.headers["content-type"] == "application/gzip"
     assert said["kennet-logs.json"]["profile"] == ref and "0/000-tip.test-1.log" in names

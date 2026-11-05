@@ -383,11 +383,9 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         if plan:
             import dataclasses
             plan = dataclasses.replace(plan, logs=(plan.logs or Path.cwd() / "kennet-test-logs") / ref)
-            picked = None
-            if plan.deep:
-                say(f"Sent ({ref})")
-                with steps.step("sample"):
-                    picked = codebase_profile.sample(ref)
+            say(f"Sent ({ref})")
+            with steps.step("sample"):
+                picked = codebase_profile.sample(ref)
             report = codebase_profile.checked(kept, picked, plan, say, ref, steps)
             try:
                 with steps.step("post_checks"):
@@ -1703,9 +1701,9 @@ def parser() -> argparse.ArgumentParser:
     t = s.add_argument_group("build and test")
     t.add_argument("--test", metavar="<command>", help="test command; sees KENNET_TESTS and KENNET_JUNIT")
     t.add_argument("--build", metavar="<command>", help="build command, run before --test")
-    t.add_argument("--deep", action="store_true", help="also run at more commits")
+    t.add_argument("--deep", action="store_true", help="no --test: a model finds the build and test")
     t.add_argument("--run-minutes", type=float, default=30, metavar="<m>", help="limit per run (default 30)")
-    t.add_argument("--test-hours", type=float, default=12, metavar="<h>", help="--deep: total limit (default 12)")
+    t.add_argument("--test-hours", type=float, default=12, metavar="<h>", help="total limit (default 12)")
     t.add_argument("--stream", action="store_true", help="print build and test output live")
     t.add_argument("--test-logs", metavar="<dir>", help="log directory (default ./kennet-test-logs)")
     _json_flag(s)
