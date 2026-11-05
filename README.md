@@ -356,16 +356,20 @@ total      7:43                                             5:44
 ```sh
 kennet profile-codebase ./core ./billing
 kennet profile-codebase https://github.com/acme/core.git
-kennet profile-codebase ./core --dry-run
-kennet profile-codebase ./core --build 'make' --test 'make test'
-kennet profile-codebase ./core --deep
 ```
 
 The metadata is shared with Metaphi AI for screening for a formal pilot. If you do not have a signed MNDA in place, please contact your Metaphi AI SPOC
 
-`--test` and `--build` run in a temporary copy of the repository. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). Logs go to `./kennet-test-logs/<id>/` (`--test-logs <dir>`); a failed run prints its last lines, and `--stream` prints everything. A failed send keeps a file for `--send`.
+It builds and tests each repository on this machine, in Docker or Podman when one is running, in temporary copies; your code stays here. Everything it sends is kept in `./kennet-profile/<id>/`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
 
-Every run, `--dry-run` included, needs `kennet login` with an organization that may send a profile.
+```sh
+kennet profile-codebase ./core --build 'make' --test 'make test'
+kennet profile-codebase ./core --deep
+```
+
+`--deep` has a model set up the build and test, which sends file contents to Metaphi AI. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). If a send fails, run the same command again: it sends what was kept and runs nothing twice.
+
+Every run needs `kennet login` with an organization that may send a profile.
 
 ## Your organization
 

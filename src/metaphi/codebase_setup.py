@@ -149,7 +149,7 @@ HOST = ("Your commands run on the person's own machine ({os}), in a scratch copy
 FLOOR = 0.5
 GAVE_UP = ("toolchain", "service", "credentials", "license", "hardware", "other")
 Why = Literal["build_failed", "tests_timeout", "tests_failed", "no_test_count", "pass_fraction",
-              "tracked_file_changed", "no_image", "no_container", "turns", "minutes",
+              "tracked_file_changed", "no_image", "no_container", "turns", "minutes", "none_found",
               "gave_up_toolchain", "gave_up_service", "gave_up_credentials", "gave_up_license", "gave_up_hardware",
               "gave_up_other"]
 
@@ -340,7 +340,7 @@ def find(write: Callable[[Path], None], tests: str, model: Model, engine: str | 
         (logs / "recipe.json").write_text(json.dumps(found.__dict__, indent=1))
     elif why is None or not why.startswith("gave_up"):
         why = why or ("turns" if turns >= MAX_TURNS else "minutes")
-    return found, {"worked": found is not None, "steps": turns, "seconds": round(time.monotonic() - started),
+    return found, {"by": "model", "worked": found is not None, "steps": turns, "seconds": round(time.monotonic() - started),
                    "tokens": model.tokens - tokens, "container": engine is not None, "why": None if found else why,
                    "report": report if found else None}
 
@@ -353,7 +353,8 @@ def _held(src: Path, only: dict[str, str] | None = None) -> dict[str, str]:
             return ""
     if only is not None:
         return {p: digest(src / p) if (src / p).is_file() else "" for p in only}
-    return {str(f.relative_to(src)): digest(f) for f in src.rglob("*") if f.is_file() and not f.is_symlink()}
+    return {str(f.relative_to(src)): digest(f) for f in src.rglob("*")
+            if f.is_file() and not f.is_symlink() and ".git" not in f.relative_to(src).parts}
 
 
 def _tried(recipe: Recipe, engine: str | None, dirs: tuple[Path, Path], tests: str, logs: Path, turn: int,

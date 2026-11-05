@@ -101,7 +101,7 @@ def _signed_in(a: argparse.Namespace, got: dict, joined: dict | None = None) -> 
                  **({"joined": joined} if joined else {}), "next_step": "kennet profile-codebase <path>"},
              said, f"Signed in as {got.get('email')}.",
              f"Ready for {got.get('org')}: its keys are saved on this machine.",
-             "Next: kennet profile-codebase <path>   (--dry-run to read what is sent first)")
+             "Next: kennet profile-codebase <path>")
         return
     if cfg.get("test_api_key"):
         _out(a, {"email": got.get("email"), "org": got.get("org"), "keys": True,
@@ -320,88 +320,75 @@ def cmd_twin(a: argparse.Namespace) -> None:
         print(json.dumps(got, indent=2))
 
 
-def _plan(a: argparse.Namespace):
-    from metaphi import codebase_checks
-    if a.build and not a.test:
-        raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
-    if not a.test and not a.deep:
-        return None
-    if a.dry_run or a.send:
-        flag = "--deep" if a.deep else "--test"
-        raise errors.MetaphiError(
-            f"{flag} cannot run with {'--dry-run' if a.dry_run else '--send'}",
-            code="dry_run_with_test" if a.dry_run else "send_with_test")
-    if a.run_minutes <= 0 or a.test_hours <= 0:
-        raise errors.MetaphiError("--run-minutes and --test-hours take a number above 0", code="bad_test_plan")
-    return codebase_checks.Plan(test=a.test, build=a.build, run_minutes=a.run_minutes, hours=a.test_hours,
-                                logs=Path(a.test_logs).resolve() if a.test_logs else None, stream=a.stream,
-                                deep=a.deep)
+PROFILE_HOME = "kennet-profile"
 
 
-def _kept_on_failure(e: errors.MetaphiError, body: bytes, always: bool = False, what: str = "profile"
-                     ) -> errors.MetaphiError:
-    from metaphi import codebase_profile
-    if always or e.code not in ("invalid_api_key", "missing_api_key"):
-        e.next_step = f"kennet profile-codebase --send {shlex.quote(str(codebase_profile.keep(body, what=what)))}"
-    return e
+def _rerun(given: str) -> str:
+    q = shlex.quote(given)
+    return (f"No build or test found in {given}. Run again with your commands:\n"
+            f"  kennet profile-codebase {q} --build '<build>' --test '<test>'\n"
+            "Or have a model set it up (this sends file contents to Metaphi AI):\n"
+            f"  kennet profile-codebase {q} --deep")
 
 
 def cmd_profile_codebase(a: argparse.Namespace) -> None:
-    from metaphi import codebase_profile
+    from metaphi import codebase_checks, codebase_profile
+    from metaphi.steps import Steps
+    if a.build and not a.test:
+        raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
+    if a.deep and a.test:
+        raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
     say = _progress(a)
-    plan = _plan(a)
-    sent = codebase_profile.readable(Path(a.send).read_bytes()) if a.send else None
     codebase_profile.key_ready()
     say(codebase_profile.NOTICE)
-    if sent:
-        ref, body = sent[0], sent[1]
-        got = (codebase_profile.post_logs(ref, body) if len(sent) == 3 else
-               codebase_profile.post_checks(ref, body) if ref else codebase_profile.post(body))
-        _said_sent(a, got["id"], "Shared")
-        return
-    with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), a.hide_names, say) as (doc, kept):
+    with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
-        if a.dry_run:
-            out = Path(a.output or "kennet-codebase-profile.json")
-            out.write_text(json.dumps(doc, indent=1))
-            if a.json:
-                print(json.dumps({"file": str(out), "skipped": doc["skipped"]}, indent=2))
-            else:
-                say(f"Nothing was sent. Wrote {out}")
-            return
-        body = codebase_profile.packed(doc)
-        if a.output:
-            Path(a.output).write_text(json.dumps(doc, indent=1))
-        from metaphi.steps import Steps
         steps = Steps()
+        with steps.step("send"):
+            ref = codebase_profile.post(codebase_profile.packed(doc))["id"]
+        home = Path.cwd() / PROFILE_HOME / ref
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "profile.json").write_text(json.dumps(doc, indent=1))
+        say(f"Sent ({ref}); a copy is in {home / 'profile.json'}")
+        asked = {"test": a.test, "build": a.build, "deep": a.deep}
+        done, report = home / "checks.json", None
         try:
-            with steps.step("send"):
-                ref = codebase_profile.post(body)["id"]
-        except errors.MetaphiError as e:
-            raise _kept_on_failure(e, body) from None
-        if plan:
-            import dataclasses
-            plan = dataclasses.replace(plan, logs=(plan.logs or Path.cwd() / "kennet-test-logs") / ref)
-            picked = None
-            if plan.deep:
-                say(f"Sent ({ref})")
-                with steps.step("sample"):
-                    picked = codebase_profile.sample(ref)
+            if json.loads((home / "asked.json").read_text()) == asked and done.is_file():
+                report = json.loads(done.read_text())
+                say(f"Checks already ran with these commands ({done})")
+        except (OSError, ValueError):
+            pass
+        if report is None:
+            for sent in ("checks.sent", "logs.sent"):
+                (home / sent).unlink(missing_ok=True)
+            with steps.step("sample"):
+                picked = codebase_profile.sample(ref)
+            plan = codebase_checks.Plan(test=a.test, build=a.build, deep=a.deep, logs=home / "logs",
+                                        run_minutes=picked.get("run_minutes") or codebase_checks.RUN_MINUTES,
+                                        hours=picked.get("hours") or codebase_checks.HOURS)
             report = codebase_profile.checked(kept, picked, plan, say, ref, steps)
-            try:
+            done.write_text(json.dumps(report, indent=1))
+            (home / "asked.json").write_text(json.dumps(asked))
+        try:
+            if not (home / "checks.sent").is_file():
                 with steps.step("post_checks"):
                     codebase_profile.post_checks(ref, codebase_profile.packed(report))
-            except errors.MetaphiError as e:
-                raise _kept_on_failure(e, codebase_profile.packed({**report, "profile": ref}), always=True) from None
-            logs = codebase_profile.logs_packed(plan.logs, ref, [k["name"] for k in kept])
-            say(f"Sending logs ({len(logs) >> 10} KiB, {plan.logs})")
-            try:
+                (home / "checks.sent").touch()
+            if not (home / "logs.sent").is_file():
+                logs = codebase_profile.logs_packed(home / "logs", ref, [k["name"] for k in kept])
+                say(f"Sending logs ({len(logs) >> 10} KiB, {home / 'logs'})")
                 codebase_profile.post_logs(ref, logs)
-            except errors.MetaphiError as e:
-                raise _kept_on_failure(e, logs, always=True, what="logs") from None
+                (home / "logs.sent").touch()
+        except errors.MetaphiError as e:
+            e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"
+            raise
+    missing = [k["given"] for k, r in zip(kept, report["repos"], strict=True)
+               if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
+    for given in missing:
+        say(_rerun(given))
     n, gone = len(doc["repos"]), doc["skipped"]
-    _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared" + (" with their tests" if plan else "")
+    _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
                + (f", {len(gone)} skipped (above)" if gone else ""))
 
 
@@ -1319,7 +1306,7 @@ examples:
   kennet twin trace.json --out twins/   write the twin into a directory
   kennet twins list                 your organization's twins, newest first
   kennet twins wait twin_...        come back for a twin: wait until it ends, write its file
-  kennet profile-codebase ./core <git-url>  compute a codebase's metadata here and share it; --dry-run to read it first
+  kennet profile-codebase ./core <git-url>  profile codebases here and share the results
   kennet delivery list              the task sets your organization holds
   kennet pull eswe-mini@0.1.0       fetch one into ./eswe-mini-0.1.0; again, only what differs
   kennet verify ./eswe-mini-0.1.0   check it against its lock, offline
@@ -1696,18 +1683,9 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("profile-codebase", help="profile git repositories for Metaphi AI")
     s.add_argument("paths", nargs="*", metavar="<path-or-url>", help="git clones or URLs (default: this directory)")
-    s.add_argument("--dry-run", action="store_true", help="write the document to a file; send nothing")
-    s.add_argument("--hide-names", action="store_true", help="send repo-1, repo-2 for repository names")
-    s.add_argument("--send", metavar="<file>", help="send a file this command wrote")
-    s.add_argument("-o", "--output", metavar="<file>", help="also write the document to this file")
-    t = s.add_argument_group("build and test")
-    t.add_argument("--test", metavar="<command>", help="test command; sees KENNET_TESTS and KENNET_JUNIT")
-    t.add_argument("--build", metavar="<command>", help="build command, run before --test")
-    t.add_argument("--deep", action="store_true", help="also run at more commits")
-    t.add_argument("--run-minutes", type=float, default=30, metavar="<m>", help="limit per run (default 30)")
-    t.add_argument("--test-hours", type=float, default=12, metavar="<h>", help="--deep: total limit (default 12)")
-    t.add_argument("--stream", action="store_true", help="print build and test output live")
-    t.add_argument("--test-logs", metavar="<dir>", help="log directory (default ./kennet-test-logs)")
+    s.add_argument("--build", metavar="<command>", help="your build command, run before --test")
+    s.add_argument("--test", metavar="<command>", help="your test command; sees KENNET_TESTS and KENNET_JUNIT")
+    s.add_argument("--deep", action="store_true", help="a model sets up the build and test (sends file contents)")
     _json_flag(s)
     s.set_defaults(fn=cmd_profile_codebase)
 

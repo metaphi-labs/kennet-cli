@@ -231,9 +231,9 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `insufficient_scope` | The key does not hold access to what the command reaches. Run `kennet login --json` once: a signed-in machine is handed new keys with no browser. If it repeats, tell the user. |
 | `auth_unavailable`, `unavailable`, `balance_unavailable`, `unreachable` | The service could not answer; nothing was started. Wait `retry_after_s` (30 seconds when absent), run the same command once more, then stop and tell the user with the `request_id`. |
 | `run_unavailable` | The twin started and failed on Metaphi AI's side; nothing was written or charged. "Upload the trace again" means run `next_step`, `kennet twin <file>`, with the options you used before. Do that once. If it fails the same way, stop and give the user both `run_id`s. |
-| `git_too_old`, `not_a_document` | `kennet profile-codebase` needs a newer git, or `--send` was given a file it did not write. Tell the user; nothing was sent. |
+| `git_too_old` | `kennet profile-codebase` needs a newer git. Tell the user; nothing was sent. |
 | `no_repository` | `kennet profile-codebase` found no full git clone at the paths given; each path's reason is in the output. Tell the user to clone it in full and run the same command. |
-| `build_without_test`, `send_with_test`, `dry_run_with_test`, `bad_test_plan` | `kennet profile-codebase` was given `--build` without `--test`, `--test` or `--deep` with `--send` or `--dry-run`, or a time of 0 or less. Fix the flags and run it again; nothing ran or was sent. |
+| `build_without_test`, `deep_with_test` | `kennet profile-codebase` was given `--build` without `--test`, or `--test` with `--deep`. Fix the flags and run it again; nothing ran or was sent. |
 | `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
 | `rate_limited_concurrent`, `rate_limited_daily` | Too many runs at once, or today. Wait for a run to end, or tell the user. |
 | `timed_out` | The twin goes on. Run `next_step`. |
