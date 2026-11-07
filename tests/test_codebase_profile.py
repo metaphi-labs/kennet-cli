@@ -418,9 +418,21 @@ def test_recipe_edits_files():
 
 def test_recipe_build_fails():
     from metaphi import codebase_setup
+    record: list = []
     said, kept, why, _ = codebase_setup._tried(codebase_setup.Recipe("", "exit 3", "true"), None, _dirs(), "",
-                                               _dirs()[0], 1, 1, *_runners())
+                                               _dirs()[0], 1, 1, *_runners(), None, record)
     assert kept is False and "exit: 3" in said and "build did not pass" in said and why == "build_failed"
+    assert record[0]["build"]["exit"] == 3 and "test" not in record[0]
+
+
+def test_recipe_records_build_beside_failing_tests():
+    from metaphi import codebase_setup
+    d, record = _dirs(), []
+    _, kept, why, _ = codebase_setup._tried(codebase_setup.Recipe("", "true", _junit_of(0, 2) + "; exit 1"), None, d,
+                                            "", d[0].parent, 1, 1, *_runners(), None, record)
+    assert kept is False and why == "pass_fraction"
+    assert record[0]["build"]["exit"] == 0 and isinstance(record[0]["build"]["seconds"], int)
+    assert (record[0]["test"]["exit"], record[0]["test"]["reported"], record[0]["test"]["passed"]) == (1, 2, 0)
 
 
 def _junit_of(passed: int, failed: int) -> str:
@@ -585,7 +597,7 @@ def test_default_finds_nothing(repo, capsys, tmp_path, monkeypatch):
     assert cli.main(["profile-codebase", str(repo)]) in (0, None)
     assert not got["setup"].called and got["checks"].called and got["logs"].called
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
-    assert [(s["by"], s["worked"], s["why"]) for s in sent["setup"]] == [("local", False, "none_found")]
+    assert [(s["by"], s["worked"], s["why"], s["tries"]) for s in sent["setup"]] == [("local", False, "none_found", [])]
     assert sent["commits"] == [{"commit": 2, "broke": True}]
     out = capsys.readouterr().out
     assert f"No build or test found in {repo}" in out and "--build '<build>' --test '<test>'" in out
@@ -623,6 +635,7 @@ def test_default_finds_commands(made, capsys, tmp_path, monkeypatch):
     assert cli.main(["profile-codebase", str(made)]) in (0, None)
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
     assert [(s["by"], s["worked"], s["steps"], s["report"]) for s in sent["setup"]] == [("local", True, 1, "junit")]
+    assert [(t["build"]["exit"], t["test"]["reported"]) for t in sent["setup"][0]["tries"]] == [(0, 2)]
     assert sent["tip"]["tests"][0]["reported"] == 2 and sent["commits"][0]["fail_to_pass"] == 1
     assert not got["setup"].called and "No build or test found" not in capsys.readouterr().out
     assert "make test" in (tmp_path / "kennet-profile" / ref / "logs" / "falcon_made" / "setup" / "recipe.json").read_text()
