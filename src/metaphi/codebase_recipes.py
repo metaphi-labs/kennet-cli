@@ -442,6 +442,7 @@ def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], pat
     why: Why | None = None if chosen else "none_found"
     report: str | None = None
     tried = 0
+    tries: list[dict[str, Any]] = []
     scratch = Path(tempfile.mkdtemp(prefix="kennet-setup-"))
     try:
         for r in chosen[:TRIES]:
@@ -454,7 +455,7 @@ def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], pat
             say(f"    trying commands ({tried} of {min(len(chosen), TRIES)})")
             with steps.step("setup_proposals", turn=tried):
                 said, kept, why_, report_ = _tried(r, engine, (src, junit), tests, logs, tried, run_minutes, _run,
-                                                   _junit, cache)
+                                                   _junit, cache, tries)
             if kept is False:
                 why = why if found else why_
             else:
@@ -470,7 +471,7 @@ def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], pat
         (logs / "recipe.json").write_text(json.dumps(found.__dict__, indent=1))
     return found, {"by": "local", "worked": found is not None, "steps": tried,
                    "seconds": round(time.monotonic() - started), "tokens": 0, "container": engine is not None,
-                   "why": None if found else why, "report": report if found else None}
+                   "why": None if found else why, "report": report if found else None, "tries": tries}
 
 
 __all__ = ["candidates", "contained", "find", "hosted"]

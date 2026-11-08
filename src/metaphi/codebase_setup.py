@@ -222,6 +222,7 @@ def find(write: Callable[[Path], None], tests: str, model: Model, engine: str | 
     from metaphi.codebase_checks import _junit, _run
     started, turns, tokens = time.monotonic(), 0, model.tokens
     snaps: list[str] = []
+    tries: list[dict[str, Any]] = []
     logs.mkdir(parents=True, exist_ok=True)
     talk = logs / "conversation.jsonl"
     turns_log = logs / "turns.jsonl"
@@ -311,7 +312,7 @@ def find(write: Callable[[Path], None], tests: str, model: Model, engine: str | 
                     say("    trying commands")
                     with steps.step("setup_proposals", turn=turns):
                         said, kept, why, report = _tried(recipe, engine, fresh(f"try-{turns:02d}"), tests, logs,
-                                                         turns, run_minutes, _run, _junit, cache)
+                                                         turns, run_minutes, _run, _junit, cache, tries)
                     if kept is not False:
                         found = Recipe(recipe.setup, recipe.build, recipe.test, kept or None, recipe.uncounted)
                         stop = True
@@ -342,7 +343,7 @@ def find(write: Callable[[Path], None], tests: str, model: Model, engine: str | 
         why = why or ("turns" if turns >= MAX_TURNS else "minutes")
     return found, {"by": "model", "worked": found is not None, "steps": turns, "seconds": round(time.monotonic() - started),
                    "tokens": model.tokens - tokens, "container": engine is not None, "why": None if found else why,
-                   "report": report if found else None}
+                   "report": report if found else None, "tries": tries}
 
 
 def _held(src: Path, only: dict[str, str] | None = None) -> dict[str, str]:
@@ -358,10 +359,16 @@ def _held(src: Path, only: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _tried(recipe: Recipe, engine: str | None, dirs: tuple[Path, Path], tests: str, logs: Path, turn: int,
-           run_minutes: float, run: Callable, junit_of: Callable, cache: Path | None = None
-           ) -> tuple[str, str | bool, Why | None, str | None]:
+           run_minutes: float, run: Callable, junit_of: Callable, cache: Path | None = None,
+           record: list[dict[str, Any]] | None = None) -> tuple[str, str | bool, Why | None, str | None]:
+    """Run one recipe from fresh files. `record` gets this try's raw outcome: the build's and the test's exit and
+    seconds and the tests counted, whether or not the try is taken."""
+    from metaphi.codebase_checks import _built, _tested
     from metaphi.codebase_reading import counted
     src, junit = dirs
+    ran: dict[str, Any] = {}
+    if record is not None:
+        record.append(ran)
     held = _held(src)
     try:
         shell = Shell(engine, recipe.image, src, junit, cache=cache)
@@ -377,7 +384,9 @@ def _tried(recipe: Recipe, engine: str | None, dirs: tuple[Path, Path], tests: s
                               ("test", recipe.test)):
             log = logged[step] = logs / f"try-{turn:02d}.{step}.log"
             with log.open("wb") as f:
-                code, _ = run(shell.line(command, tests), shell.src, shell.env(tests), run_minutes * 60, f)
+                code, took = run(shell.line(command, tests), shell.src, shell.env(tests), run_minutes * 60, f)
+            ran["build" if step != "test" else "test"] = (_built(code, took, log) if step != "test" else
+                                                          _tested(code, took, junit_of(junit), log))
             said.append(f"{step}: {_shown(code, log)}")
             if step != "test" and code != 0:
                 return no("build_failed", "the build did not pass")
