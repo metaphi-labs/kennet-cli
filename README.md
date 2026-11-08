@@ -367,7 +367,7 @@ kennet profile-codebase ./core --build 'make' --test 'make test'
 kennet profile-codebase ./core --deep
 ```
 
-`--deep` has a model set up the build and test, which sends file contents to Metaphi AI. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). If a send fails, run the same command again: it sends what was kept and runs nothing twice.
+`--deep` has a model set up the build and test, which sends file contents to Metaphi AI. A repository holding `harwell.toml` (a mainframe estate) is also built on Harwell, which compiles it there, never here, and keeps only its counts; that takes an organization key holding `harwell:runs:write`. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). If a send fails, run the same command again: it sends what was kept and runs nothing twice.
 
 Every run needs `kennet login` with an organization that may send a profile.
 
