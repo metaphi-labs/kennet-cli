@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 NAMES = frozenset(["profile", "send", "sample", "token", "setup", "setup_model", "setup_commands", "setup_proposals",
-                   "tip", "commits", "breaks", "build", "test", "post_checks"])
+                   "tip", "commits", "breaks", "build", "test", "post_checks", "harwell"])
 
 
 class Steps:
