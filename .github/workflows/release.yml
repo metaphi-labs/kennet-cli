@@ -56,7 +56,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - {os: macos-14, target: darwin-arm64}
+          - {os: macos-15, target: darwin-arm64}
           - {os: macos-15-intel, target: darwin-x86_64}
           - {os: ubuntu-24.04, target: linux-x86_64}
           - {os: ubuntu-24.04-arm, target: linux-arm64}
