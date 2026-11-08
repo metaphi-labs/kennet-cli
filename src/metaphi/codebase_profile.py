@@ -568,7 +568,7 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
             if setup:
                 got["setup"] = setup
             if built:
-                got["harwell"] = built
+                got["build_remote"] = built
             got["seconds"] = mine.steps.seconds()
             say(f"{local['name']}: took {mine.steps.said()} ({logs / 'steps.jsonl'})")
             out.append(got)

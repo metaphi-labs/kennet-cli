@@ -18,6 +18,8 @@ URL = codebase_harwell.URL
 BUILT = {"members": 3, "clean": 2, "failed": 1, "mapsets_assembled": 1, "mapsets_failed": 0, "seconds": 12.6,
          "libraries": {"PAYROLL.PROGS": 3}}
 COUNTED = {"members": 3, "clean": 2, "failed": 1, "mapsets_assembled": 1, "mapsets_failed": 0, "seconds": 13}
+SENT = {"parts": [{"kind": "member", "total": 3, "clean": 2, "failed": 1},
+                  {"kind": "mapset", "total": 1, "clean": 1, "failed": 0}], "seconds": 13}
 PRINTED = "BUILD failed · 3 members, 2 clean, 1 failed\nPAYCALC: IGYPS2121-S \"WS-RATE\" was not defined"
 
 
@@ -194,8 +196,8 @@ def test_checked(estate):
     _harwell()
     said, steps = [], Steps()
     got = codebase_harwell.checked(estate, "HEAD", "payroll", "mai_sk_" + "a" * 43, said.append, steps)
-    assert got == {"codebases": 1, **COUNTED}
-    assert "harwell" in steps.total
+    assert got == {"codebases": 1, **SENT}
+    assert "build_remote" in steps.total
     assert said[-1] == "payroll: Harwell build: 3 members, 2 clean, 1 failed; 1 mapsets assembled, 0 failed; 13s"
 
 
@@ -230,8 +232,8 @@ def test_profile_deep_sends_the_counts(estate, capsys, no_model):
     route = _harwell()
     sent = _profile(estate, "--deep")
     assert route.called
-    assert sent["harwell"] == {"codebases": 1, **COUNTED}
-    assert "harwell" in sent["seconds"]
+    assert sent["build_remote"] == {"codebases": 1, **SENT}
+    assert "build_remote" in sent["seconds"]
     text = json.dumps(sent)
     for word in ("PAYROLL", "PAYCALC", "IGYPS2121", "WS-RATE", "BUILD failed", "libraries"):
         assert word not in text, word
@@ -242,7 +244,7 @@ def test_profile_deep_sends_the_counts(estate, capsys, no_model):
 def test_profile_no_access_is_sent_as_why(estate, capsys, no_model):
     _harwell(call=httpx.Response(401))
     sent = _profile(estate, "--deep")
-    assert sent["harwell"] == {"codebases": 1, "why": "no_access"}
+    assert sent["build_remote"] == {"codebases": 1, "why": "no_access"}
     assert "harwell:runs:write" in capsys.readouterr().out
 
 
@@ -250,6 +252,6 @@ def test_profile_no_access_is_sent_as_why(estate, capsys, no_model):
 def test_profile_default_stays_here(estate, no_model):
     route = _harwell()
     sent = _profile(estate)
-    assert not route.called and "harwell" not in sent
+    assert not route.called and "build_remote" not in sent
     assert all(not str(c.request.url).startswith(URL) for c in respx.calls)
     assert any(str(c.request.url).startswith(API) for c in respx.calls)

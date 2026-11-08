@@ -1,9 +1,10 @@
 """A mainframe estate's build on Harwell, for `kennet profile-codebase --deep`.
 
-A repository holding harwell.toml is a codebase Harwell runs (github.com/harwell-project/harwell). With `--deep`, the
+A repository holding harwell.toml is a codebase Harwell runs. With `--deep`, the
 tree under the shallowest harwell.toml at the tip is sent to Harwell's `build` (https://harwell.metaphi.ai/mcp/),
 which compiles every program member and assembles every BMS mapset there, and runs nothing. Nothing compiles on this
-machine. What is kept is Harwell's counts: never a member's or a library's name, nor what the compiler printed.
+machine. What is kept is Harwell's counts, sent as the profile's neutral `build_remote` (a part per kind of unit:
+members compiled, mapsets assembled): never a member's or a library's name, nor what the compiler printed.
 
 It is called with the organization's key (`mai_sk_...`, the one `kennet login` saves or METAPHI_API_KEY), which
 Harwell admits when the key holds `harwell:runs:write`. The call is MCP's tools/call over streamable HTTP at protocol
@@ -30,7 +31,7 @@ from metaphi.steps import NONE, Steps
 URL = "https://harwell.metaphi.ai/mcp/"
 PROTOCOL = "2026-07-28"
 TASKS = "io.modelcontextprotocol/tasks"
-ARGS_MOST = 8 << 20   # Harwell keeps a task's arguments up to this (harwell/mcp/server.py TASK_ARGS_MAX)
+ARGS_MOST = 8 << 20   # the most a Harwell task's arguments may hold
 WAIT_S = 2 * 3600     # Harwell stops a run at an hour; a run its container lost is run again from the start
 AGAIN = 5             # a poll that went unanswered, asked again this many times in a row
 COUNTS = ("members", "clean", "failed", "mapsets_assembled", "mapsets_failed", "seconds")
@@ -171,14 +172,24 @@ def checked(repo: Path, sha: str, name: str, key: str, say: Callable[[str], None
         return None
     root, codebases = found
     say(f"{name}: building {root or 'the root'} on Harwell (sends its files to Metaphi AI)")
-    with steps.step("harwell"):
+    with steps.step("build_remote"):
         got = build(zipped(repo, tree, root), key, client)
     if "why" in got:
         say(f"{name}: no Harwell build: {SAID[got['why']]}")
     else:
         say(f"{name}: Harwell build: {got['members']} members, {got['clean']} clean, {got['failed']} failed; "
             f"{got['mapsets_assembled']} mapsets assembled, {got['mapsets_failed']} failed; {got['seconds']}s")
-    return {"codebases": codebases, **got}
+    return {"codebases": codebases, **sent(got)}
 
 
-__all__ = ["build", "checked", "estate", "zipped"]
+def sent(got: dict[str, Any]) -> dict[str, Any]:
+    """Harwell's counts as the profile's `build_remote` takes them: a part per kind of unit, and Harwell's seconds."""
+    if "why" in got:
+        return {"why": got["why"]}
+    return {"parts": [{"kind": "member", "total": got["members"], "clean": got["clean"], "failed": got["failed"]},
+                      {"kind": "mapset", "total": got["mapsets_assembled"] + got["mapsets_failed"],
+                       "clean": got["mapsets_assembled"], "failed": got["mapsets_failed"]}],
+            "seconds": got["seconds"]}
+
+
+__all__ = ["build", "checked", "estate", "sent", "zipped"]
