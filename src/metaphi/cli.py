@@ -1685,7 +1685,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("paths", nargs="*", metavar="<path-or-url>", help="git clones or URLs (default: this directory)")
     s.add_argument("--build", metavar="<command>", help="your build command, run before --test")
     s.add_argument("--test", metavar="<command>", help="your test command; sees KENNET_TESTS and KENNET_JUNIT")
-    s.add_argument("--deep", action="store_true", help="a model sets up the build and test (sends file contents)")
+    s.add_argument("--deep", action="store_true", help="a model sets up the build and test, and Harwell builds a mainframe estate (harwell.toml) "
+                   "(sends file contents)")
     _json_flag(s)
     s.set_defaults(fn=cmd_profile_codebase)
 

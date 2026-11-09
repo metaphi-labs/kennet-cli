@@ -494,7 +494,7 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
             say: Callable[[str], None] = print, ref: str | None = None, steps: Steps | None = None) -> dict[str, Any]:
     import dataclasses
 
-    from metaphi import codebase_recipes, codebase_setup
+    from metaphi import codebase_harwell, codebase_recipes, codebase_setup
     out, images, box, models = [], [], None, []
     steps = steps or Steps()
     if plan.test is None:
@@ -542,6 +542,9 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                 if recipe and recipe.image:
                     images.append(recipe.image)
                 return recipe
+            # a mainframe estate (harwell.toml) is built on Harwell, never here: `--deep` alone sends its files
+            built = codebase_harwell.checked(repo, local["tip"], local["name"], _key(None, False), say,
+                                             mine.steps) if plan.deep and ref else None
             try:
                 if plan.test is None:
                     say(f"{local['name']}: setup")
@@ -564,6 +567,8 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                        "test_given": plan.test is not None, "stopped": "error", "commits": [], "breaks": []}
             if setup:
                 got["setup"] = setup
+            if built:
+                got["build_remote"] = built
             got["seconds"] = mine.steps.seconds()
             say(f"{local['name']}: took {mine.steps.said()} ({logs / 'steps.jsonl'})")
             out.append(got)
