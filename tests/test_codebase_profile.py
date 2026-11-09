@@ -595,10 +595,10 @@ def test_default_finds_nothing(repo, capsys, tmp_path, monkeypatch):
     ref = "cbp_" + "4" * 16
     got = _server(ref, picks=((2,),))
     assert cli.main(["profile-codebase", str(repo)]) in (0, None)
-    assert not got["setup"].called and got["checks"].called and got["logs"].called
+    assert not got["setup"].called and not got["sample"].called and got["checks"].called and got["logs"].called
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
     assert [(s["by"], s["worked"], s["why"], s["tries"]) for s in sent["setup"]] == [("local", False, "none_found", [])]
-    assert sent["commits"] == [{"commit": 2, "broke": True}]
+    assert sent["commits"] == [] and sent["breaks"] == []
     out = capsys.readouterr().out
     assert f"No build or test found in {repo}" in out and "--build '<build>' --test '<test>'" in out
     assert "--deep" in out and "Done. 1 repository shared" in out
@@ -636,32 +636,37 @@ def test_default_finds_commands(made, capsys, tmp_path, monkeypatch):
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
     assert [(s["by"], s["worked"], s["steps"], s["report"]) for s in sent["setup"]] == [("local", True, 1, "junit")]
     assert [(t["build"]["exit"], t["test"]["reported"]) for t in sent["setup"][0]["tries"]] == [(0, 2)]
-    assert sent["tip"]["tests"][0]["reported"] == 2 and sent["commits"][0]["fail_to_pass"] == 1
+    assert sent["tip"]["tests"][0]["reported"] == 2 and sent["tip"]["tests"][0]["passed"] == 2
+    assert sent["commits"] == [] and sent["runs"] == 0 and not got["sample"].called
     assert not got["setup"].called and "No build or test found" not in capsys.readouterr().out
     assert "make test" in (tmp_path / "kennet-profile" / ref / "logs" / "falcon_made" / "setup" / "recipe.json").read_text()
+    # past commits, before and after each change, only when asked
+    assert cli.main(["profile-codebase", str(made), "--commits"]) in (0, None)
+    sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
+    assert got["sample"].call_count == 1 and sent["commits"][0]["fail_to_pass"] == 1
 
 
 @respx.mock
 def test_rerun_sends_what_was_kept(tested, capsys, tmp_path):
     ref = "cbp_" + "1" * 16
     got = _server(ref, picks=((2,),), checks=503)
-    assert cli.main(["profile-codebase", str(tested), "--test", "echo SAID-BY-TESTS", "--json"]) != 0
+    assert cli.main(["profile-codebase", str(tested), "--test", "echo SAID-BY-TESTS", "--commits", "--json"]) != 0
     assert "run the same command again" in json.loads(capsys.readouterr().out)["error"]["next_step"]
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))
     assert [c["commit"] for c in sent["repos"][0]["commits"]] == [2] and sent["repos"][0]["test_given"]
     assert not got["logs"].called and got["sample"].call_count == 1
     got["checks"].mock(return_value=httpx.Response(200, json={"id": ref}))
     got["logs"].mock(return_value=httpx.Response(503))
-    assert cli.main(["profile-codebase", str(tested), "--test", "echo SAID-BY-TESTS"]) != 0
+    assert cli.main(["profile-codebase", str(tested), "--test", "echo SAID-BY-TESTS", "--commits"]) != 0
     assert got["sample"].call_count == 1 and json.loads(gzip.decompress(got["checks"].calls[-1].request.content)) == sent
     names, said = _unpacked(got["logs"].calls[-1].request.content)
     assert said["kennet-logs.json"]["profile"] == ref and b"SAID-BY-TESTS" in said["0/000-tip.test-1.log"]
     assert not any(tested.name in n for n in names)
     checks = got["checks"].call_count
     got["logs"].mock(return_value=httpx.Response(200, json={"id": ref}))
-    assert cli.main(["profile-codebase", str(tested), "--test", "echo SAID-BY-TESTS"]) in (0, None)
+    assert cli.main(["profile-codebase", str(tested), "--test", "echo SAID-BY-TESTS", "--commits"]) in (0, None)
     assert got["checks"].call_count == checks and got["sample"].call_count == 1
-    assert cli.main(["profile-codebase", str(tested), "--test", "true"]) in (0, None)
+    assert cli.main(["profile-codebase", str(tested), "--test", "true", "--commits"]) in (0, None)
     assert got["sample"].call_count == 2
 
 
