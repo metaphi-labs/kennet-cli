@@ -309,6 +309,20 @@ def orgs() -> list[dict[str, Any]]:
     return call("GET", "/keys/orgs")
 
 
+def mnda(sign: bool = False) -> dict[str, Any]:
+    """The mutual NDA between the person's organization and Metaphi AI: {org, status, signed_at, url, version}, with
+    `status` one of `signed`, `pending` (`url` is where it is signed) or `none`. `sign` makes one for the person when
+    the organization has none, and answers it pending with its link; one signed or pending already is answered as is."""
+    every = orgs()
+    if not every:
+        raise need("you are in no organization; make one, then ask again", "no_organization", "kennet org create <name>")
+    org = every[0]["id"]   # a person is in one organization
+    got = call("GET", f"/keys/orgs/{org}/mnda")
+    if sign and got.get("status") == "none":
+        got = call("POST", f"/keys/orgs/{org}/mnda")
+    return {"org": org, **{k: got.get(k) for k in ("status", "signed_at", "url", "version")}}
+
+
 def create_org(name: str) -> dict[str, Any]:
     """Make the signed-in person's organization: they own it, and it asks Metaphi AI to be approved for Kennet
     (`access` is "pending" until it is, "active" after). What a later command says of the sign-in follows."""

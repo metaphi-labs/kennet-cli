@@ -125,6 +125,47 @@ def test_login_complete_with_nothing_under_way_names_the_next_command(capsys):
 
 
 @respx.mock
+def test_mnda_says_where_it_stands_and_sign_makes_one_only_when_there_is_none(monkeypatch, capsys):
+    config.save({"token": "tok", "email": "alice@example.test", "org": "acme"})
+    respx.get(f"{A}/keys/orgs").respond(json=[{"id": "acme", "role": "member", "grants": []}])
+    at = respx.get(f"{A}/keys/orgs/acme/mnda").respond(
+        json={"status": "none", "signed_at": None, "url": None, "version": "2026-08"})
+    made = respx.post(f"{A}/keys/orgs/acme/mnda").respond(
+        json={"status": "pending", "signed_at": None, "url": "https://metaphi.ai/nda/pt_1", "version": "2026-08"})
+    assert cli.main(["mnda", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"org": "acme", "status": "none", "signed_at": None, "url": None,
+                                                   "version": "2026-08", "next_step": "kennet mnda sign"}
+    assert not made.called
+    assert cli.main(["mnda", "sign", "--json"]) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert got["status"] == "pending" and got["url"] == "https://metaphi.ai/nda/pt_1" and got["next_step"] is None
+    assert made.call_count == 1
+    at.respond(json={"status": "signed", "signed_at": "2026-11-09T10:00:00+00:00", "url": None, "version": "2026-08"})
+    assert cli.main(["mnda", "sign"]) == 0   # signed already: nothing is made, nothing opens
+    assert made.call_count == 1 and "is signed (2026-11-09)" in capsys.readouterr().out
+
+
+@respx.mock
+def test_mnda_for_a_person_in_no_organization_names_org_create(capsys):
+    config.save({"token": "tok", "email": "alice@example.test"})
+    respx.get(f"{A}/keys/orgs").respond(json=[])
+    assert cli.main(["mnda", "--json"]) == cli.AUTH
+    got = json.loads(capsys.readouterr().out)["error"]
+    assert got["code"] == "no_organization" and got["next_step"] == "kennet org create <name>"
+
+
+def test_the_partner_guide_names_only_commands_and_flags_the_parser_takes(capsys):
+    assert cli.main(["skill", "show", "partner"]) == 0
+    guide = capsys.readouterr().out
+    assert guide == skill.PARTNER_GUIDE and f"kennet {cli.__version__}" in guide.splitlines()[0]
+    lines = [x.split("#")[0].strip() for x in guide.splitlines() if x.startswith("kennet ")]
+    assert len(lines) >= 4
+    for line in lines:
+        cli.parser().parse_args(line.split()[1:])   # exits on a command or flag that is not there
+    assert "skill show partner" in skill.PARTNER_STUB and skill.PARTNER_STUB.startswith("---\nname: kennet-partner\n")
+
+
+@respx.mock
 def test_whoami_asks_the_server_and_says_the_org_the_balance_and_the_key(monkeypatch, capsys):
     assert cli.main(["whoami", "--json"]) == cli.AUTH
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "not_signed_in"

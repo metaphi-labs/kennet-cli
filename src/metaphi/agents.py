@@ -363,16 +363,21 @@ def _note(rows: list[dict[str, Any]], row: dict[str, Any]) -> None:
 
 # --- what each harness gets ---
 
-def skill_path(h: Harness, root: Path | None) -> Path:
-    return (root / h.project_skills if root else h.skills()) / skill.NAME / "SKILL.md"
+def skill_path(h: Harness, root: Path | None, name: str = skill.NAME) -> Path:
+    return (root / h.project_skills if root else h.skills()) / name / "SKILL.md"
 
 
-def _write_skill(path: Path, force: bool) -> str:
+def skill_paths(h: Harness, root: Path | None) -> list[str]:
+    """Every skill kennet writes for a harness (`skill.SKILLS`), where it reads them."""
+    return [str(skill_path(h, root, name)) for name in skill.SKILLS]
+
+
+def _write_skill(path: Path, force: bool, stub: str = skill.STUB) -> str:
     text = _read(path) if path.exists() else None
     if text is not None and skill.MARK not in text and not force:
         return "kept"   # someone else's file
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(skill.STUB, encoding="utf-8")
+    path.write_text(stub, encoding="utf-8")
     return "written"
 
 
@@ -507,20 +512,26 @@ def install(names: list[str] | None = None, project: bool = False, force: bool =
     targets: dict[str, tuple[str, str, bool]] = {}
     rows = []
     for h in harnesses:
+        # each skill (`skill.SKILLS`); the row's `skill` is the Kennet one, `skills` says each by its name
+        written: dict[str, str] = {}
+        for name, stub in skill.SKILLS.items():
+            path = skill_path(h, root, name)
+            if str(path) not in skills:
+                try:
+                    skills[str(path)] = _write_skill(path, force, stub)
+                except _Unreadable:
+                    skills[str(path)] = "kept"   # not text kennet wrote, so not kennet's
+                except OSError as e:
+                    skills[str(path)] = f"skipped: cannot write {path}: {e.strerror or e}"
+            written[name] = skills[str(path)]
+            if written[name] == "written":
+                _note(ledger, {"harness": h.name, "kind": "skill", "target": str(path)})
         path = skill_path(h, root)
-        if str(path) not in skills:
-            try:
-                skills[str(path)] = _write_skill(path, force)
-            except _Unreadable:
-                skills[str(path)] = "kept"   # not text kennet wrote, so not kennet's
-            except OSError as e:
-                skills[str(path)] = f"skipped: cannot write {path}: {e.strerror or e}"
-        state = skills[str(path)]
-        row: dict[str, Any] = {"harness": h.name, "skill": str(path), "skill_state": state.split(":")[0]}
+        state = written[skill.NAME]
+        row: dict[str, Any] = {"harness": h.name, "skill": str(path), "skill_state": state.split(":")[0],
+                               "skills": {name: x.split(":")[0] for name, x in written.items()}}
         if state.startswith("skipped"):
             row["skill_detail"] = state.split(": ", 1)[1]
-        if row["skill_state"] == "written":
-            _note(ledger, {"harness": h.name, "kind": "skill", "target": str(path)})
         target, via = _mcp_target(h, root)
         if target not in targets:
             state, detail, made = _add_mcp(h, root, u)
@@ -550,7 +561,7 @@ def _in_scope(row: dict[str, Any], h: Harness, root: Path | None) -> bool:
     """Whether a ledger row is of this scope, as things are now: the person's config in effect, or this
     repository's."""
     if row["kind"] == "skill":
-        return row["target"] == str(skill_path(h, root))
+        return row["target"] in skill_paths(h, root)
     return row["target"] == _mcp_target(h, root)[0]
 
 
@@ -568,7 +579,7 @@ def remove(names: list[str] | None = None, project: bool = False) -> dict[str, A
     left: list[dict[str, str]] = []
     keep: list[dict[str, Any]] = []
     # a skill file of an earlier kennet, from before the ledger, is the chosen harnesses' to remove
-    legacy = [{"harness": h.name, "kind": "skill", "target": str(skill_path(h, root))} for h in harnesses]
+    legacy = [{"harness": h.name, "kind": "skill", "target": target} for h in harnesses for target in skill_paths(h, root)]
     done: set[tuple[str, str]] = set()
     for x in mine + [x for x in legacy if not any(y["target"] == x["target"] for y in ledger)]:
         key = (x["kind"], x["target"])
@@ -612,6 +623,13 @@ def status(project: bool = False) -> list[dict[str, Any]]:
                 text = ""
             row["skill"] = str(path)
             row["skill_state"] = "absent" if text is None else "written" if skill.MARK in text else "kept"
+            row["skills"] = {}
+            for name in skill.SKILLS:
+                try:
+                    each = _read(skill_path(h, root, name))
+                except (_Unreadable, OSError):
+                    each = ""
+                row["skills"][name] = "absent" if each is None else "written" if skill.MARK in each else "kept"
             row["mcp"] = "installed" if any(x["kind"] == "mcp" for x in ours) else "absent"
         rows.append(row)
     return rows

@@ -84,6 +84,8 @@ def test_install_writes_each_shared_folder_once_and_registers_the_server_with_ea
     assert rows["codex"]["skill"] == rows["cursor"]["skill"] == str(h / ".agents/skills/kennet/SKILL.md")
     for r in rows.values():
         assert Path(r["skill"]).read_text() == skill.STUB and r["mcp"] == "added", r
+        partner = Path(r["skill"]).parent.parent / skill.PARTNER_NAME / "SKILL.md"
+        assert partner.read_text() == skill.PARTNER_STUB and r["skills"] == {"kennet": "written", "kennet-partner": "written"}
     assert json.loads((h / ".claude.json").read_text())["mcpServers"]["kennet"]["url"] == U
     assert f'url = "{U}"' in (h / ".hum/config.toml").read_text()
     assert (h / ".codex/config.toml").read_text() == f'[mcp_servers.kennet]\nurl = "{U}"\n'
@@ -94,11 +96,12 @@ def test_install_writes_each_shared_folder_once_and_registers_the_server_with_ea
     code, got = _run(capsys, "install")   # again: nothing changes, and what kennet added before is its own
     assert code == 0 and {r["mcp"] for r in got["harnesses"]} == {"installed"} and len(_adds(home)) == 4
     ledger = json.loads((home / "cfg" / "config.json").read_text())["agents"]
-    assert len(ledger) == 8   # a skill and a server a harness, never twice
+    assert len(ledger) == 12   # two skills and a server a harness, never twice
 
     code, got = _run(capsys, "remove")
     assert code == 0 and got["left"] == []
     assert not (h / ".agents/skills/kennet").exists() and not (h / ".claude/skills/kennet").exists()
+    assert not (h / ".agents/skills/kennet-partner").exists() and not (h / ".claude/skills/kennet-partner").exists()
     assert not any((h / p).exists() for p in (".cursor/mcp.json", ".codex/config.toml", ".claude.json",
                                               ".hum/config.toml"))
     assert "agents" not in json.loads((home / "cfg" / "config.json").read_text())
@@ -300,7 +303,8 @@ def test_list_reads_the_files_alone_and_says_nothing_of_a_harness_not_here(home,
     code, got = _run(capsys, "list")
     rows = _rows(got)
     assert code == 0 and rows["hum"] == {"harness": "hum", "present": True, "skill_state": "written",
-                                         "mcp": "installed", "skill": str(home / "home/.hum/skills/kennet/SKILL.md")}
+                                         "mcp": "installed", "skill": str(home / "home/.hum/skills/kennet/SKILL.md"),
+                                         "skills": {"kennet": "written", "kennet-partner": "written"}}
     assert rows["claude"] == {"harness": "claude", "present": False}
 
 

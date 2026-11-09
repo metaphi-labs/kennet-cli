@@ -27,8 +27,8 @@ CHECKS_SCHEMA = "kennet.repo_checks.v1"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
 NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
-NOTICE = ("The metadata is shared with Metaphi AI for screening for a formal pilot. If you do not have a signed MNDA "
-          "in place, please contact your Metaphi AI SPOC")
+NOTICE = ("Counts and ids are shared with Metaphi AI to assess the codebase for licensing; your source code stays "
+          "here. A mutual NDA first: `kennet mnda`")
 MAX_BLOB = 2_000_000
 
 SOURCE = frozenset(["go", "py", "java", "kt", "kts", "scala", "groovy", "jelly", "js", "jsx", "mjs", "cjs", "ts", "tsx", "vue", "svelte", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "fs", "rb", "php", "rs", "dart", "swift", "cbl", "cob", "cpy", "jcl", "bms", "st", "gs", "pl", "pm", "f", "f90", "for", "sh", "bash", "ps1", "m", "mm", "ex", "exs", "erl", "hs", "ml", "clj", "lua", "vb", "pas", "sql", "r", "jl", "zig", "nim", "sol", "v", "sv", "vhd", "vhdl", "tf", "abap", "rpg", "pli"])
