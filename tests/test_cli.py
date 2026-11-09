@@ -1290,6 +1290,7 @@ def test_org_create_says_what_accounts_says_comes_next(capsys):
     assert capsys.readouterr().out == f"{waits}\n"   # no `Next:`: nothing to run until the mail comes
     made.respond(json={"id": "acme", "name": "Acme", "role": "owner", "access": "active",
                        "message": "Acme is made and approved.", "next_step": "kennet login"})
+    respx.post(f"{A}/keys/cli").respond(401)   # this sign-in has ended: the keys come with the next one
     assert cli.main(["org", "create", "Acme", "--json"]) == 0
     got = json.loads(capsys.readouterr().out)
     assert (got["message"], got["next_step"]) == ("Acme is made and approved.", "kennet login")
