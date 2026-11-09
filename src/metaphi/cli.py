@@ -323,10 +323,18 @@ def cmd_twin(a: argparse.Namespace) -> None:
 PROFILE_HOME = "kennet-profile"
 
 
-def _rerun(given: str) -> str:
+def _rerun(given: str, tries: list[dict] | None = None) -> str:
     q = shlex.quote(given)
-    return (f"No build or test found in {given}. Run again with your commands:\n"
-            f"  kennet profile-codebase {q} --build '<build>' --test '<test>'\n"
+    ran = [t for t in tries or [] if t.get("test")]
+    if ran:
+        t = max(ran, key=lambda t: t["test"].get("reported") or 0)["test"]
+        what = (f"{t['passed']} of {t['reported']} tests passed" if t.get("reported") is not None
+                else f"the tests exited {t.get('exit')}")
+        head = (f"In {given} the build ran and {what} on this machine. If the tests need a service (a database, a "
+                "cache), run again where it is up, or with your commands:\n")
+    else:
+        head = f"No build or test found in {given}. Run again with your commands:\n"
+    return (head + f"  kennet profile-codebase {q} --build '<build>' --test '<test>'\n"
             "Or have a model set it up (this sends file contents to Metaphi AI):\n"
             f"  kennet profile-codebase {q} --deep")
 
@@ -386,10 +394,11 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         except errors.MetaphiError as e:
             e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"
             raise
-    missing = [k["given"] for k, r in zip(kept, report["repos"], strict=True)
+    missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
+               for k, r in zip(kept, report["repos"], strict=True)
                if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
-    for given in missing:
-        say(_rerun(given))
+    for given, tries in missing:
+        say(_rerun(given, tries))
     n, gone = len(doc["repos"]), doc["skipped"]
     _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
                + (f", {len(gone)} skipped (above)" if gone else ""))

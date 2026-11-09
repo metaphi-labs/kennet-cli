@@ -844,3 +844,11 @@ def test_work_dir_is_a_git_repo_with_its_submodules(tmp_path):
     cc._write(top, tree, into)
     assert (into / "vendor/lib/a.c").read_text() == "int a;\n" and (into / ".git").is_dir()
     assert subprocess.run(["git", "status", "--porcelain"], cwd=into, capture_output=True, text=True, check=True).stdout.strip() == ""
+
+
+def test_the_closing_line_says_the_build_ran_when_only_the_tests_failed():
+    tries = [{"build": {"exit": 0, "seconds": 5},
+              "test": {"exit": 1, "seconds": 6, "report": "summary", "reported": 10, "passed": 0}}]
+    said = cli._rerun("./core", tries)
+    assert "the build ran and 0 of 10 tests passed" in said and "No build or test found" not in said
+    assert "No build or test found in ./core" in cli._rerun("./core", [])
