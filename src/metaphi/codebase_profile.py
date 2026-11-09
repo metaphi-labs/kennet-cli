@@ -17,10 +17,12 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from metaphi import __version__, codebase_checks, codebase_sites, errors
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
-from metaphi.twin import UPLOAD, _client, _key, _send
+from metaphi.twin import _client, _key, _send
 
 SCHEMA = "kennet.repo_metadata.v10"
 CHECKS_SCHEMA = "kennet.repo_checks.v1"
@@ -586,63 +588,79 @@ def packed(doc: dict[str, Any]) -> bytes:
     return gzip.compress(json.dumps(doc, separators=(",", ":")).encode(), mtime=0)
 
 
+# Every call here is idempotent (the reference is the profile's hash; checks and logs sent again are taken), so each
+# is sent again through a slow or busy moment, not just a dropped packet. The server answers within a minute
+# (`unavailable`, 503, when the volume is slow); Modal ends a request at 150 s; so a call waits 90 s for its answer,
+# a body as long as it takes to send, and the whole call at most SEND_BUDGET_S.
+SEND = httpx.Timeout(30.0, connect=10.0, read=90.0, write=600.0)
+SEND_RETRIES = 4
+SEND_BUDGET_S = 300.0
+
+
 def _named(e: errors.MetaphiError) -> errors.MetaphiError:
     if e.code == "insufficient_scope":
         e.message += ("; it takes kennet:codebase_profile:write. `kennet login` hands this machine keys that hold it "
-                      "once your organization does; if it does not yet, ask your Metaphi AI contact")
+                      "once your organization does")
         e.next_step = "kennet login"
     return e
 
 
-def post(body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+# where a call says it is sending again: the command's progress line (stderr under --json); set by the command
+say: Callable[[str], None] | None = None
+
+
+def _call(method: str, path: str, sleep: Callable[[float], None], answered: bool = True, **kw: Any) -> dict[str, Any]:
+    """One call of the profile API on the saved key, its JSON answer (`answered`; else none is read); an answer that
+    is not JSON (a proxy's page, a cut-off request) is sent again, then said as `unavailable`, never a crash."""
     with _client(_key(None, False)) as h:
-        try:
-            return _send(h, "POST", "/codebase-profiles", sleep, content=body, timeout=UPLOAD,
-                         headers={"content-encoding": "gzip", "content-type": "application/json"}).json()
-        except errors.MetaphiError as e:
-            raise _named(e)
+        tries = 0
+        while True:
+            try:
+                r = _send(h, method, path, sleep, retries=SEND_RETRIES, budget_s=SEND_BUDGET_S,
+                          timeout=SEND, say=say, **kw)
+            except errors.MetaphiError as e:
+                raise _named(e)
+            if not answered:
+                return {}
+            try:
+                got = r.json()
+            except ValueError:
+                got = None
+            if isinstance(got, dict):
+                return got
+            tries += 1
+            if tries > 1:
+                raise errors.APIError(f"the service answered HTTP {r.status_code} with no result; run the same "
+                                      "command again", code="unavailable", retryable=True,
+                                      request_id=r.headers.get("request-id"))
+            sleep(2.0)
+
+
+def post(body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    return _call("POST", "/codebase-profiles", sleep, content=body,
+                 headers={"content-encoding": "gzip", "content-type": "application/json"})
 
 
 def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
-    with _client(_key(None, False)) as h:
-        try:
-            _send(h, "GET", "/codebase-profiles/access", sleep)
-        except errors.MetaphiError as e:
-            raise _named(e)
+    _call("GET", "/codebase-profiles/access", sleep, answered=False)
 
 
 def sample(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    with _client(_key(None, False)) as h:
-        try:
-            return _send(h, "POST", f"/codebase-profiles/{ref}/sample", sleep).json()
-        except errors.MetaphiError as e:
-            raise _named(e)
+    return _call("POST", f"/codebase-profiles/{ref}/sample", sleep)
 
 
 def setup_reach(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    with _client(_key(None, False)) as h:
-        try:
-            return _send(h, "POST", f"/codebase-profiles/{ref}/setup", sleep).json()
-        except errors.MetaphiError as e:
-            raise _named(e)
+    return _call("POST", f"/codebase-profiles/{ref}/setup", sleep)
 
 
 def post_logs(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    with _client(_key(None, False)) as h:
-        try:
-            return _send(h, "POST", f"/codebase-profiles/{ref}/logs", sleep, content=body, timeout=UPLOAD,
-                         headers={"content-type": "application/gzip"}).json()
-        except errors.MetaphiError as e:
-            raise _named(e)
+    return _call("POST", f"/codebase-profiles/{ref}/logs", sleep, content=body,
+                 headers={"content-type": "application/gzip"})
 
 
 def post_checks(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    with _client(_key(None, False)) as h:
-        try:
-            return _send(h, "POST", f"/codebase-profiles/{ref}/checks", sleep, content=body, timeout=UPLOAD,
-                         headers={"content-encoding": "gzip", "content-type": "application/json"}).json()
-        except errors.MetaphiError as e:
-            raise _named(e)
+    return _call("POST", f"/codebase-profiles/{ref}/checks", sleep, content=body,
+                 headers={"content-encoding": "gzip", "content-type": "application/json"})
 
 
 def logs_packed(root: Path, ref: str, names: list[str]) -> bytes:

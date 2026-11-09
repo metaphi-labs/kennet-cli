@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from metaphi import cli, codebase_profile, config
+from metaphi import cli, codebase_profile, config, errors
 
 API = config.DEFAULT_API
 SECRET = ["Falcon", "falcon_core", "hunter2", "seller@acme.test", "Grace Hopper", "git.acme.test", "ledger.py",
@@ -894,3 +894,20 @@ def test_the_closing_line_says_the_build_ran_when_only_the_tests_failed():
     said = cli._rerun("./core", tries)
     assert "the build ran and 0 of 10 tests passed" in said and "No build or test found" not in said
     assert "No build or test found in ./core" in cli._rerun("./core", [])
+
+
+@respx.mock
+def test_a_request_modal_cut_off_is_sent_again_and_said_never_a_crash(monkeypatch):
+    """Modal ends a request at 150 s with a 303 and no body: the profile is sent again (its reference is its hash),
+    the retry is said with the request id, and an answer that is never JSON ends as `unavailable`, not `internal`."""
+    said: list[str] = []
+    monkeypatch.setattr(codebase_profile, "say", said.append)
+    route = respx.post(f"{API}/codebase-profiles").mock(side_effect=[
+        httpx.Response(303, headers={"request-id": "req_cut", "location": "/x"}),
+        httpx.Response(200, json={"id": "cbp_0123456789abcdef", "object": "codebase_profile"})])
+    assert codebase_profile.post(b"x", sleep=lambda s: None)["id"] == "cbp_0123456789abcdef"
+    assert route.call_count == 2 and "req_cut" in said[0] and "cut off at HTTP 303" in said[0]
+    respx.post(f"{API}/codebase-profiles").mock(return_value=httpx.Response(200, text="<html>proxy</html>"))
+    with pytest.raises(errors.APIError) as e:
+        codebase_profile.post(b"x", sleep=lambda s: None)
+    assert e.value.code == "unavailable" and e.value.retryable

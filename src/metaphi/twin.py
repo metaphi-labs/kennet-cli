@@ -62,38 +62,60 @@ def _retry_after(r: httpx.Response) -> float | None:
 class _Tries:
     """One request's retries: how many are left, and how much of the budget."""
 
-    def __init__(self, sleep: Callable[[float], None]) -> None:
-        self.sleep, self.made, self.until = sleep, 0, time.monotonic() + BUDGET_S
+    def __init__(self, sleep: Callable[[float], None], retries: int | None = None,
+                 budget_s: float | None = None) -> None:
+        self.sleep, self.made = sleep, 0
+        self.retries = RETRIES if retries is None else retries
+        self.until = time.monotonic() + (BUDGET_S if budget_s is None else budget_s)
 
     def again(self, retry_after: float | None = None) -> bool:
         """Wait before one more attempt and say True; False once the retries or the budget are spent, or the
         service asks for a wait the budget does not hold."""
         left = self.until - time.monotonic()
         wait = random.uniform(0, BASE_S * 2 ** self.made) if retry_after is None else retry_after
-        if self.made >= RETRIES or left <= 0 or wait > left:
+        if self.made >= self.retries or left <= 0 or wait > left:
             return False
         self.made += 1
         self.sleep(wait)
         return True
 
 
-def _send(h: httpx.Client, method: str, path: str, sleep: Callable[[float], None], **kw: Any) -> httpx.Response:
-    """One request, tried again when it failed in transit or the API says waiting may help; a refusal raises."""
-    tries = _Tries(sleep)
+def _send(h: httpx.Client, method: str, path: str, sleep: Callable[[float], None], *, retries: int | None = None,
+          budget_s: float | None = None, say: Callable[[str], None] | None = None, **kw: Any) -> httpx.Response:
+    """One request, tried again when it failed in transit or the API says waiting may help; a refusal raises. A
+    redirect is no answer of the API: Modal ends a request at 150 s with a 303 and an empty body, so it is a timeout,
+    tried again like one."""
+    tries = _Tries(sleep, retries, budget_s)
+
+    def again(why: str, request_id: str | None = None, after: float | None = None) -> bool:
+        began = time.monotonic()
+        if not tries.again(after):
+            return False
+        if say is not None:   # never silent: what happened, how long it waited, and the id we look it up by
+            say(f"{method} {path}: {why}" + (f" (request {request_id})" if request_id else "")
+                + f"; sent again after {time.monotonic() - began:.0f}s ({tries.made}/{tries.retries})")
+        return True
+
     while True:
         try:
             r = h.request(method, path, **kw)
         except httpx.TransportError as e:
-            if tries.again():
+            if again(f"no answer ({type(e).__name__})"):
                 continue
             raise errors.APIError(f"the twin service did not answer ({type(e).__name__})", code="unreachable",
                                   retryable=True) from None
-        if r.status_code < 400:
+        if r.status_code < 300:
             return r
+        if r.status_code < 400:
+            if again(f"cut off at HTTP {r.status_code}", r.headers.get("request-id")):
+                continue
+            raise errors.APIError("the service took too long to answer", code="unavailable", retryable=True,
+                                  request_id=r.headers.get("request-id"))
         error = _error(r)
         error.retry_after_s = _retry_after(r)
         # a rate limit is the caller's to wait out; a 409 in flight or a 5xx clears in seconds
-        if not error.retryable or error.type == "rate_limit_error" or not tries.again(error.retry_after_s):
+        if not error.retryable or error.type == "rate_limit_error" or not again(
+                f"HTTP {r.status_code} {error.code or ''}".rstrip(), error.request_id, error.retry_after_s):
             raise error
 
 
