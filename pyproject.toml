@@ -1,6 +1,6 @@
 [project]
 name = "kennet"
-version = "0.1.45"
+version = "0.1.46"
 description = "The command line for Kennet, Metaphi AI's RL infrastructure."
 readme = "README.md"
 requires-python = ">=3.10"
