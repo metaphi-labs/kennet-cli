@@ -358,7 +358,11 @@ kennet profile-codebase ./core ./billing
 kennet profile-codebase https://github.com/acme/core.git
 ```
 
-The metadata is shared with Metaphi AI for screening for a formal pilot. If you do not have a signed MNDA in place, please contact your Metaphi AI SPOC
+Counts and ids are shared with Metaphi AI to assess the codebase for licensing; your source code stays here. Not signed in yet? At a terminal it signs you in first, then goes on.
+
+Want a mutual NDA in place first? `kennet mnda` says where your organization's stands, and `kennet mnda sign` makes one and opens it to sign in the browser. A profile never waits on it.
+
+Working through a coding agent? `kennet agents install` gives it the `kennet-partner` skill: the whole path, from install to profile to NDA.
 
 Not signed in yet? At a terminal it signs you in first (the browser opens on a code), then goes on: no `kennet login` beforehand.
 

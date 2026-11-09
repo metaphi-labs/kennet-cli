@@ -169,6 +169,25 @@ def cmd_login(a: argparse.Namespace) -> None:
     _signed_in(a, accounts.login(say=say, open_browser=not a.no_browser))
 
 
+def cmd_mnda(a: argparse.Namespace) -> None:
+    """Where the organization's mutual NDA with Metaphi AI stands; `sign` makes one when it has none and opens it in
+    the browser at a terminal. Never needed before a profile, which sends counts and ids alone."""
+    sign = a.verb == "sign"
+    got = accounts.mnda(sign=sign)
+    status, url = got["status"], got.get("url")
+    if sign and status == "pending" and url and not a.json and not a.no_browser and _interactive():
+        accounts.webbrowser.open(url)
+    got["next_step"] = "kennet mnda sign" if status == "none" else None
+    lines = {
+        "signed": [f"The mutual NDA between {got['org']} and Metaphi AI is signed"
+                   + (f" ({got['signed_at'][:10]})." if got.get("signed_at") else ".")],
+        "pending": [f"The mutual NDA with Metaphi AI is ready to sign: {url}",
+                    "It is signed in the browser (DocuSign); Metaphi AI countersigns."],
+        "none": [f"{got['org']} has no mutual NDA with Metaphi AI.", "Next: kennet mnda sign"],
+    }[status]
+    _out(a, got, *lines)
+
+
 def cmd_logout(a: argparse.Namespace) -> None:
     accounts.logout()
     print("Signed out.")
@@ -350,12 +369,16 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     try:
         codebase_profile.key_ready()
     except accounts.Error as e:
+        # signed in with no key saved (the organization was made or approved since): pick the keys up, no browser
+        if e.code == "no_api_key" and accounts.pickup() is not None:
+            codebase_profile.key_ready()
         # a person at a terminal who has not signed in signs in here, then the profile goes on: one command, not two
-        if e.code != "not_signed_in" or a.json or not _interactive():
+        elif e.code != "not_signed_in" or a.json or not _interactive():
             raise
-        got = accounts.login(say=say)
-        say(f"Signed in as {got.get('email')}.")
-        codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
+        else:
+            got = accounts.login(say=say)
+            say(f"Signed in as {got.get('email')}.")
+            codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
     say(codebase_profile.NOTICE)
     with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
@@ -653,6 +676,12 @@ def cmd_org_create(a: argparse.Namespace) -> None:
     # One that does not say: the same, from `access`
     step = made.get("next_step", "kennet login" if ready else None)
     step = step if isinstance(step, str) and step else None
+    # what the new organization holds already (a codebase profile, at once) comes to this machine now, no browser
+    got = accounts.pickup() if step == "kennet login" else None
+    if got and str(got.get("api_key") or "").startswith(config.KEY_PREFIX):
+        held = got.get("scopes") or []
+        message += " Its keys are saved on this machine."
+        step = "kennet profile-codebase <path>" if PROFILE_SCOPE in held and TWIN_SCOPE not in held else "kennet whoami"
     _out(a, {"id": made["id"], "name": made.get("name"), "role": made.get("role"),
              "access": made.get("access"), "message": message, "next_step": step},
          message, f"Next: {step}" if step else "")
@@ -1321,6 +1350,7 @@ examples:
   kennet keys create ci | gh secret set METAPHI_API_KEY   a key for CI, straight into its secret
   kennet keys revoke github-ci      stop it working; asks first at a terminal, --yes elsewhere
   kennet whoami                     who you are, your organization, its balance, the key in use
+  kennet mnda                       your organization's mutual NDA with Metaphi AI; `kennet mnda sign` to sign one
   kennet twin trace.json --test     a free test twin, written to trace.twin.json
   kennet twin trace.json --no-wait  start a twin and return its id
   kennet twin trace.json --out twins/   write the twin into a directory
@@ -1392,6 +1422,14 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_login)
     sub.add_parser("logout", help="sign out everywhere this sign-in is used, and revoke its keys").set_defaults(
         fn=cmd_logout)
+    s = sub.add_parser("mnda", help="the mutual NDA between your organization and Metaphi AI: where it stands")
+    _json_flag(s)
+    s.set_defaults(fn=cmd_mnda, verb=None, no_browser=False)
+    verbs = s.add_subparsers(dest="verb", metavar="<verb>")
+    v = verbs.add_parser("sign", help="make it when there is none, and open it to sign in the browser")
+    _json_flag(v)
+    v.add_argument("--no-browser", action="store_true", help="print the link; open nothing")
+    v.set_defaults(fn=cmd_mnda)
     s = sub.add_parser("whoami", help="who the servers say you are: your organizations, their balance, and whether "
                        "the key in use works")
     _json_flag(s)
@@ -1741,8 +1779,10 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("skill", help="the Kennet skill: the guide a coding agent follows")
     s.set_defaults(fn=lambda a, s=s: s.print_help())
     verbs = s.add_subparsers(dest="verb", metavar="<verb>")
-    verbs.add_parser("show", help="print the guide an agent follows, for this version").set_defaults(
-        fn=lambda a: print(skill.GUIDE, end=""))
+    v = verbs.add_parser("show", help="print the guide an agent follows, for this version")
+    v.add_argument("guide", nargs="?", choices=sorted(skill.GUIDES), default="kennet",
+                   help="kennet (the whole CLI, the default) or partner (licensing an asset to Metaphi AI)")
+    v.set_defaults(fn=lambda a: print(skill.GUIDES[a.guide], end=""))
     _agents_install(verbs.add_parser("install", help="the same as `agents install`"))
     _agents_remove(verbs.add_parser("remove", help="the same as `agents remove`"))
 

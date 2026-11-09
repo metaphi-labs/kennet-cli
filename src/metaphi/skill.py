@@ -439,3 +439,207 @@ person watching a run wants `kennet tail <owner/name> <run-id>` in their own ter
   the finding and what was tried, and tell the user.
 """
 
+
+# --- the partner skill: for an agent helping a data owner, or a broker, license an asset to Metaphi AI ---
+
+PARTNER_NAME = "kennet-partner"
+
+PARTNER_STUB = f"""---
+name: {PARTNER_NAME}
+description: Licensing private data to Metaphi AI through the `kennet` CLI, for the people who own it and the brokers who represent them. Use when the user wants to license, sell, value or price a private data asset, or find out what theirs is worth for AI training: a codebase or its git history; exports of company systems (Slack, email, calendars, Notion, Jira, Confluence); or robotics and physical-world data (CAD models and assemblies, ROS bags, MCAP, sensor time series, teleoperation episodes, robot descriptions). Also when they want a mutual NDA with Metaphi AI, or mention metaphi.ai/partners, `kennet profile-codebase` or `kennet mnda`.
+---
+{MARK}
+
+# Kennet for partners
+
+Run `kennet skill show partner` and follow what it prints: it is the guide for the version of the CLI on this
+machine.
+
+If `kennet` is not found, ask the user, install it, then run `kennet skill show partner`:
+
+```sh
+brew install metaphi-labs/tap/kennet                 # macOS, Linux with Homebrew
+curl -fsSL https://metaphi.ai/kennet.sh | sh         # or the signed install script
+pip install kennet                                   # or anywhere with Python 3.10+
+```
+"""
+
+PARTNER_GUIDE = f"""# Kennet for partners (kennet {__version__})
+
+Metaphi AI licenses private data to build training environments for AI agents: places where an agent learns by
+doing real work and is checked on the result. The user owns such data, or is a broker for people who do. Your job:
+find out what they have, show them its shape and what makes it valuable, get it profiled or summarised with the
+least of their time, and put a mutual NDA in place when they want one. Nothing on this path waits on a person at
+Metaphi AI, and nothing leaves their machine that they did not choose to send.
+
+| Asset | Examples | What the CLI does today |
+| --- | --- | --- |
+| Software | git repositories; mainframe estates; hardware designs (RTL) under git | `kennet profile-codebase` (step 3) |
+| Company systems | Slack, Teams, email, calendars, Notion, Confluence, Jira, Linear, CRM exports | a local shape summary (step 4) |
+| Robotics and physical | CAD and PLM exports, ROS bags, MCAP, sensor time series, teleoperation episodes (LeRobot, RLDS, HDF5), robot descriptions (URDF, MJCF, SDF) | a local shape summary (step 4) |
+
+## Rules
+
+- Metadata before content. Look at the data through names, sizes, counts, dates, formats and schemas: what
+  `ls`, `du`, `find`, `wc -l`, `git` counts and a format's own info tool print. Opening a file's contents puts
+  them in your context, which goes to your model's provider: ask the user before you read any message, document,
+  email, source file or recording, and read the fewest lines that answer the question. Never paste content into
+  the chat or into a summary.
+- Nothing is uploaded except by the commands below, and only after you have told the user what they send. Only
+  `--deep` sends file contents: never add it without asking in those words.
+- Add `--json` to every `kennet` command. stdout is one JSON object, the result or `{{"error": {{...}}}}`; progress
+  is on stderr. Decide from `error.code` and `error.next_step`, never from message text. Exit 0 done; 1 failed;
+  2 the command line was wrong; 3 a sign-in is needed (`next_step`); 4 try the same call later; 5 `kennet` is too
+  old (`next_step` upgrades it: ask, run it, go on).
+- Never ask the user to paste a token, key or code into the chat. The one code they handle is the sign-in's
+  `user_code`, which they check on the page.
+- Respect their time: one question at a time, a default they can accept with "yes", and say what you will run
+  before you run it.
+
+## 1. Ask what they have
+
+Ask one question: which data they have the most of, or could hand over soonest, using the three rows above. Then
+ask where it is: a path on this machine, a git URL, or a system it still lives in (then: whether they can export
+it, and in what format). A broker may have several owners' assets: take them one at a time, and keep each
+owner's apart in what you write.
+
+## 2. Survey its shape, locally
+
+Measure; do not judge from a glance. Use only what is installed: if a tool is missing, say what it would add and
+go on without it. Put the numbers in a short table for the user as you go.
+
+### Software
+
+```sh
+git -C <repo> rev-list --count HEAD                      # commits
+git -C <repo> log --reverse --format=%as | sed -n '1p;$p' # first and last commit dates
+git -C <repo> shortlog -sn HEAD | wc -l                  # people who committed (a count; do not print names)
+git -C <repo> ls-files | sed -n 's/.*\\.//p' | sort | uniq -c | sort -rn | head   # languages, by extension
+git -C <repo> ls-files | grep -Eci '(^|/)(tests?|spec|__tests__)/|_test\\.|\\.test\\.|test_'   # test files
+ls <repo>/.github/workflows <repo>/.gitlab-ci.yml <repo>/Jenkinsfile 2>/dev/null   # CI
+```
+
+`git rev-parse --is-shallow-repository` must print `false`: a shallow clone has lost its history. A mainframe
+estate (COBOL, JCL, copybooks) counts as software; `harwell.toml` at its root marks one Kennet can build.
+
+What makes it rich: years of commits by many engineers solving real problems; tests beside the code that pin
+behaviour, so a change can be checked; a build that runs; CI; changes small enough to read one at a time; and
+work whose correctness or speed can be measured (systems, performance, compilers, mainframe, hardware design).
+
+### Company systems
+
+Know the export's shape before anything else. Common ones:
+
+| System | Export | Count with |
+| --- | --- | --- |
+| Slack | a zip: `users.json`, `channels.json`, a folder a channel of one JSON file a day | `jq length users.json channels.json`; `ls <channel> \\| wc -l` (days); first and last file names (span) |
+| Google Workspace | Takeout: mail as `.mbox`, calendars as `.ics`, Drive files | `grep -c '^From ' <file>.mbox`; `grep -c BEGIN:VEVENT <file>.ics` |
+| Microsoft 365 | `.pst` mailboxes, Teams exports | file count and size |
+| Notion, Confluence | Markdown or HTML pages with CSV databases, as a zip | page and database counts; folder depth |
+| Jira, Linear | CSV or JSON of issues | `wc -l`; the header row's field names |
+
+What makes it rich: many people working together over months, not one channel; threads that end in a decision
+or an outcome; links across systems (a ticket named in chat, a doc in a meeting); timestamps and identities kept
+consistent across exports; and the actions people took, not only what they said. These exports name real people
+and companies: Metaphi AI replaces them with consistent synthetic stand-ins (Kennet's synthetic twinning) before
+anything is used. Tell the user so if they ask.
+
+### Robotics and physical
+
+| Data | Formats | Count with |
+| --- | --- | --- |
+| Recordings | ROS 1 `.bag`, ROS 2 `.db3` or `.mcap`, MCAP | `mcap info <file>` or `ros2 bag info <dir>`: duration, topics, message counts and rates |
+| Episodes | LeRobot (Parquet and MP4 with `meta/info.json`), RLDS (TFRecord), HDF5, NPZ | `meta/info.json` fields (fps, features, episode count); `h5ls -r` for HDF5 structure |
+| Time series | CSV, Parquet, vendor logs | header row; row count; sampling rate from the time column |
+| Video | MP4 and image folders a camera | `ffprobe` duration, resolution and frame rate |
+| CAD | native (SolidWorks `.sldprt`/`.sldasm`, Creo, NX, CATIA, Fusion, Onshape), neutral (STEP, IGES), meshes (STL, OBJ) | counts by format; assemblies vs parts; PDM or PLM revision history |
+| Robot models | URDF, MJCF, SDF | joints and links (`grep -c '<joint'`) |
+
+What makes it rich: hours across many tasks, places and conditions; actions recorded beside observations (the
+commands or teleoperation, not only the sensors); sensors on one clock; episodes cut at task boundaries with
+success or failure marked; calibration and a robot description, so a run can be replayed or simulated. For CAD:
+native files with their feature history, revisions with the reason for each, assemblies with constraints, and
+checks that can be run on a design (simulation, tolerances, manufacturability, test results).
+
+## 3. Profile a codebase
+
+Name the repository: a path to a full git clone or a git URL. A broker names several in one run.
+
+```sh
+kennet profile-codebase ./their-repo --json
+kennet profile-codebase ./core ./billing https://github.com/acme/ledger.git --json
+```
+
+It reads the git history, then builds and tests the latest commit once in a temporary copy on this machine (in
+Docker or Podman when one is running). It sends counts and ids: line, size and token counts per commit and file
+with numbers in place of names, the repository's name and commit hashes, and the build and test run's exit codes,
+timings, test counts and logs. File names, authors, commit messages and source are never sent. Everything sent is
+kept in `./kennet-profile/<reference>/`: show the user that folder if they ask what left.
+
+- Exit 0: `{{"reference": "cbp_..."}}`. Tell the user it was received, the reference, and that Metaphi AI reviews
+  every profile and replies by email to the address they signed in with. There is nothing to poll.
+- `not_signed_in` (exit 3): under `--json` it does not sign in by itself. Run `kennet login --json`, give the user
+  `verification_uri_complete` and `user_code` exactly as printed (they sign in with their work email and check the
+  code matches), then `kennet login --complete --json`, then the same profile command. At a terminal without
+  `--json`, `kennet profile-codebase` signs the user in itself.
+- `no_api_key` with `reason` `no_organization`: ask what their company is called, `kennet org create "<name>"
+  --json`, then `kennet login --json` and the profile again.
+- When it found no way to build and test a repository, the output says so. Read its README, CI config and build
+  files (ask first: that is content), propose the commands, and on the user's yes run the same command with
+  `--test '<command>'`, and `--build '<command>'` when the build is separate. Tests that need a service (a
+  database, a cache) run where that service is up.
+- `--commits` also builds and tests a sample of past commits: a stronger profile, and slower. Offer it once the
+  first one is in.
+- A send that failed: run the same command again. It sends what was kept and runs nothing twice.
+
+## 4. A shape summary, for everything else
+
+Write what step 2 measured to `./metaphi-asset-summary.md` in the user's working directory: the asset and its
+systems or formats, size, time span, counts, the richness points above each marked present, absent or unknown,
+and what the user wants (a licence, a price, a conversation). Counts and formats only: no names of people,
+channels, customers, projects or files unless the user asks for them in it. Show it to the user. It leaves the
+machine only if they send it: to agent@metaphi.ai, or with the profile command for that asset once this CLI has
+one (`kennet --help` lists them; this version profiles codebases alone).
+
+## 5. A mutual NDA
+
+A profile never needs one: it sends counts and ids. Offer it when the user asks about confidentiality, or before
+anything beyond a profile or a summary is shared.
+
+```sh
+kennet mnda --json
+```
+
+`status` is `signed` (`signed_at` says when), `pending` (`url` is where the user signs it) or `none`. For `none`,
+on the user's yes:
+
+```sh
+kennet mnda sign --json
+```
+
+It makes the mutual NDA between their organization and Metaphi AI and answers `pending` with its `url`. Give the
+user the link: they sign it in the browser (DocuSign), and Metaphi AI countersigns. `kennet mnda --json` shows
+`signed` once they have.
+
+## 6. Errors
+
+| `error.code` | What to do |
+| --- | --- |
+| `not_signed_in`, `login_expired`, `login_refused` | Step 3's sign-in, from its start. |
+| `authorization_pending` | The user has not approved the code yet: `kennet login --complete --json` again, or wait for them. |
+| `no_api_key` | Read `reason`: `no_organization` is in step 3; `awaiting_approval` means Metaphi AI approves their organization and mails the user; anything else, run `kennet login --json` once, then tell the user the message. |
+| `no_organization` | From `kennet mnda`: make their organization as in step 3, then the same command. |
+| `insufficient_scope` | `kennet login --json` once (no browser on a signed-in machine), then the same command. If it repeats, tell the user the message. |
+| `git_too_old` | Ask the user to update git; nothing was sent. |
+| `no_repository` | No full git clone at a path given; each path's reason is in the output. Ask the user to clone it in full (not shallow), then run the same command. |
+| `build_without_test` | `--build` was given without `--test`: add the test command. |
+| `deep_with_test` | `--deep` and `--test` do not go together: drop one. |
+| `network`, `service_unavailable`, `unavailable` | Nothing changed. Wait `retry_after_s` (30 seconds when absent), run the same command once more, then tell the user with `request_id`. |
+| `upgrade_required` | Ask the user, run `next_step`, then the same command. |
+| anything else | If `retryable`, wait and try once more. Else tell the user the message and `request_id`. |
+
+For anything beyond licensing (twins, deliveries, members and keys), `kennet skill show` is the full guide.
+"""
+
+SKILLS = {NAME: STUB, PARTNER_NAME: PARTNER_STUB}   # each written where each harness reads skills
+GUIDES = {"kennet": GUIDE, "partner": PARTNER_GUIDE}   # `kennet skill show [<guide>]`
