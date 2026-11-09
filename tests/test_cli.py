@@ -125,6 +125,21 @@ def test_login_complete_with_nothing_under_way_names_the_next_command(capsys):
 
 
 @respx.mock
+def test_a_new_organization_that_can_profile_at_once_saves_its_keys_and_points_at_the_profile(capsys):
+    config.save({"token": "tok", "email": "alice@example.test"})
+    respx.post(f"{A}/keys/orgs").respond(json={
+        "id": "acme", "name": "Acme", "role": "owner", "access": "pending", "next_step": "kennet login",
+        "message": "Acme is made and you own it. It can send codebase profiles now."})
+    respx.post(f"{A}/keys/cli").respond(json={"email": "alice@example.test", "org": "acme",
+                                              "api_key": "mai_sk_live", "test_api_key": "mai_sk_test_t",
+                                              "scopes": ["kennet:codebase_profile:write"]})
+    assert cli.main(["org", "create", "Acme", "--json"]) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert got["next_step"] == "kennet profile-codebase <path>" and got["message"].endswith("saved on this machine.")
+    assert config.load()["api_key"] == "mai_sk_live"
+
+
+@respx.mock
 def test_mnda_says_where_it_stands_and_sign_makes_one_only_when_there_is_none(monkeypatch, capsys):
     config.save({"token": "tok", "email": "alice@example.test", "org": "acme"})
     respx.get(f"{A}/keys/orgs").respond(json=[{"id": "acme", "role": "member", "grants": []}])

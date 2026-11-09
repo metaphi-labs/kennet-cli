@@ -195,6 +195,20 @@ def test_a_person_not_signed_in_signs_in_and_the_profile_goes_on(repo, capsys, m
     assert signed and "Signed in as owner@example.com." in capsys.readouterr().out
 
 
+@respx.mock
+def test_signed_in_with_no_key_saved_picks_the_keys_up_and_goes_on(repo, monkeypatch):
+    monkeypatch.delenv("METAPHI_API_KEY")
+    config.save({"token": "tok", "email": "owner@example.com"})
+    picked = respx.post(f"{config.DEFAULT_ACCOUNTS}/keys/cli").respond(json={
+        "email": "owner@example.com", "org": "acme", "api_key": "mai_sk_" + "c" * 43,
+        "test_api_key": "mai_sk_test_" + "d" * 40})
+    respx.get(f"{API}/codebase-profiles/access").mock(return_value=httpx.Response(204))
+    monkeypatch.setattr(codebase_profile, "profiled", lambda *a, **k: (_ for _ in ()).throw(SystemExit(0)))
+    with pytest.raises(SystemExit):
+        cli.main(["profile-codebase", str(repo), "--json"])
+    assert picked.called
+
+
 def test_away_from_a_terminal_not_signed_in_names_kennet_login(repo, capsys, monkeypatch):
     monkeypatch.delenv("METAPHI_API_KEY")
     monkeypatch.setattr(cli, "_interactive", lambda: False)

@@ -369,12 +369,16 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     try:
         codebase_profile.key_ready()
     except accounts.Error as e:
+        # signed in with no key saved (the organization was made or approved since): pick the keys up, no browser
+        if e.code == "no_api_key" and accounts.pickup() is not None:
+            codebase_profile.key_ready()
         # a person at a terminal who has not signed in signs in here, then the profile goes on: one command, not two
-        if e.code != "not_signed_in" or a.json or not _interactive():
+        elif e.code != "not_signed_in" or a.json or not _interactive():
             raise
-        got = accounts.login(say=say)
-        say(f"Signed in as {got.get('email')}.")
-        codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
+        else:
+            got = accounts.login(say=say)
+            say(f"Signed in as {got.get('email')}.")
+            codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
     say(codebase_profile.NOTICE)
     with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
@@ -672,6 +676,12 @@ def cmd_org_create(a: argparse.Namespace) -> None:
     # One that does not say: the same, from `access`
     step = made.get("next_step", "kennet login" if ready else None)
     step = step if isinstance(step, str) and step else None
+    # what the new organization holds already (a codebase profile, at once) comes to this machine now, no browser
+    got = accounts.pickup() if step == "kennet login" else None
+    if got and str(got.get("api_key") or "").startswith(config.KEY_PREFIX):
+        held = got.get("scopes") or []
+        message += " Its keys are saved on this machine."
+        step = "kennet profile-codebase <path>" if PROFILE_SCOPE in held and TWIN_SCOPE not in held else "kennet whoami"
     _out(a, {"id": made["id"], "name": made.get("name"), "role": made.get("role"),
              "access": made.get("access"), "message": message, "next_step": step},
          message, f"Next: {step}" if step else "")
