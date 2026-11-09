@@ -347,7 +347,15 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     if a.deep and a.test:
         raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
     say = _progress(a)
-    codebase_profile.key_ready()
+    try:
+        codebase_profile.key_ready()
+    except accounts.Error as e:
+        # a person at a terminal who has not signed in signs in here, then the profile goes on: one command, not two
+        if e.code != "not_signed_in" or a.json or not _interactive():
+            raise
+        got = accounts.login(say=say)
+        say(f"Signed in as {got.get('email')}.")
+        codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
     say(codebase_profile.NOTICE)
     with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
