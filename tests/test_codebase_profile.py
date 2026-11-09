@@ -175,6 +175,34 @@ def test_key_checked_first(repo, capsys, monkeypatch):
     assert "kennet:codebase_profile:write" in err and "kennet login" in err
 
 
+@respx.mock
+def test_a_person_not_signed_in_signs_in_and_the_profile_goes_on(repo, capsys, monkeypatch):
+    monkeypatch.delenv("METAPHI_API_KEY")
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    signed = []
+
+    def login(say=print, **kw):
+        signed.append(True)
+        monkeypatch.setenv("METAPHI_API_KEY", "mai_sk_" + "b" * 43)
+        return {"email": "owner@example.com"}
+
+    monkeypatch.setattr(cli.accounts, "login", login)
+    respx.get(f"{API}/codebase-profiles/access").mock(return_value=httpx.Response(204))
+    monkeypatch.setattr(codebase_profile, "profiled", lambda *a, **k: pytest.fail("profiled") if not signed else
+                        (_ for _ in ()).throw(SystemExit(0)))
+    with pytest.raises(SystemExit):
+        cli.main(["profile-codebase", str(repo)])
+    assert signed and "Signed in as owner@example.com." in capsys.readouterr().out
+
+
+def test_away_from_a_terminal_not_signed_in_names_kennet_login(repo, capsys, monkeypatch):
+    monkeypatch.delenv("METAPHI_API_KEY")
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+    monkeypatch.setattr(cli.accounts, "login", lambda **kw: pytest.fail("signed in"))
+    assert cli.main(["profile-codebase", str(repo)]) == 3
+    assert "kennet login" in capsys.readouterr().err
+
+
 def test_tokens_offline(repo, monkeypatch):
     import socket
     monkeypatch.setattr(socket.socket, "connect", lambda *a: (_ for _ in ()).throw(OSError("no network")))

@@ -360,6 +360,8 @@ kennet profile-codebase https://github.com/acme/core.git
 
 The metadata is shared with Metaphi AI for screening for a formal pilot. If you do not have a signed MNDA in place, please contact your Metaphi AI SPOC
 
+Not signed in yet? At a terminal it signs you in first (the browser opens on a code), then goes on: no `kennet login` beforehand.
+
 It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept in `./kennet-profile/<id>/`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
 
 ```sh
