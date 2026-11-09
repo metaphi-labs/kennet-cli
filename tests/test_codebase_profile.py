@@ -911,3 +911,23 @@ def test_a_request_modal_cut_off_is_sent_again_and_said_never_a_crash(monkeypatc
     with pytest.raises(errors.APIError) as e:
         codebase_profile.post(b"x", sleep=lambda s: None)
     assert e.value.code == "unavailable" and e.value.retryable
+
+
+@respx.mock
+def test_a_signed_in_key_is_checked_from_its_saved_scopes_with_no_call(monkeypatch):
+    """The sign-in says what its keys hold; the check before a profile reads that, and asks the server only for a key
+    from elsewhere (METAPHI_API_KEY), whose scopes this machine does not know."""
+    access = respx.get(f"{API}/codebase-profiles/access").mock(return_value=httpx.Response(204))
+    monkeypatch.delenv("METAPHI_API_KEY", raising=False)
+    key = config.KEY_PREFIX + "login"
+    cfg = {"token": "t", "api_key": key, "api_key_from": "login", "scopes": [codebase_profile.SCOPE]}
+    monkeypatch.setattr(config, "load", lambda: cfg)
+    codebase_profile.key_ready()
+    assert access.call_count == 0
+    cfg["scopes"] = ["kennet:twin"]
+    with pytest.raises(errors.AuthError) as e:
+        codebase_profile.key_ready()
+    assert e.value.code == "insufficient_scope" and e.value.next_step == "kennet login" and access.call_count == 0
+    monkeypatch.setenv("METAPHI_API_KEY", config.KEY_PREFIX + "elsewhere")
+    codebase_profile.key_ready()
+    assert access.call_count == 1

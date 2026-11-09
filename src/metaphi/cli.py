@@ -89,7 +89,7 @@ def _invitation_line(i: dict) -> str:
 
 
 # What a sign-in's keys hold decides what to run next: an organization may hold one offering and not the others.
-PROFILE_SCOPE = "kennet:codebase_profile:write"
+PROFILE_SCOPE = "kennet:codebase_profile:write"   # codebase_profile.SCOPE; that module loads only when a profile runs
 TWIN_SCOPE = "kennet:twin"
 
 

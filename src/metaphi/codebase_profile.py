@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from metaphi import __version__, codebase_checks, codebase_sites, errors
+from metaphi import __version__, codebase_checks, codebase_sites, config, errors
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 from metaphi.twin import _client, _key, _send
@@ -641,7 +641,19 @@ def post(body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, 
                  headers={"content-encoding": "gzip", "content-type": "application/json"})
 
 
+SCOPE = "kennet:codebase_profile:write"
+
+
 def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
+    """Whether the key may send a profile, before any local work: from the scopes the sign-in saved with it, with
+    no call. A key from elsewhere (METAPHI_API_KEY, `kennet login --with-api-key`) has no scopes saved here, so the
+    server is asked once."""
+    key, cfg = _key(None, False), config.load()
+    if key == cfg.get("api_key") and cfg.get("api_key_from") == "login" and isinstance(cfg.get("scopes"), list):
+        if SCOPE in cfg["scopes"]:
+            return
+        raise _named(errors.AuthError("this API key does not hold access to codebase profiles",
+                                      code="insufficient_scope"))
     _call("GET", "/codebase-profiles/access", sleep, answered=False)
 
 
