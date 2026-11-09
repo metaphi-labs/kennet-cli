@@ -13,7 +13,7 @@ MARK = "<!-- written by `kennet skill install`; edits are overwritten -->"
 
 STUB = f"""---
 name: {NAME}
-description: Kennet, Metaphi AI's RL infrastructure, driven through its CLI, `kennet`: synthetic twinning of agent traces, and the RL task sets (deliveries) an organization holds, and the organization's members and service keys. Use when the user wants to add, remove or change the role of a member of their Metaphi organization (`kennet org members`), or to list, create or revoke the organization's CI or service keys (`kennet keys`), or when the user wants to list, pull, verify or update delivered RL tasks (`kennet delivery`), or when the user wants real people, companies, accounts or secrets in a trace, log or transcript file replaced with consistent synthetic stand-ins (a "synthetic twin") before sharing it or training on it, or when the user is authoring, checking or running RL tasks (Harbor bundles) on Kennet: task CI, `eval_ready`, rollouts, wrong solutions; or mentions Metaphi, Kennet twins, `kennet twin`, or a `mai_sk_` key.
+description: Kennet, Metaphi AI's RL infrastructure, driven through its CLI, `kennet`: anonymizing agent traces (by synthetic twinning), and the RL task sets (deliveries) an organization holds, and the organization's members and service keys. Use when the user wants to add, remove or change the role of a member of their Metaphi organization (`kennet org members`), or to list, create or revoke the organization's CI or service keys (`kennet keys`), or when the user wants to list, pull, verify or update delivered RL tasks (`kennet delivery`), or when the user wants to anonymize a trace, log or transcript file: real people, companies, accounts or secrets in it replaced with consistent synthetic stand-ins (a "synthetic twin") before sharing it or training on it, or when the user is authoring, checking or running RL tasks (Harbor bundles) on Kennet: task CI, `eval_ready`, rollouts, wrong solutions; or mentions Metaphi, Kennet twins, `kennet twin`, or a `mai_sk_` key.
 ---
 {MARK}
 
@@ -32,10 +32,10 @@ pip install kennet                       # or anywhere with Python 3.10+
 
 GUIDE = f"""# Kennet from the command line (kennet {__version__})
 
-Kennet is Metaphi AI's RL infrastructure. Through this CLI it offers synthetic twinning (steps 3 to 5) and the
-task sets your organization holds, its deliveries (step 6). Steps 1 and 2, the sign-in, are the same for both.
-Joining an organization that invited the user, and managing its members and service keys, is step 7; authoring
-and checking tasks is step 8.
+Kennet is Metaphi AI's RL infrastructure. Through this CLI it anonymizes agent traces, by synthetic twinning (steps
+3 to 5), and the task sets your organization holds, its deliveries (step 6). Steps 1 and 2, the sign-in, are the
+same for both. Joining an organization that invited the user, and managing its members and service keys, is step 7;
+authoring and checking tasks is step 8.
 
 `kennet twin <file>` uploads one trace file (JSON, JSON Lines or text) to Metaphi AI's service and writes its
 synthetic twin beside it: the same file, same structure, with every real person, private organization, account
@@ -541,8 +541,8 @@ Know the export's shape before anything else. Common ones:
 What makes it rich: many people working together over months, not one channel; threads that end in a decision
 or an outcome; links across systems (a ticket named in chat, a doc in a meeting); timestamps and identities kept
 consistent across exports; and the actions people took, not only what they said. These exports name real people
-and companies: Metaphi AI replaces them with consistent synthetic stand-ins (Kennet's synthetic twinning) before
-anything is used. Tell the user so if they ask.
+and companies: Metaphi AI anonymizes them before anything is used, replacing each with a consistent synthetic
+stand-in (synthetic twinning). Tell the user so if they ask.
 
 ### Robotics and physical
 
