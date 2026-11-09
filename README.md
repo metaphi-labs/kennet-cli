@@ -360,14 +360,15 @@ kennet profile-codebase https://github.com/acme/core.git
 
 The metadata is shared with Metaphi AI for screening for a formal pilot. If you do not have a signed MNDA in place, please contact your Metaphi AI SPOC
 
-It builds and tests each repository on this machine, in Docker or Podman when one is running, in temporary copies; your code stays here. Everything it sends is kept in `./kennet-profile/<id>/`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
+It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept in `./kennet-profile/<id>/`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
 
 ```sh
 kennet profile-codebase ./core --build 'make' --test 'make test'
+kennet profile-codebase ./core --commits
 kennet profile-codebase ./core --deep
 ```
 
-`--deep` has a model set up the build and test, which sends file contents to Metaphi AI. A repository holding `harwell.toml` (a mainframe estate) is also built on Harwell, which compiles it there, never here, and keeps only its counts; that takes an organization key holding `harwell:runs:write`. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). If a send fails, run the same command again: it sends what was kept and runs nothing twice.
+`--commits` also builds and tests a sample of past commits, before and after each change; it takes longer. `--deep` has a model set up the build and test (and samples past commits too), which sends file contents to Metaphi AI. A repository holding `harwell.toml` (a mainframe estate) is also built on Harwell, which compiles it there, never here, and keeps only its counts; that takes an organization key holding `harwell:runs:write`. Test commands see `KENNET_TESTS` and `KENNET_JUNIT` (a directory for JUnit XML). If a send fails, run the same command again: it sends what was kept and runs nothing twice.
 
 Every run needs `kennet login` with an organization that may send a profile.
 

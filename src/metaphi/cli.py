@@ -323,10 +323,18 @@ def cmd_twin(a: argparse.Namespace) -> None:
 PROFILE_HOME = "kennet-profile"
 
 
-def _rerun(given: str) -> str:
+def _rerun(given: str, tries: list[dict] | None = None) -> str:
     q = shlex.quote(given)
-    return (f"No build or test found in {given}. Run again with your commands:\n"
-            f"  kennet profile-codebase {q} --build '<build>' --test '<test>'\n"
+    ran = [t for t in tries or [] if t.get("test")]
+    if ran:
+        t = max(ran, key=lambda t: t["test"].get("reported") or 0)["test"]
+        what = (f"{t['passed']} of {t['reported']} tests passed" if t.get("reported") is not None
+                else f"the tests exited {t.get('exit')}")
+        head = (f"In {given} the build ran and {what} on this machine. If the tests need a service (a database, a "
+                "cache), run again where it is up, or with your commands:\n")
+    else:
+        head = f"No build or test found in {given}. Run again with your commands:\n"
+    return (head + f"  kennet profile-codebase {q} --build '<build>' --test '<test>'\n"
             "Or have a model set it up (this sends file contents to Metaphi AI):\n"
             f"  kennet profile-codebase {q} --deep")
 
@@ -351,7 +359,8 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         home.mkdir(parents=True, exist_ok=True)
         (home / "profile.json").write_text(json.dumps(doc, indent=1))
         say(f"Sent ({ref}); a copy is in {home / 'profile.json'}")
-        asked = {"test": a.test, "build": a.build, "deep": a.deep}
+        commits = a.commits or a.deep   # past commits are opt-in; the default builds and tests the tip once
+        asked = {"test": a.test, "build": a.build, "deep": a.deep, "commits": commits}
         done, report = home / "checks.json", None
         try:
             if json.loads((home / "asked.json").read_text()) == asked and done.is_file():
@@ -362,12 +371,14 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         if report is None:
             for sent in ("checks.sent", "logs.sent"):
                 (home / sent).unlink(missing_ok=True)
-            with steps.step("sample"):
-                picked = codebase_profile.sample(ref)
+            picked: dict = {}
+            if commits:
+                with steps.step("sample"):
+                    picked = codebase_profile.sample(ref)
             plan = codebase_checks.Plan(test=a.test, build=a.build, deep=a.deep, logs=home / "logs",
                                         run_minutes=picked.get("run_minutes") or codebase_checks.RUN_MINUTES,
                                         hours=picked.get("hours") or codebase_checks.HOURS)
-            report = codebase_profile.checked(kept, picked, plan, say, ref, steps)
+            report = codebase_profile.checked(kept, picked or None, plan, say, ref, steps)
             done.write_text(json.dumps(report, indent=1))
             (home / "asked.json").write_text(json.dumps(asked))
         try:
@@ -383,10 +394,11 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         except errors.MetaphiError as e:
             e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"
             raise
-    missing = [k["given"] for k, r in zip(kept, report["repos"], strict=True)
+    missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
+               for k, r in zip(kept, report["repos"], strict=True)
                if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
-    for given in missing:
-        say(_rerun(given))
+    for given, tries in missing:
+        say(_rerun(given, tries))
     n, gone = len(doc["repos"]), doc["skipped"]
     _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
                + (f", {len(gone)} skipped (above)" if gone else ""))
@@ -1687,6 +1699,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--test", metavar="<command>", help="your test command; sees KENNET_TESTS and KENNET_JUNIT")
     s.add_argument("--deep", action="store_true", help="a model sets up the build and test, and Harwell builds a mainframe estate (harwell.toml) "
                    "(sends file contents)")
+    s.add_argument("--commits", action="store_true", help="also build and test a sample of past commits, before "
+                   "and after each change (slower; the default runs the tip once)")
     _json_flag(s)
     s.set_defaults(fn=cmd_profile_codebase)
 
