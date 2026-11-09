@@ -89,7 +89,7 @@ def _invitation_line(i: dict) -> str:
 
 
 # What a sign-in's keys hold decides what to run next: an organization may hold one offering and not the others.
-PROFILE_SCOPE = "kennet:codebase_profile:write"
+PROFILE_SCOPE = "kennet:codebase_profile:write"   # codebase_profile.SCOPE; that module loads only when a profile runs
 TWIN_SCOPE = "kennet:twin"
 
 
@@ -366,6 +366,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     if a.deep and a.test:
         raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
     say = _progress(a)
+    codebase_profile.say = say
     try:
         codebase_profile.key_ready()
     except accounts.Error as e:
@@ -680,7 +681,10 @@ def cmd_org_create(a: argparse.Namespace) -> None:
     got = accounts.pickup() if step == "kennet login" else None
     if got and str(got.get("api_key") or "").startswith(config.KEY_PREFIX):
         held = got.get("scopes") or []
-        message += " Its keys are saved on this machine."
+        # the keys came: say that, and not the server's "run `kennet login` for its keys", which is done
+        message = (f"{made.get('name') or made['id']} is made and you own it; its keys are saved on this machine."
+                   + (" Metaphi AI approves the rest of what it asked for; you're emailed when it's done."
+                      if made.get("access") == "pending" else ""))
         step = "kennet profile-codebase <path>" if PROFILE_SCOPE in held and TWIN_SCOPE not in held else "kennet whoami"
     _out(a, {"id": made["id"], "name": made.get("name"), "role": made.get("role"),
              "access": made.get("access"), "message": message, "next_step": step},

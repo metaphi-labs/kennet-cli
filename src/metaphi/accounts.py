@@ -192,14 +192,16 @@ def finish(sleep: Callable[[float], None] = time.sleep, wait_s: float | None = N
 def _keep(body: dict[str, Any], token: str) -> None:
     """Save what the server handed this machine: the token, and the organization's keys or why none came."""
     cfg = config.load()
-    for name in ("pending", "device_code", "test_api_key", "org", "no_api_key", "no_api_key_code", "no_api_key_org",
-                 "invitation", "step_up"):
+    for name in ("pending", "device_code", "test_api_key", "org", "scopes", "no_api_key", "no_api_key_code",
+                 "no_api_key_org", "invitation", "step_up"):
         cfg.pop(name, None)  # the server revoked the keys it handed last; a fresh sign-in is the step-up
     cfg.update({"token": token, "email": body.get("email")})
     if all(str(body.get(k) or "").startswith(config.KEY_PREFIX) for k in ("api_key", "test_api_key")):
         cfg.update({"api_key": body["api_key"], "test_api_key": body["test_api_key"], "api_key_from": "login"})
         if isinstance(body.get("org"), str) and body["org"]:
             cfg["org"] = body["org"]
+        if isinstance(body.get("scopes"), list):   # what the keys hold: a command checks it here, with no call
+            cfg["scopes"] = [x for x in body["scopes"] if isinstance(x, str)]
     else:
         # handed no key: a key the last sign-in handed speaks for an organization this one is not given, so it goes
         # (one the person saved by hand stays theirs), and what is kept is why (and the organization it is about),

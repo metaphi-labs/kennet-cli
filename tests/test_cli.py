@@ -135,7 +135,7 @@ def test_a_new_organization_that_can_profile_at_once_saves_its_keys_and_points_a
                                               "scopes": ["kennet:codebase_profile:write"]})
     assert cli.main(["org", "create", "Acme", "--json"]) == 0
     got = json.loads(capsys.readouterr().out)
-    assert got["next_step"] == "kennet profile-codebase <path>" and got["message"].endswith("saved on this machine.")
+    assert got["next_step"] == "kennet profile-codebase <path>" and "keys are saved on this machine." in got["message"] and "kennet login" not in got["message"]
     assert config.load()["api_key"] == "mai_sk_live"
 
 
