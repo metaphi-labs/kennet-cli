@@ -1597,7 +1597,7 @@ def test_keys_create_refusals_carry_a_code_and_what_clears_them(capsys):
         return json.loads(capsys.readouterr().out)["error"]
 
     assert error("github-ci")["code"] == "name_taken" and "kennet keys revoke key_1" in error("github-ci")["advice"]
-    assert error("x", "--scope", "kennet:l3")["code"] == "scope_not_held"
+    assert error("x", "--scope", "kennet:runs")["code"] == "scope_not_held"
     post.respond(409, json={"detail": "the organization holds 25 live keys; revoke one first"})
     got = error("x")
     assert (got["code"], got["next_step"]) == ("too_many_keys", "kennet keys list")
