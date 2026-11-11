@@ -405,7 +405,7 @@ A sign-in the server has ended is an error, not a name read back from a file.
 Owners and admins manage the organization's members from here:
 
 ```sh
-kennet org request kennet:runs --reason "evals"  # ask for more; with no scope, what you asked for so far
+kennet org request kennet:delivery --reason "evals"  # ask for more; with no scope, what you asked for so far
 kennet org domain add acme.com                   # prints a TXT record; then `kennet org domain verify acme.com`
 kennet org members                              # members and open invitations, with each one's role
 kennet org members add bob@acme.com             # in as a member; --role owner|admin|billing|member
