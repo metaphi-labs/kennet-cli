@@ -433,6 +433,10 @@ person watching a run wants `kennet tail <owner/name> <run-id>` in their own ter
 - Rollouts: `mode` `conduct`, `models`, `harness` and `reasoning_effort` (required; Kennet has no default),
   `k` trials. The models you may run are the `models` field's enum. A refused call says what it needs: tell
   the user, never swap in another model or setting yourself.
+- To watch a simulator trial (robotics, driving), `render_trials` runs a render step the repository holds over
+  recorded trials: `step` names its folder (such as `render/carla`, with its `Dockerfile`, `render.toml` and
+  `render.sh`), read at `ref`; `path` names the task, whatever ref its bundle is on. The videos and replays open
+  in the trajectory viewer's Simulation pane: a `harbor_rollouts` row's `viewer_url`.
 - A trial that failed for an infrastructure reason was not graded, whatever its reward reads: run it again,
   and do not count it as the model's failure.
 - What no check settles, or a fault in Kennet itself: open an issue on the task's repository with the run id,
