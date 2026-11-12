@@ -366,7 +366,7 @@ Working through a coding agent? `kennet agents install` gives it the `kennet-par
 
 Not signed in yet? At a terminal it signs you in first (the browser opens on a code), then goes on: no `kennet login` beforehand.
 
-It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept in `./kennet-profile/<id>/`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
+It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept byte for byte in `./kennet-profile/<id>/sent/`; `sent.json` lists each file with its sha256 and the sha256 Metaphi AI received. With `--commits`, what Metaphi AI asked this machine to run is in `sample.json`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
 
 ```sh
 kennet profile-codebase ./core --build 'make' --test 'make test'

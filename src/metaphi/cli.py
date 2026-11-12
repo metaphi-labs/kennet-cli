@@ -25,6 +25,7 @@ import argparse
 import contextlib
 import datetime
 import getpass
+import hashlib
 import json
 import math
 import os
@@ -35,6 +36,7 @@ import sys
 import time
 import traceback
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import IO
@@ -360,6 +362,26 @@ def _rerun(given: str, tries: list[dict] | None = None) -> str:
             f"  kennet profile-codebase {q} --deep")
 
 
+def _sent(home: Path, name: str, route: str, body: bytes, answer: dict, say: Callable[[str], None]) -> None:
+    """Every byte sent, kept as sent (sent/<name>), and a line of sent/sent.json: its size and sha256 here, and the
+    receipt the server answered with for the bytes as they arrived."""
+    out = home / "sent"
+    out.mkdir(exist_ok=True)
+    (out / name).write_bytes(body)
+    here = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    got = answer.get("received") if isinstance(answer.get("received"), dict) else None
+    row = {"file": name, "route": route, **here, "received": got, "matched": None if got is None else got == here,
+           "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    ledger = out / "sent.json"
+    try:
+        rows = [r for r in json.loads(ledger.read_text()) if r.get("file") != name]
+    except (OSError, ValueError):
+        rows = []
+    ledger.write_text(json.dumps([*rows, row], indent=1))
+    if row["matched"] is False:
+        say(f"The server received {got.get('bytes')} bytes for {name}, not the {len(body)} sent ({ledger})")
+
+
 def cmd_profile_codebase(a: argparse.Namespace) -> None:
     from metaphi import codebase_checks, codebase_profile
     from metaphi.steps import Steps
@@ -388,12 +410,15 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
         steps = Steps()
+        body = codebase_profile.packed(doc)
         with steps.step("send"):
-            ref = codebase_profile.post(codebase_profile.packed(doc))["id"]
+            answer = codebase_profile.post(body)
+        ref = answer["id"]
         home = Path.cwd() / PROFILE_HOME / ref
         home.mkdir(parents=True, exist_ok=True)
         (home / "profile.json").write_text(json.dumps(doc, indent=1))
-        say(f"Sent ({ref}); a copy is in {home / 'profile.json'}")
+        _sent(home, "profile.json.gz", "/codebase-profiles", body, answer, say)
+        say(f"Sent ({ref}); a copy is in {home / 'profile.json'}, every byte sent in {home / 'sent'}")
         commits = a.commits or a.deep   # past commits are opt-in; the default builds and tests the tip once
         asked = {"test": a.test, "build": a.build, "deep": a.deep, "commits": commits}
         done, report = home / "checks.json", None
@@ -410,6 +435,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             if commits:
                 with steps.step("sample"):
                     picked = codebase_profile.sample(ref)
+                (home / "sample.json").write_text(json.dumps(picked, indent=1))   # what the server asked to run
             plan = codebase_checks.Plan(test=a.test, build=a.build, deep=a.deep, logs=home / "logs",
                                         run_minutes=picked.get("run_minutes") or codebase_checks.RUN_MINUTES,
                                         hours=picked.get("hours") or codebase_checks.HOURS)
@@ -418,14 +444,17 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             (home / "asked.json").write_text(json.dumps(asked))
         try:
             if not (home / "checks.sent").is_file():
+                body = codebase_profile.packed(report)
                 with steps.step("post_checks"):
-                    answered = codebase_profile.post_checks(ref, codebase_profile.packed(report))
+                    answered = codebase_profile.post_checks(ref, body)
+                _sent(home, "checks.json.gz", f"/codebase-profiles/{ref}/checks", body, answered, say)
                 (home / "readiness.json").write_text(json.dumps(answered.get("readiness") or {}, indent=1))
                 (home / "checks.sent").touch()
             if not (home / "logs.sent").is_file():
                 logs = codebase_profile.logs_packed(home / "logs", ref, [k["name"] for k in kept])
                 say(f"Sending logs ({len(logs) >> 10} KiB, {home / 'logs'})")
-                codebase_profile.post_logs(ref, logs)
+                _sent(home, "logs.tar.gz", f"/codebase-profiles/{ref}/logs", logs,
+                      codebase_profile.post_logs(ref, logs), say)
                 (home / "logs.sent").touch()
         except errors.MetaphiError as e:
             e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"

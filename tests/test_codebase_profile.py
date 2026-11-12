@@ -687,6 +687,7 @@ def test_default_finds_commands(made, capsys, tmp_path, monkeypatch):
     assert cli.main(["profile-codebase", str(made), "--commits"]) in (0, None)
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
     assert got["sample"].call_count == 1 and sent["commits"][0]["fail_to_pass"] == 1
+    assert json.loads((tmp_path / "kennet-profile" / ref / "sample.json").read_text())["repos"] == [[2]]
 
 
 @respx.mock
@@ -964,3 +965,27 @@ def test_gaps_and_interface(tmp_path):
     src = next(x for x in c2["files"] if x["hunks"] == 2)
     assert src["gaps"] == [27] and c1["files"][0]["gaps"] == []
     assert c2["iface_idents"] == 1 and c1["iface_idents"] == 0
+
+
+@respx.mock
+def test_every_byte_sent_is_kept_and_matched_against_the_servers_receipt(made, capsys, tmp_path, monkeypatch):
+    import hashlib
+
+    from metaphi import codebase_setup
+    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
+    monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))
+    ref = "cbp_" + "8" * 16
+    got = _server(ref)
+
+    def receipt(route):
+        return lambda request: httpx.Response(200, json={"id": ref, "received": {
+            "bytes": len(request.content), "sha256": hashlib.sha256(request.content).hexdigest()}})
+    for route in ("profile", "checks", "logs"):
+        got[route].mock(side_effect=receipt(route))
+    assert cli.main(["profile-codebase", str(made)]) in (0, None)
+    sent = tmp_path / "kennet-profile" / ref / "sent"
+    rows = {r["file"]: r for r in json.loads((sent / "sent.json").read_text())}
+    assert sorted(rows) == ["checks.json.gz", "logs.tar.gz", "profile.json.gz"]
+    for name, route in (("profile.json.gz", "profile"), ("checks.json.gz", "checks"), ("logs.tar.gz", "logs")):
+        assert (sent / name).read_bytes() == got[route].calls[-1].request.content and rows[name]["matched"] is True
+
