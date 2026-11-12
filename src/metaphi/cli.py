@@ -449,7 +449,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
 
 
 READY_CELL = {"yes": ("32", "\u2713 yes"), "no": ("31", "\u2717 no"), "not_collected": ("2", "\u00b7 not collected"),
-              "not_needed": ("2", "\u2013 not needed")}
+              "not_needed": ("2", "\u2013 n/a")}
 
 
 def _readiness(got: dict, out: IO[str] | None = None) -> None:
