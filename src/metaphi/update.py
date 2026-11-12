@@ -524,6 +524,35 @@ def now(method: str | None = None) -> dict[str, Any]:
     return {**out, "updated": True}
 
 
+def current_for(argv: list[str], say: Any) -> None:
+    """Before a run whose result is kept and read by its version (a codebase profile): the newest release, now, not
+    a day later. install.sh's binary installs it (signed, checked, as `kennet update` does) and runs the same command
+    again on it; any other install is told its own command and goes on. A look or an update that fails goes on, on
+    this version, and says so."""
+    if os.environ.get("KENNET_UPDATED") or os.environ.get("CI") or os.environ.get("KENNET_DISABLE_AUTOUPDATE") == "1":
+        return
+    try:
+        latest = check(force=True).get("latest")
+    except Exception as e:  # noqa: BLE001 -- the run goes on whatever the look did
+        debug(f"release check before the run failed: {getattr(e, 'message', None) or repr(e)}")
+        return
+    if not newer(latest):
+        return
+    method = install_method()
+    link = link_path() if method == "binary" else None
+    if not autoupdates(method) or link is None:
+        say(f"kennet {latest} is out (this is {__version__}); for the newest checks: {upgrade_command(method)}")
+        return
+    say(f"Updating kennet {__version__} to {latest} before the run")
+    try:
+        exe = install(latest, link)
+    except (UpdateError, OSError) as e:
+        say(f"The update did not install ({getattr(e, 'message', None) or e}); running on {__version__}")
+        return
+    os.environ["KENNET_UPDATED"] = latest   # the new version does not look again
+    os.execv(str(exe), [str(exe), *argv])
+
+
 def worker() -> int:
     """The detached self-update: silent, its failures a debug line."""
     s = state()

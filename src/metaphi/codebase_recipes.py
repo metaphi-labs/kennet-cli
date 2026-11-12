@@ -355,7 +355,7 @@ def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recip
     out: list[Recipe] = []
     if "go.mod" in paths:
         v = re.search(rb"^go\s+1\.(\d+)", read("go.mod") or b"", re.MULTILINE)
-        out.append(Recipe("true", "go build ./...", "go test -v ./...",
+        out.append(Recipe("true", "go build ./...", "go test -count=1 -v ./...",
                           f"golang:1.{max(int(v.group(1)), 21)}" if v else GO))
     if "Cargo.toml" in paths:
         out.append(Recipe("true", f"cargo build --tests -j {JOBS}", "cargo test --no-fail-fast", RUST))
@@ -366,7 +366,7 @@ def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recip
     if "gradlew" in paths:
         copy = "s=$?; find . -path '*/test-results/*' -name '*.xml' -exec cp {} \"$KENNET_JUNIT\"/ \\; ; exit $s"
         out.append(Recipe("true", "sh ./gradlew --no-daemon testClasses",
-                          f"sh ./gradlew --no-daemon test --continue; {copy}", f"eclipse-temurin:{JDK}"))
+                          f"sh ./gradlew --no-daemon cleanTest test --continue; {copy}", f"eclipse-temurin:{JDK}"))
     if "package.json" in paths:
         out += _node(paths, read)
     out += _python(paths, read)
@@ -427,7 +427,9 @@ def hosted(r: Recipe) -> Recipe | None:
 
 def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], paths: set[str], tests: str,
          engine: str | None, logs: Path, say: Callable[[str], None], run_minutes: float, cache: Path | None = None,
-         steps: Steps = NONE, skip: Recipe | None = None) -> tuple[Recipe | None, dict[str, Any]]:
+         steps: Steps = NONE, skip: Recipe | None = None, tip: dict[str, Any] | None = None
+         ) -> tuple[Recipe | None, dict[str, Any]]:
+    """`tip` gets the taken try's own build and test, and its cases: the tip's result, so it is not run twice."""
     from metaphi.codebase_checks import _junit, _run
     started = time.monotonic()
     logs.mkdir(parents=True, exist_ok=True)
@@ -462,6 +464,12 @@ def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], pat
                 ran = int(m.group(1)) if (m := COUNTED.search(said.rsplit("\ntaken.", 1)[-1])) else 0
                 if ran > best:
                     found, best, report = Recipe(r.setup, r.build, r.test, kept or None, r.uncounted), ran, report_
+                    if tip is not None:
+                        took = tries[-1]
+                        tip.clear()
+                        tip.update({"side": {**({"build": took["build"]} if "build" in took else {}),
+                                             "tests": [took["test"]] if "test" in took else []},
+                                    "cases": [_junit(junit) or None]})
                 if ran >= suite:
                     break
             shutil.rmtree(scratch / f"try-{tried:02d}", ignore_errors=True)

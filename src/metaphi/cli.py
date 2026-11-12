@@ -30,12 +30,14 @@ import math
 import os
 import re
 import shlex
+import shutil
 import sys
 import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import IO
 
 import httpx
 
@@ -366,6 +368,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     if a.deep and a.test:
         raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
     say = _progress(a)
+    update.current_for(sys.argv[1:], say)   # a profile is read by the version that made it: the newest, every run
     codebase_profile.say = say
     try:
         codebase_profile.key_ready()
@@ -416,7 +419,8 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         try:
             if not (home / "checks.sent").is_file():
                 with steps.step("post_checks"):
-                    codebase_profile.post_checks(ref, codebase_profile.packed(report))
+                    answered = codebase_profile.post_checks(ref, codebase_profile.packed(report))
+                (home / "readiness.json").write_text(json.dumps(answered.get("readiness") or {}, indent=1))
                 (home / "checks.sent").touch()
             if not (home / "logs.sent").is_file():
                 logs = codebase_profile.logs_packed(home / "logs", ref, [k["name"] for k in kept])
@@ -429,11 +433,82 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
                for k, r in zip(kept, report["repos"], strict=True)
                if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
+    try:
+        readiness = json.loads((home / "readiness.json").read_text())
+    except (OSError, ValueError):
+        readiness = {}
+    if not a.json:
+        _readiness(readiness)
     for given, tries in missing:
         say(_rerun(given, tries))
     n, gone = len(doc["repos"]), doc["skipped"]
+    if a.json:
+        print(json.dumps({"reference": ref, "readiness": readiness or None}, indent=2))
+        return
     _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
                + (f", {len(gone)} skipped (above)" if gone else ""))
+
+
+READY_CELL = {"yes": ("32", "\u2713 yes"), "no": ("31", "\u2717 no"), "not_collected": ("2", "\u00b7 not collected"),
+              "not_needed": ("2", "\u2013 n/a")}
+
+
+def _readiness(got: dict, out: IO[str] | None = None) -> None:
+    """The checks Metaphi AI read from this run, as it answered them (readiness.json is the data; this is a view of
+    it): a table, a column per repository, each check yes, no, not collected or not needed; then, for each no, what
+    would turn it to yes. Nothing here decides a check."""
+    out = out or sys.stdout
+    repos = [r for r in got.get("repos") or [] if isinstance(r, dict) and r.get("checks")]
+    if not repos:
+        return
+    colour = out.isatty() and not os.environ.get("NO_COLOR")
+
+    def paint(code: str, text: str) -> str:
+        return f"\x1b[{code}m{text}\x1b[0m" if colour and code else text
+    labels = list(dict.fromkeys(c.get("label", "") for r in repos for c in r["checks"]))
+    state = {(r.get("name", ""), c.get("label", "")): c.get("state", "not_collected") for r in repos for c in r["checks"]}
+    first = max(len(x) for x in labels + ["Yes"])
+    cell = max(len(t) for _c, t in READY_CELL.values())
+    cols = max(1, (shutil.get_terminal_size((100, 24)).columns - first - 4) // (cell + 3))
+    for at in range(0, len(repos), cols):
+        part = repos[at:at + cols]
+        widths = [max(cell, len(r.get("name", ""))) for r in part]
+        rule = lambda left, mid, right, widths=widths: paint("2", left + "\u2500" * (first + 2) + "".join(
+            mid + "\u2500" * (w + 2) for w in widths) + right)
+        line = lambda head, cells: (paint("2", "\u2502") + f" {head} " + "".join(
+            paint("2", "\u2502") + f" {c} " for c in cells) + paint("2", "\u2502"))
+        print(file=out)
+        print(rule("\u256d", "\u252c", "\u256e"), file=out)
+        print(line(" " * first, [paint("1", r.get("name", "").ljust(w)) for r, w in zip(part, widths)]), file=out)
+        print(rule("\u251c", "\u253c", "\u2524"), file=out)
+        for label in labels:
+            cells = []
+            for r, w in zip(part, widths):
+                code, text = READY_CELL.get(state.get((r.get("name", ""), label), "not_collected"), ("2", "?"))
+                cells.append(paint(code, text.ljust(w)))
+            print(line(label.ljust(first), cells), file=out)
+        print(rule("\u251c", "\u253c", "\u2524"), file=out)
+        tallies = []
+        for r, w in zip(part, widths):
+            asked = [c for c in r["checks"] if c.get("state") != "not_needed"]   # not collected counts as not yes
+            yes = sum(c.get("state") == "yes" for c in asked)
+            text = f"{yes} of {len(asked)}".ljust(w)
+            tallies.append(paint("1;32" if asked and yes == len(asked) else "1;31" if asked else "2", text))
+        print(line(paint("1", "Yes".ljust(first)), tallies), file=out)
+        print(rule("\u2570", "\u2534", "\u256f"), file=out)
+    fixes = [(r.get("name", ""), c) for r in repos for c in r["checks"] if c.get("state") == "no" and c.get("fix")]
+    if fixes:
+        print(file=out)
+        print(paint("1", "To turn a no to yes"), file=out)
+        for name, c in fixes:
+            print(f"  {paint('1', name)} \u00b7 {c.get('label', '')}", file=out)
+            print(paint("2", f"    {c['fix']}"), file=out)
+    if any(c.get("state") == "not_collected" for r in repos for c in r["checks"]):
+        print(paint("2", "\n  not collected: the CLI that ran predates this check; run the latest version "
+                         "(kennet update) to collect it."), file=out)
+    if got.get("note"):
+        print(f"\n{got['note']}", file=out)
+    print(file=out)
 
 
 def _said_sent(a: argparse.Namespace, ref: str, what: str) -> None:

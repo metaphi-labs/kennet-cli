@@ -5,6 +5,7 @@ import contextlib
 import gzip
 import hashlib
 import io
+import itertools
 import json
 import os
 import re
@@ -19,12 +20,12 @@ from typing import Any
 
 import httpx
 
-from metaphi import __version__, codebase_checks, codebase_sites, config, errors
+from metaphi import __version__, codebase_checks, codebase_env, codebase_sites, config, errors
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 from metaphi.twin import _client, _key, _send
 
-SCHEMA = "kennet.repo_metadata.v10"
+SCHEMA = "kennet.repo_metadata.v12"
 CHECKS_SCHEMA = "kennet.repo_checks.v1"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
@@ -53,8 +54,11 @@ PR = re.compile(r"(Merge pull request #\d+|\(#\d+\)[ \t]*$|Merged in |See merge 
 TRAILER = re.compile(r"^([A-Za-z][A-Za-z-]+): .+$", re.MULTILINE)
 FIX = re.compile(r"(?i)\b(fix(es|ed)?|bug|defect|patch|hotfix|regression|crash)\b")
 REVERTS = re.compile(r"This reverts commit ([0-9a-f]{7,64})")
-TEST_FN = re.compile(r"(^[ \t]*func\s+(Test|Benchmark)\w*\(|^[ \t]*def\s+test_|@Test\b|function\s+test\w*\(|#\[(tokio::)?test\]"
-                     r"|^test\w*$|^[ \t]*(it|test|describe)\s*\(|^[ \t]*TEST(_F)?\()", re.MULTILINE)
+IDENT = re.compile(rb"[A-Za-z_][A-Za-z0-9_]{2,}")
+TEST_FN = re.compile(r"(^[ \t]*func\s+(Test|Benchmark|test)\w*\(|^[ \t]*def\s+test_|@(Test|ParameterizedTest|RepeatedTest|TestFactory)\b"
+                     r"|function\s+test\w*\(|#\[(tokio::)?test\]|\[(Test|Fact|Theory|TestMethod|DataTestMethod|TestCase)\b"
+                     r"|^test\w*$|^[ \t]*(it|test|describe)\s*\(|^[ \t]*(it|test|specify|scenario)\s+['\"]|^[ \t]*TEST(_[FP])?\()",
+                     re.MULTILINE)
 ENV_REF = re.compile(r"(os\.Getenv|os\.environ|process\.env|System\.getenv|ENV\[|getenv\(|API_?KEY|SECRET|TOKEN)")
 URL_REF = re.compile(r"https?://(?!localhost|127\.0|example)")
 MOCK_REF = re.compile(r"(?i)\b(mock|fake|stub|httptest|testcontainers|sqlmock|wiremock|nock)\b")
@@ -209,23 +213,31 @@ def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
                               "--no-textconv", "--no-color", "--format=%x01%H"), stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, env=_ENV)
     counts: dict[str, int] = {}
+    spans: dict[str, list[tuple[int, int]]] = {}
+    words: dict[str, set[bytes]] = {"test+": set(), "source+": set(), "source-": set()}
     row: dict | None = None
 
     def close() -> None:
         if row is not None:
             by_id = {paths[path]: n for path, n in counts.items() if path in paths}
+            gaps = {paths[path]: [max(0, b[0] - a[1]) for a, b in itertools.pairwise(s)] for path, s in spans.items() if path in paths}
             for change in row["files"]:
                 change["hunks"] = by_id.get(change["file"], 0)
-    skip, path = 0, None
+                change["gaps"] = gaps.get(change["file"], [])
+            row["iface_idents"] = len((words["test+"] & words["source+"]) - words["source-"])
+    skip, path, side = 0, None, None
     assert p.stdout
     for line in p.stdout:
         if skip:
             if line[:1] != b"\\":
                 skip -= 1
+                if side and (key := side + line[:1].decode("latin-1")) in words:
+                    words[key].update(IDENT.findall(line[1:]))
             continue
         if line[:1] == b"\x01":
             close()
-            row, counts, path = by_sha.get(line[1:].strip().decode()), {}, None
+            row, counts, spans, path = by_sha.get(line[1:].strip().decode()), {}, {}, None
+            words = {"test+": set(), "source+": set(), "source-": set()}
         elif line.startswith(b"+++ "):
             if line[4:] != b"/dev/null\n":
                 got = _unquote(line[4:])
@@ -235,9 +247,13 @@ def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
             path = got[2:] if got[:2] == "a/" else None
         elif line.startswith(b"@@ ") and path is not None:
             counts[path] = counts.get(path, 0) + 1
-            m = re.match(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+            m = re.match(rb"@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
             if m:
-                skip = int(m[1] or 1) + int(m[2] or 1)
+                old, gone, came = int(m[1]), int(m[2] or 1), int(m[3] or 1)
+                skip = gone + came
+                spans.setdefault(path, []).append((old, old + gone))
+                kind = _kind(path)
+                side = "test" if kind == "test" else "source" if kind == "source" else None
     close()
     if p.wait():
         raise Unreadable("log")
@@ -376,16 +392,18 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
             if low == ".gitattributes" and b"filter=lfs" in body:
                 lfs = True
     tip = _text(repo, "rev-parse", "HEAD")
+    env, start = codebase_env.needs({p for p, (mode, _s, _z) in tree.items() if mode != "160000"},
+                                    lambda p: next((b for _s, b in _blobs(repo, [tree[p][1]])), None) if p in tree else None)
     pack = re.search(r"size-pack: (\d+)", _text(repo, "count-objects", "-v"))
     if keep is not None:
-        keep.update(path=repo, tip=tip, commits=commits, order=order,
+        keep.update(path=repo, tip=tip, commits=commits, order=order, start=start,
                     paths={row["file"]: path for path, row in rows.items() if row["at_tip"]})
     return {"name": name, "tip": tip, "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split(),
             "git": {"branches": len(_text(repo, "for-each-ref", "--format=x", "refs/heads", "refs/remotes").split()),
                     "tags": len(_text(repo, "for-each-ref", "--format=x", "refs/tags").split()),
                     "submodules": sum(m == "160000" for m, _s, _z in tree.values()), "lfs": lfs,
                     "pack_bytes": int(pack[1]) * 1024 if pack else 0},
-            "licenses": sorted(licenses), "authors": people,
+            "licenses": sorted(licenses), "env": env, "authors": people,
             "dirs": [{"dir": d, "parent": up} for d, up in tree_dirs.items()], "commits": commits,
             "files": sorted(rows.values(), key=lambda r: r["file"])}
 
@@ -502,6 +520,8 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
     if plan.test is None:
         box = codebase_setup.engine()
         say(f"Setup: {box} containers" if box else "Setup: no Docker or Podman; running on this machine")
+    # services run in containers even where the seller's own commands run here: their ports are published here
+    engine = box or (codebase_setup.engine() if any(k.get("start") for k in kept) else None)
 
     def model() -> codebase_setup.Model | None:
         if not plan.deep or not ref:
@@ -524,10 +544,10 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
             mine.steps.total["profile"] = local.get("seconds", 0.0)
             if mine.cache:
                 mine.cache.mkdir()
-            found, setup = None, [] if plan.test is None else None
+            found, setup, tip = None, [] if plan.test is None else None, {}
 
             def setup_at(sha: str, where: Path, era: int | None, later: tuple[codebase_setup.Recipe, str] | None,
-                         repo=repo, mine=mine, setup=setup) -> codebase_setup.Recipe | None:
+                         repo=repo, mine=mine, setup=setup, tip=tip) -> codebase_setup.Recipe | None:
                 tree = codebase_checks._tree(repo, sha)
 
                 def write(d: Path) -> None:
@@ -535,7 +555,8 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                 with mine.steps.step("setup", era=era):
                     recipe, how = codebase_recipes.find(write, _reader(repo, tree), set(tree), "", box, where, say,
                                                         plan.run_minutes, mine.cache, mine.steps,
-                                                        skip=later[0] if later else None)
+                                                        skip=later[0] if later else None,
+                                                        tip=tip if era is None else None)
                     setup.append({"era": era, **how})
                     if recipe is None and (m := model()) is not None:
                         recipe, how = codebase_setup.find(write, "", m, box, where / "model", say, plan.run_minutes,
@@ -544,6 +565,19 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                 if recipe and recipe.image:
                     images.append(recipe.image)
                 return recipe
+            # the services the repository declares (CI's, else compose's), up for its checks where containers run
+            services = None
+            if engine and local.get("start"):
+                tip_tree = codebase_checks._tree(repo, local["tip"])
+                services = codebase_env.Services(engine, local["start"],
+                                                 lambda d, t=tip_tree, r=repo: codebase_checks._write(r, t, d),
+                                                 logs / "services.log")
+                say(f"{local['name']}: starting {services.got['count']} services its "
+                    f"{'CI' if local['start']['from'] == 'ci' else 'compose file'} declares ({logs / 'services.log'})")
+                with mine.steps.step("services"):
+                    up = services.up()
+                say(f"{local['name']}: services {'up' if up['up'] else 'did not start'} ({up['seconds']} s)")
+                codebase_setup.NETWORK[:] = ["--network", "host"] if up["up"] else []
             # a mainframe estate (harwell.toml) is built on Harwell, never here: `--deep` alone sends its files
             built = codebase_harwell.checked(repo, local["tip"], local["name"], _key(None, False), say,
                                              mine.steps) if plan.deep and ref else None
@@ -562,13 +596,20 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                 got = codebase_checks.run(repo, local["name"], local["tip"], local["commits"], local["order"], picks,
                                           picked["runs"], mine, say, found, era_of,
                                           repair if found and setup is not None else None,
-                                          (picked.get("breaks") or [[]] * len(kept))[n], local.get("paths"))
+                                          (picked.get("breaks") or [[]] * len(kept))[n], local.get("paths"),
+                                          tip or None)
             except Exception as e:   # noqa: BLE001
                 say(f"{local['name']}: tests stopped ({type(e).__name__}: {e})")
                 got = {"from": "tip", "runs": picked["runs"], "build_given": plan.build is not None,
                        "test_given": plan.test is not None, "stopped": "error", "commits": [], "breaks": []}
+            finally:
+                if services:
+                    services.down()
+                    codebase_setup.NETWORK.clear()
             if setup:
                 got["setup"] = setup
+            if services:
+                got["services"] = services.got
             if built:
                 got["build_remote"] = built
             got["seconds"] = mine.steps.seconds()
