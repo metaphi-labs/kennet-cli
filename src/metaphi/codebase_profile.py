@@ -53,8 +53,11 @@ PR = re.compile(r"(Merge pull request #\d+|\(#\d+\)[ \t]*$|Merged in |See merge 
 TRAILER = re.compile(r"^([A-Za-z][A-Za-z-]+): .+$", re.MULTILINE)
 FIX = re.compile(r"(?i)\b(fix(es|ed)?|bug|defect|patch|hotfix|regression|crash)\b")
 REVERTS = re.compile(r"This reverts commit ([0-9a-f]{7,64})")
-TEST_FN = re.compile(r"(^[ \t]*func\s+(Test|Benchmark)\w*\(|^[ \t]*def\s+test_|@Test\b|function\s+test\w*\(|#\[(tokio::)?test\]"
-                     r"|^test\w*$|^[ \t]*(it|test|describe)\s*\(|^[ \t]*TEST(_F)?\()", re.MULTILINE)
+IDENT = re.compile(rb"[A-Za-z_][A-Za-z0-9_]{2,}")
+TEST_FN = re.compile(r"(^[ \t]*func\s+(Test|Benchmark|test)\w*\(|^[ \t]*def\s+test_|@(Test|ParameterizedTest|RepeatedTest|TestFactory)\b"
+                     r"|function\s+test\w*\(|#\[(tokio::)?test\]|\[(Test|Fact|Theory|TestMethod|DataTestMethod|TestCase)\b"
+                     r"|^test\w*$|^[ \t]*(it|test|describe)\s*\(|^[ \t]*(it|test|specify|scenario)\s+['\"]|^[ \t]*TEST(_[FP])?\()",
+                     re.MULTILINE)
 ENV_REF = re.compile(r"(os\.Getenv|os\.environ|process\.env|System\.getenv|ENV\[|getenv\(|API_?KEY|SECRET|TOKEN)")
 URL_REF = re.compile(r"https?://(?!localhost|127\.0|example)")
 MOCK_REF = re.compile(r"(?i)\b(mock|fake|stub|httptest|testcontainers|sqlmock|wiremock|nock)\b")
@@ -209,23 +212,31 @@ def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
                               "--no-textconv", "--no-color", "--format=%x01%H"), stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, env=_ENV)
     counts: dict[str, int] = {}
+    spans: dict[str, list[tuple[int, int]]] = {}
+    words: dict[str, set[bytes]] = {"test+": set(), "source+": set(), "source-": set()}
     row: dict | None = None
 
     def close() -> None:
         if row is not None:
             by_id = {paths[path]: n for path, n in counts.items() if path in paths}
+            gaps = {paths[path]: [max(0, b[0] - a[1]) for a, b in zip(s, s[1:])] for path, s in spans.items() if path in paths}
             for change in row["files"]:
                 change["hunks"] = by_id.get(change["file"], 0)
-    skip, path = 0, None
+                change["gaps"] = gaps.get(change["file"], [])
+            row["iface_idents"] = len((words["test+"] & words["source+"]) - words["source-"])
+    skip, path, side = 0, None, None
     assert p.stdout
     for line in p.stdout:
         if skip:
             if line[:1] != b"\\":
                 skip -= 1
+                if side and (key := side + line[:1].decode("latin-1")) in words:
+                    words[key].update(IDENT.findall(line[1:]))
             continue
         if line[:1] == b"\x01":
             close()
-            row, counts, path = by_sha.get(line[1:].strip().decode()), {}, None
+            row, counts, spans, path = by_sha.get(line[1:].strip().decode()), {}, {}, None
+            words = {"test+": set(), "source+": set(), "source-": set()}
         elif line.startswith(b"+++ "):
             if line[4:] != b"/dev/null\n":
                 got = _unquote(line[4:])
@@ -235,9 +246,13 @@ def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
             path = got[2:] if got[:2] == "a/" else None
         elif line.startswith(b"@@ ") and path is not None:
             counts[path] = counts.get(path, 0) + 1
-            m = re.match(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+            m = re.match(rb"@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
             if m:
-                skip = int(m[1] or 1) + int(m[2] or 1)
+                old, gone, came = int(m[1]), int(m[2] or 1), int(m[3] or 1)
+                skip = gone + came
+                spans.setdefault(path, []).append((old, old + gone))
+                kind = _kind(path)
+                side = "test" if kind == "test" else "source" if kind == "source" else None
     close()
     if p.wait():
         raise Unreadable("log")

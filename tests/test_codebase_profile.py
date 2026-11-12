@@ -931,3 +931,35 @@ def test_a_signed_in_key_is_checked_from_its_saved_scopes_with_no_call(monkeypat
     monkeypatch.setenv("METAPHI_API_KEY", config.KEY_PREFIX + "elsewhere")
     codebase_profile.key_ready()
     assert access.call_count == 1
+
+
+@pytest.mark.parametrize("text,n", [
+    ("[TestFixture]\npublic class A {\n  [Test]\n  public void B() {}\n  [Fact]\n  public void C() {}\n}\n", 2),
+    ("[TestClass]\nclass A {\n  [TestMethod]\n  void B() {}\n}\n", 1),
+    ("@ParameterizedTest\nvoid a() {}\n@Test\nvoid b() {}\n", 2),
+    ("func testLogin() {}\nfunc TestX(t *testing.T) {}\n", 2),
+    ("describe Foo do\n  it 'works' do\n  end\n  it \"also\" do\n  end\nend\n", 2),
+    ("TEST_P(Suite, Case) {}\nTEST(A, B) {}\n", 2),
+])
+def test_test_fns_by_language(text, n):
+    assert len(codebase_profile.TEST_FN.findall(text)) == n
+
+
+def test_gaps_and_interface(tmp_path):
+    r = tmp_path / "shop"
+    (r / "tests").mkdir(parents=True)
+    git(r, "init", "-q", "-b", "main")
+    (r / "cart.py").write_text("".join(f"line{i} = {i}\n" for i in range(40)))
+    (r / "tests/test_cart.py").write_text("import cart\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "start")
+    body = (r / "cart.py").read_text().split("\n")
+    body[2], body[30] = "def checkout_total(): pass", "line30 = 31"
+    (r / "cart.py").write_text("\n".join(body))
+    (r / "tests/test_cart.py").write_text("import cart\nassert cart.checkout_total() is None\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "total")
+    c1, c2 = codebase_profile.document([str(r)], say=lambda s: None)["repos"][0]["commits"]
+    src = next(x for x in c2["files"] if x["hunks"] == 2)
+    assert src["gaps"] == [27] and c1["files"][0]["gaps"] == []
+    assert c2["iface_idents"] == 1 and c1["iface_idents"] == 0
