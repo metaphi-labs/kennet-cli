@@ -25,7 +25,7 @@ from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 from metaphi.twin import _client, _key, _send
 
-SCHEMA = "kennet.repo_metadata.v12"
+SCHEMA = "kennet.repo_metadata.v13"
 CHECKS_SCHEMA = "kennet.repo_checks.v1"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
@@ -38,7 +38,7 @@ SOURCE = frozenset(["go", "py", "java", "kt", "kts", "scala", "groovy", "jelly",
 DOC = frozenset(["md", "txt", "rst", "adoc", "pdf", "docx", "doc"])
 CONFIG = frozenset(["json", "yaml", "yml", "toml", "ini", "xml", "env", "cfg", "conf", "lock", "sum", "properties", "gradle"])
 DATA = frozenset(["csv", "tsv", "jsonl", "parquet", "dat", "bin", "png", "jpg", "jpeg", "gif", "svg", "ico", "ttf", "woff", "woff2", "mp4", "zip", "gz", "tar", "jar"])
-KNOWN = frozenset(["makefile", "cmakelists.txt", "dockerfile", "docker-compose.yml", "docker-compose.yaml", "go.mod", "go.sum", "package.json", "package-lock.json", "yarn.lock", "pom.xml", "build.gradle", "build.gradle.kts", "cargo.toml", "pyproject.toml", "requirements.txt", "setup.py", "gemfile", "composer.json", "pubspec.yaml", "build.xml", "jenkinsfile", ".gitlab-ci.yml", ".travis.yml", "tox.ini", "pytest.ini", "license", "license.txt", "license.md", "copying", "readme.md", "contributing.md", "changelog.md", "codeowners", ".gitmodules", ".gitattributes"])
+KNOWN = frozenset(["makefile", "cmakelists.txt", "dockerfile", "docker-compose.yml", "docker-compose.yaml", "go.mod", "go.sum", "package.json", "package-lock.json", "yarn.lock", "pom.xml", "build.gradle", "build.gradle.kts", "cargo.toml", "pyproject.toml", "requirements.txt", "setup.py", "gemfile", "composer.json", "pubspec.yaml", "build.xml", "jenkinsfile", ".gitlab-ci.yml", ".travis.yml", "tox.ini", "pytest.ini", "license", "license.txt", "license.md", "licence", "licence.txt", "licence.md", "copying", "copying.txt", "unlicense", "readme.md", "contributing.md", "changelog.md", "codeowners", ".gitmodules", ".gitattributes"])
 TRAILERS = frozenset(["co-authored-by", "signed-off-by", "reviewed-by", "acked-by", "tested-by", "reported-by", "suggested-by", "helped-by", "change-id", "git-svn-id", "fixes", "closes", "refs", "see-also", "cc", "bug", "jira", "generated-by"])
 TEST = re.compile(r"(^|/)(tests?|spec|specs|testdata|testutils?|__tests__|fixtures?|[\w.-]*-tests?(-[\w.-]*)?\.package)(/|$)"
                   r"|Tests?\.class(/|\.st$)|Tests?\.(java|php|cs|kt|groovy)$|_test\.|\.test\.|\.spec\.|(^|/)test_|tests?\.[a-z]+$", re.IGNORECASE)
@@ -388,7 +388,8 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
             low = os.path.basename(path).lower()
             if low.startswith(("license", "licence", "copying", "unlicense")):
                 folded = b" ".join(body[:20000].lower().split())
-                licenses.add(next((spdx for spdx, mark in LICENSES if mark in folded), "unknown"))
+                rows[path]["license"] = next((spdx for spdx, mark in LICENSES if mark in folded), "unknown")
+                licenses.add(rows[path]["license"])
             if low == ".gitattributes" and b"filter=lfs" in body:
                 lfs = True
     tip = _text(repo, "rev-parse", "HEAD")
