@@ -89,3 +89,19 @@ def test_containers_join_the_host_network_while_services_are_up(tmp_path, monkey
     codebase_setup.Shell("docker", "golang:1.22", tmp_path, tmp_path)
     assert "--network" in seen[0] and seen[0][seen[0].index("--network") + 1] == "host"
     assert os.environ.get("KENNET_TESTS") is None
+
+
+def test_the_readiness_table_draws_the_answer_and_counts_only_yes_and_no(capsys):
+    from metaphi import cli
+    got = {"repos": [{"name": "core", "checks": [
+        {"key": "ci", "label": "CI config included", "state": "no", "fix": "No CI config found."},
+        {"key": "services", "label": "Test services start here", "state": "not_needed"},
+        {"key": "build", "label": "Builds on this machine", "state": "yes"},
+        {"key": "tests_run", "label": "Tests run on this machine", "state": "not_collected"}]}], "note": "Each no."}
+    cli._readiness(got)
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out                                   # not a terminal: no colour
+    assert "│ Yes" in out and "1 of 2" in out and "· not collected" in out and "– not needed" in out
+    assert "core · CI config included\n    No CI config found." in out and out.rstrip().endswith("Each no.")
+    cli._readiness({"repos": []})
+    assert capsys.readouterr().out == ""
