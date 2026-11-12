@@ -489,7 +489,7 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
         print(rule("\u251c", "\u253c", "\u2524"), file=out)
         tallies = []
         for r, w in zip(part, widths):
-            asked = [c for c in r["checks"] if c.get("state") in ("yes", "no")]
+            asked = [c for c in r["checks"] if c.get("state") != "not_needed"]   # not collected counts as not yes
             yes = sum(c.get("state") == "yes" for c in asked)
             text = f"{yes} of {len(asked)}".ljust(w)
             tallies.append(paint("1;32" if asked and yes == len(asked) else "1;31" if asked else "2", text))

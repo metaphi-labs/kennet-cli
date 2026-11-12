@@ -91,7 +91,7 @@ def test_containers_join_the_host_network_while_services_are_up(tmp_path, monkey
     assert os.environ.get("KENNET_TESTS") is None
 
 
-def test_the_readiness_table_draws_the_answer_and_counts_only_yes_and_no(capsys):
+def test_the_readiness_table_draws_the_answer_and_not_collected_counts_as_not_yes(capsys):
     from metaphi import cli
     got = {"repos": [{"name": "core", "checks": [
         {"key": "ci", "label": "CI config included", "state": "no", "fix": "No CI config found."},
@@ -101,7 +101,7 @@ def test_the_readiness_table_draws_the_answer_and_counts_only_yes_and_no(capsys)
     cli._readiness(got)
     out = capsys.readouterr().out
     assert "\x1b[" not in out                                   # not a terminal: no colour
-    assert "│ Yes" in out and "1 of 2" in out and "· not collected" in out and "– not needed" in out
+    assert "│ Yes" in out and "1 of 3" in out and "· not collected" in out and "– not needed" in out
     assert "core · CI config included\n    No CI config found." in out and out.rstrip().endswith("Each no.")
     cli._readiness({"repos": []})
     assert capsys.readouterr().out == ""
