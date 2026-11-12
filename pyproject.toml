@@ -1,10 +1,10 @@
 [project]
 name = "kennet"
-version = "0.1.51"
+version = "0.1.52"
 description = "The command line for Kennet, Metaphi AI's RL infrastructure."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "LicenseRef-PolyForm-Shield-1.0.0"
+license = "Apache-2.0"
 dependencies = ["httpx>=0.28", "pyyaml>=6.0.3", "tiktoken>=0.14"]
 
 [project.scripts]
