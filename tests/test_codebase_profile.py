@@ -687,6 +687,7 @@ def test_default_finds_commands(made, capsys, tmp_path, monkeypatch):
     assert cli.main(["profile-codebase", str(made), "--commits"]) in (0, None)
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
     assert got["sample"].call_count == 1 and sent["commits"][0]["fail_to_pass"] == 1
+    assert json.loads((tmp_path / "kennet-profile" / ref / "sample.json").read_text())["repos"] == [[2]]
 
 
 @respx.mock

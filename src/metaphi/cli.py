@@ -435,6 +435,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             if commits:
                 with steps.step("sample"):
                     picked = codebase_profile.sample(ref)
+                (home / "sample.json").write_text(json.dumps(picked, indent=1))   # what the server asked to run
             plan = codebase_checks.Plan(test=a.test, build=a.build, deep=a.deep, logs=home / "logs",
                                         run_minutes=picked.get("run_minutes") or codebase_checks.RUN_MINUTES,
                                         hours=picked.get("hours") or codebase_checks.HOURS)
