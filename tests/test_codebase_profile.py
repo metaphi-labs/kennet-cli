@@ -69,6 +69,7 @@ def test_compute(repo):
     assert {x["status"] for x in c1["files"]} == {"A"} and c3["files"][0]["status"] == "R" and "old_file" in c3["files"][0]
     assert sum(x["hunks"] for x in c2["files"]) == 2
     assert r["licenses"] == ["MIT"] and len(r["authors"]) == 1 and "blame" not in r
+    assert [(f["known_name"], f["depth"], f["license"]) for f in r["files"] if "license" in f] == [("license", 0, "MIT")]
     files = {(f["kind"], f.get("test_fns")) for f in r["files"] if f["at_tip"]}
     assert ("test", 2) in files
     ledger = next(f for f in r["files"] if f.get("imports_internal"))
