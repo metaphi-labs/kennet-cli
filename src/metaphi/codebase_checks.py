@@ -202,8 +202,10 @@ def _tested(code: int | None, took: float, cases: dict[str, bool] | None, log: P
     else:
         counts = reading.counted(log)
         report = "summary" if counts else None
+    whole = code == 0 and (counts is None or counts[0] == counts[1])
     return {**_ran(code, took), "report": report, "reported": counts[0] if counts else None,
-            "passed": counts[1] if counts else None}
+            "passed": counts[1] if counts else None,
+            **({} if whole else {"why": reading.why(code, log, counts, test=True)})}
 
 
 def _side(repo: Path, tree: dict, into: Path, plan: Plan, env: dict[str, str], runs: int, logs: _Logs, label: str,
@@ -304,9 +306,6 @@ def _planted(repo: Path, tree: dict, plan: Plan, runs: int, logs: _Logs, label: 
     with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch:
         post, cases = _side(repo, tree, Path(scratch), plan, {**os.environ, "KENNET_TESTS": ""}, runs, logs, label,
                             lambda _s: None, found, jobs, lambda src: _swap(src / path, _ext(path), op, nth))
-    for n, t in enumerate(post["tests"]):
-        if t["exit"] != 0:
-            t["why"] = reading.why(t["exit"], logs.root / f"{label}.test-{n + 1}.log")
     return {"post": post, **_caught(tip, cases, runs)}
 
 

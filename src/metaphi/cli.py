@@ -416,7 +416,8 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         try:
             if not (home / "checks.sent").is_file():
                 with steps.step("post_checks"):
-                    codebase_profile.post_checks(ref, codebase_profile.packed(report))
+                    answered = codebase_profile.post_checks(ref, codebase_profile.packed(report))
+                (home / "readiness.json").write_text(json.dumps(answered.get("readiness") or {}, indent=1))
                 (home / "checks.sent").touch()
             if not (home / "logs.sent").is_file():
                 logs = codebase_profile.logs_packed(home / "logs", ref, [k["name"] for k in kept])
@@ -429,11 +430,44 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
                for k, r in zip(kept, report["repos"], strict=True)
                if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
+    try:
+        readiness = json.loads((home / "readiness.json").read_text())
+    except (OSError, ValueError):
+        readiness = {}
+    if not a.json:
+        _readiness(readiness)
     for given, tries in missing:
         say(_rerun(given, tries))
     n, gone = len(doc["repos"]), doc["skipped"]
     _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
                + (f", {len(gone)} skipped (above)" if gone else ""))
+
+
+def _readiness(got: dict) -> None:
+    """The checks Metaphi AI read from this run, as it answered them: per repository, each one yes or no, and for a
+    no, what would turn it to yes. Drawn as answered; nothing here decides them."""
+    repos = [r for r in got.get("repos") or [] if isinstance(r, dict) and r.get("checks")]
+    if not repos:
+        return
+    colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+    def paint(code: str, text: str) -> str:
+        return f"\x1b[{code}m{text}\x1b[0m" if colour else text
+    print()
+    for r in repos:
+        checks = r["checks"]
+        yes = sum(bool(c.get("ok")) for c in checks)
+        bar = paint("32", "\u25a0" * yes) + paint("31", "\u25a1" * (len(checks) - yes))
+        print(paint("1", f"{r.get('name', '')}") + f"  {bar}  {yes} of {len(checks)} yes")
+        for c in checks:
+            mark = paint("32", "\u2713 yes") if c.get("ok") else paint("31", "\u2717 no ")
+            print(f"  {mark}  {c.get('label', '')}")
+            if not c.get("ok") and c.get("fix"):
+                print(paint("2", f"           {c['fix']}"))
+        print()
+    if got.get("note"):
+        print(got["note"])
+        print()
 
 
 def _said_sent(a: argparse.Namespace, ref: str, what: str) -> None:

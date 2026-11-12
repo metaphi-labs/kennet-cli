@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 Report = Literal["junit", "summary"]
-Why = Literal["timeout", "dependency", "toolchain", "compile", "other"]
+Why = Literal["timeout", "service", "config", "dependency", "toolchain", "compile", "crash", "failing", "other"]
 
 TAIL = 256_000
 
@@ -243,7 +243,25 @@ def counted(log: Path) -> tuple[int, int] | None:
     return None
 
 
+# what a failed run's log says stopped it, first match wins: a service it could not reach, configuration it was not
+# given, then the build's own causes; a test run that counted nothing crashed, one that counted failures is failing
+SERVICE = re.compile(
+    r"connection refused|ECONNREFUSED|dial tcp \S+: connect|could not connect to (?:server|database|redis|broker)|"
+    r"Can't connect to (?:local )?MySQL|getaddrinfo ENOTFOUND|no such host|Name or service not known|"
+    r"Communications link failure|Is the server running|run out of available brokers|NoBrokersAvailable|"
+    r"Could not connect to Redis|MongoServerSelectionError|ServerSelectionTimeoutError|Connection reset by peer",
+    re.IGNORECASE)
+CONFIG = re.compile(
+    r"(?:environment variable|env var|\bconfig(?:uration)?\b|_CONFIG\b|\.env\b)[^\n]{0,60}"
+    r"(?:not set|is missing|missing|not proper|not found|is required|required|invalid|undefined)|"
+    r"(?:missing|required|not set)[^\n]{0,30}(?:environment variable|env var)|"
+    r"no such file or directory[^\n]*\.(?:ya?ml|json|toml|env|ini|conf|properties)\b|KeyError: '[A-Z][A-Z0-9_]+'",
+    re.IGNORECASE)
+CRASH = re.compile(r"^panic: |Traceback \(most recent call last\)|Exception in thread \"main\"|Unhandled exception|"
+                   r"segmentation fault|core dumped|SIGSEGV|fatal error: ", re.MULTILINE | re.IGNORECASE)
 WHY: tuple[tuple[Why, re.Pattern[str]], ...] = (
+    ("service", SERVICE),
+    ("config", CONFIG),
     ("dependency", re.compile(
         r"Could not resolve|No matching distribution|Could not find (?:artifact|a version)|unable to access '|"
         r"Failed to fetch|404 Not Found|failed to download|no matching version|ERESOLVE|unknown revision|"
@@ -257,18 +275,28 @@ WHY: tuple[tuple[Why, re.Pattern[str]], ...] = (
         re.MULTILINE | re.IGNORECASE)),
     ("compile", re.compile(
         r"\berror(?:\[\w+\])?:|\bError:|fatal error|undefined reference|cannot find symbol|"
-        r"error TS\d+|SyntaxError|compilation failed|\*\*\* \[.*\] Error \d+", re.IGNORECASE)),
+        r"error TS\d+|SyntaxError|compilation failed|\*\*\* \[.*\] Error \d+|build failed", re.IGNORECASE)),
 )
 
 
-def why(code: int | None, log: Path) -> Why:
+def why(code: int | None, log: Path, counts: tuple[int, int] | None = None, test: bool = False) -> Why:
+    """`test`: a test run that did not pass in full; `counts` what counted it (tests, passed), None: nothing did."""
     if code is None:
         return "timeout"
-    t = _text(log)[-20000:]
-    for name, pattern in WHY:
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", _text(log)[-60000:])
+    for name, pattern in WHY[:2] if test else WHY:
         if pattern.search(t):
             return name
+    if test:
+        if counts and counts[1] > 0:
+            return "failing"
+        if CRASH.search(t):
+            return "crash"
+        for name, pattern in WHY[2:]:
+            if pattern.search(t):
+                return name
+        return "failing" if counts else "other"
     return "other"
 
 
-__all__ = ["READERS", "WHY", "Report", "Why", "counted", "why"]
+__all__ = ["CONFIG", "CRASH", "READERS", "SERVICE", "WHY", "Report", "Why", "counted", "why"]

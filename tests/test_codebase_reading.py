@@ -70,3 +70,21 @@ def test_build_failure_class(tmp_path, printed, code, why):
     log = tmp_path / "build.log"
     log.write_text(printed)
     assert codebase_reading.why(code, log) == why
+
+
+@pytest.mark.parametrize(("printed", "code", "counts", "why"), [
+    # go-fantasy's own: a config path it reads from the environment, not given
+    ("=== RUN   TestLogin\npanic: FSP_SERVER_CONFIG not proper\n\ngoroutine 1 [running]:\nFAIL\tfsp/tests\t0.01s\n",
+     1, None, "config"),
+    ("--- FAIL: TestQuery\n    db_test.go:20: dial tcp 127.0.0.1:5432: connect: connection refused\n", 1, (4, 0), "service"),
+    ("E   psycopg.OperationalError: connection failed: Is the server running on that host\n", 1, (9, 0), "service"),
+    ("kafka: client has run out of available brokers to talk to\n", 1, None, "service"),
+    ("Traceback (most recent call last):\n  File \"conftest.py\", line 3\nImportError: no module x\n", 2, None, "crash"),
+    ("=== RUN TestA\n--- FAIL: TestA\nFAIL\n", 1, (5, 3), "failing"),
+    ("tests/a_test.go:3:2: undefined: Foo\nFAIL\tx [build failed]\n", 1, None, "compile"),
+    ("all good but exit 1\n", 1, None, "other"),
+])
+def test_test_failure_class(tmp_path, printed, code, counts, why):
+    log = tmp_path / "test.log"
+    log.write_text(printed)
+    assert codebase_reading.why(code, log, counts, test=True) == why

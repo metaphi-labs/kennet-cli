@@ -27,6 +27,7 @@ TOKENS = 4096
 
 
 CACHE = "/kennet/cache"
+NETWORK: list[str] = []   # ["--network", "host"] while a repository's services are up (metaphi/codebase_env.py)
 CACHES = {"CCACHE_DIR": f"{CACHE}/ccache", "PIP_CACHE_DIR": f"{CACHE}/pip", "UV_CACHE_DIR": f"{CACHE}/uv",
           "npm_config_cache": f"{CACHE}/npm", "GOMODCACHE": f"{CACHE}/gomod", "GOCACHE": f"{CACHE}/gobuild", "GOFLAGS": "-count=1",
           "GRADLE_USER_HOME": f"{CACHE}/gradle", "MAVEN_OPTS": f"-Dmaven.repo.local={CACHE}/m2",
@@ -63,7 +64,7 @@ class Shell:
             name = f"kennet-setup-{uuid.uuid4().hex[:12]}"
             shared = ["-v", f"{cache}:{CACHE}"] if cache else []
             got = subprocess.run([engine, "run", "-d", "--name", name, "-v", f"{src}:/work", "-v",
-                                  f"{junit}:/kennet/junit", *shared, "-w", "/work", "--entrypoint", "sh", image, "-c",
+                                  f"{junit}:/kennet/junit", *shared, *NETWORK, "-w", "/work", "--entrypoint", "sh", image, "-c",
                                   "sleep infinity"], capture_output=True, timeout=1800, check=False)
             if got.returncode != 0:
                 raise RuntimeError(got.stderr.decode("utf-8", "replace")[-2000:] or f"{engine} run failed")
