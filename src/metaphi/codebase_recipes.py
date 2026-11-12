@@ -355,7 +355,7 @@ def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recip
     out: list[Recipe] = []
     if "go.mod" in paths:
         v = re.search(rb"^go\s+1\.(\d+)", read("go.mod") or b"", re.MULTILINE)
-        out.append(Recipe("true", "go build ./...", "go test -v ./...",
+        out.append(Recipe("true", "go build ./...", "go test -count=1 -v ./...",
                           f"golang:1.{max(int(v.group(1)), 21)}" if v else GO))
     if "Cargo.toml" in paths:
         out.append(Recipe("true", f"cargo build --tests -j {JOBS}", "cargo test --no-fail-fast", RUST))
@@ -366,7 +366,7 @@ def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recip
     if "gradlew" in paths:
         copy = "s=$?; find . -path '*/test-results/*' -name '*.xml' -exec cp {} \"$KENNET_JUNIT\"/ \\; ; exit $s"
         out.append(Recipe("true", "sh ./gradlew --no-daemon testClasses",
-                          f"sh ./gradlew --no-daemon test --continue; {copy}", f"eclipse-temurin:{JDK}"))
+                          f"sh ./gradlew --no-daemon cleanTest test --continue; {copy}", f"eclipse-temurin:{JDK}"))
     if "package.json" in paths:
         out += _node(paths, read)
     out += _python(paths, read)

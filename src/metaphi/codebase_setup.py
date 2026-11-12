@@ -28,7 +28,7 @@ TOKENS = 4096
 
 CACHE = "/kennet/cache"
 CACHES = {"CCACHE_DIR": f"{CACHE}/ccache", "PIP_CACHE_DIR": f"{CACHE}/pip", "UV_CACHE_DIR": f"{CACHE}/uv",
-          "npm_config_cache": f"{CACHE}/npm", "GOMODCACHE": f"{CACHE}/gomod", "GOCACHE": f"{CACHE}/gobuild",
+          "npm_config_cache": f"{CACHE}/npm", "GOMODCACHE": f"{CACHE}/gomod", "GOCACHE": f"{CACHE}/gobuild", "GOFLAGS": "-count=1",
           "GRADLE_USER_HOME": f"{CACHE}/gradle", "MAVEN_OPTS": f"-Dmaven.repo.local={CACHE}/m2",
           "CARGO_HOME": f"{CACHE}/cargo"}
 
