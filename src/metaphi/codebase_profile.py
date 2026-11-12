@@ -24,7 +24,7 @@ from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 from metaphi.twin import _client, _key, _send
 
-SCHEMA = "kennet.repo_metadata.v10"
+SCHEMA = "kennet.repo_metadata.v11"
 CHECKS_SCHEMA = "kennet.repo_checks.v1"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
@@ -539,10 +539,10 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
             mine.steps.total["profile"] = local.get("seconds", 0.0)
             if mine.cache:
                 mine.cache.mkdir()
-            found, setup = None, [] if plan.test is None else None
+            found, setup, tip = None, [] if plan.test is None else None, {}
 
             def setup_at(sha: str, where: Path, era: int | None, later: tuple[codebase_setup.Recipe, str] | None,
-                         repo=repo, mine=mine, setup=setup) -> codebase_setup.Recipe | None:
+                         repo=repo, mine=mine, setup=setup, tip=tip) -> codebase_setup.Recipe | None:
                 tree = codebase_checks._tree(repo, sha)
 
                 def write(d: Path) -> None:
@@ -550,7 +550,8 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                 with mine.steps.step("setup", era=era):
                     recipe, how = codebase_recipes.find(write, _reader(repo, tree), set(tree), "", box, where, say,
                                                         plan.run_minutes, mine.cache, mine.steps,
-                                                        skip=later[0] if later else None)
+                                                        skip=later[0] if later else None,
+                                                        tip=tip if era is None else None)
                     setup.append({"era": era, **how})
                     if recipe is None and (m := model()) is not None:
                         recipe, how = codebase_setup.find(write, "", m, box, where / "model", say, plan.run_minutes,
@@ -577,7 +578,8 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                 got = codebase_checks.run(repo, local["name"], local["tip"], local["commits"], local["order"], picks,
                                           picked["runs"], mine, say, found, era_of,
                                           repair if found and setup is not None else None,
-                                          (picked.get("breaks") or [[]] * len(kept))[n], local.get("paths"))
+                                          (picked.get("breaks") or [[]] * len(kept))[n], local.get("paths"),
+                                          tip or None)
             except Exception as e:   # noqa: BLE001
                 say(f"{local['name']}: tests stopped ({type(e).__name__}: {e})")
                 got = {"from": "tip", "runs": picked["runs"], "build_given": plan.build is not None,

@@ -367,7 +367,8 @@ def _neither_built(row: dict) -> bool:
 def run(repo: Path, name: str, tip: str, commits: list[dict], order: dict[str, int], picks: list[int], runs: int,
         plan: Plan, say: Callable[[str], None], found: tuple[Recipe, str | None] | None = None,
         eras: list[int | None] | None = None, repair: Repair | None = None, breaks: list[dict] | None = None,
-        paths: dict[int, str] | None = None) -> dict[str, Any]:
+        paths: dict[int, str] | None = None, tipped: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`tipped`: the tip's build and test as setup already ran them; the tip is then not run again."""
     shas = {i: sha for sha, i in order.items()}
     by_id = {c["commit"]: c for c in commits}
     deadline = time.monotonic() + plan.hours * 3600
@@ -383,10 +384,13 @@ def run(repo: Path, name: str, tip: str, commits: list[dict], order: dict[str, i
     say(f"{name}: running; logs in {logs.root}")
     tip_cases: list[dict[str, bool] | None] = []
     try:
-        with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch, \
-                plan.steps.step("tip"):
-            out["tip"], tip_cases = _side(repo, _tree(repo, tip), Path(scratch) / "tip", plan,
-                                  {**os.environ, "KENNET_TESTS": ""}, 1, logs, "000-tip", say, found, jobs)
+        if tipped:
+            out["tip"], tip_cases = tipped["side"], tipped["cases"]
+        else:
+            with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch, \
+                    plan.steps.step("tip"):
+                out["tip"], tip_cases = _side(repo, _tree(repo, tip), Path(scratch) / "tip", plan,
+                                              {**os.environ, "KENNET_TESTS": ""}, 1, logs, "000-tip", say, found, jobs)
         said = out["tip"]
         built = "build" not in said or said["build"]["exit"] == 0
         t = said["tests"][0] if said["tests"] else None
