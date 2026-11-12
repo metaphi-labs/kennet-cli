@@ -73,8 +73,8 @@ def test_build_failure_class(tmp_path, printed, code, why):
 
 
 @pytest.mark.parametrize(("printed", "code", "counts", "why"), [
-    # go-fantasy's own: a config path it reads from the environment, not given
-    ("=== RUN   TestLogin\npanic: FSP_SERVER_CONFIG not proper\n\ngoroutine 1 [running]:\nFAIL\tfsp/tests\t0.01s\n",
+    # a config path the tests read from the environment, not given
+    ("=== RUN   TestLogin\npanic: APP_CONFIG not proper\n\ngoroutine 1 [running]:\nFAIL\tapp/tests\t0.01s\n",
      1, None, "config"),
     ("--- FAIL: TestQuery\n    db_test.go:20: dial tcp 127.0.0.1:5432: connect: connection refused\n", 1, (4, 0), "service"),
     ("E   psycopg.OperationalError: connection failed: Is the server running on that host\n", 1, (9, 0), "service"),
