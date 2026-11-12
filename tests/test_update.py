@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import threading
+from pathlib import Path
 
 import httpx
 import pytest
@@ -367,3 +368,41 @@ def test_version_prints_the_version(capsys):
     with pytest.raises(SystemExit) as e:
         cli.main(["--version"])
     assert e.value.code == 0 and capsys.readouterr().out == f"kennet {__version__}\n"
+
+
+def _before_run(monkeypatch, method, latest="9.9.9", link=True):
+    from metaphi import update as u
+    for k in ("KENNET_UPDATED", "CI", "KENNET_DISABLE_AUTOUPDATE"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(u, "check", lambda force=False: {"latest": latest})
+    monkeypatch.setattr(u, "install_method", lambda *a, **k: method)
+    monkeypatch.setattr(u, "link_path", lambda: Path("/tmp/kennet-link") if link else None)
+    calls = {"install": [], "exec": []}
+    monkeypatch.setattr(u, "install", lambda v, link: calls["install"].append(v) or Path(f"/v/{v}/kennet"))
+    monkeypatch.setattr(u.os, "execv", lambda exe, args: calls["exec"].append((exe, args)))
+    said = []
+    return u, calls, said
+
+
+def test_a_binary_install_updates_before_a_profile_and_runs_the_same_command_again(monkeypatch):
+    u, calls, said = _before_run(monkeypatch, "binary")
+    u.current_for(["profile-codebase", ".", "--commits"], said.append)
+    assert calls["install"] == ["9.9.9"]
+    assert calls["exec"] == [("/v/9.9.9/kennet", ["/v/9.9.9/kennet", "profile-codebase", ".", "--commits"])]
+    assert said[0].startswith("Updating kennet") and u.os.environ["KENNET_UPDATED"] == "9.9.9"
+    monkeypatch.delenv("KENNET_UPDATED")
+
+
+def test_any_other_install_is_told_its_command_and_goes_on(monkeypatch):
+    u, calls, said = _before_run(monkeypatch, "pipx")
+    u.current_for(["profile-codebase"], said.append)
+    assert not calls["install"] and not calls["exec"] and "pipx upgrade kennet" in said[0]
+
+
+def test_current_or_already_updated_or_ci_does_nothing(monkeypatch):
+    from metaphi import __version__
+    u, calls, said = _before_run(monkeypatch, "binary", latest=__version__)
+    u.current_for(["profile-codebase"], said.append)
+    monkeypatch.setenv("CI", "1")
+    u.current_for(["profile-codebase"], said.append)
+    assert not said and not calls["install"]

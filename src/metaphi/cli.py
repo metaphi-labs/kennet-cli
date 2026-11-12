@@ -368,6 +368,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     if a.deep and a.test:
         raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
     say = _progress(a)
+    update.current_for(sys.argv[1:], say)   # a profile is read by the version that made it: the newest, every run
     codebase_profile.say = say
     try:
         codebase_profile.key_ready()
