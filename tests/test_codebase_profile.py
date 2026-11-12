@@ -970,6 +970,7 @@ def test_gaps_and_interface(tmp_path):
 @respx.mock
 def test_every_byte_sent_is_kept_and_matched_against_the_servers_receipt(made, capsys, tmp_path, monkeypatch):
     import hashlib
+
     from metaphi import codebase_setup
     monkeypatch.setattr(codebase_setup, "engine", lambda: None)
     monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))

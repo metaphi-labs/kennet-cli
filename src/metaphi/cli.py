@@ -36,9 +36,9 @@ import sys
 import time
 import traceback
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from collections.abc import Callable
 from typing import IO
 
 import httpx
