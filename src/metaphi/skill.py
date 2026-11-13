@@ -565,6 +565,9 @@ checks that can be run on a design (simulation, tolerances, manufacturability, t
 
 Name the repository: a path to a full git clone or a git URL. A broker names several in one run.
 
+`--json` sends what it measured. Ask the user before running it; at their own terminal, `kennet profile-codebase`
+shows the checks first and sends only when they answer yes.
+
 ```sh
 kennet profile-codebase ./their-repo --json
 kennet profile-codebase ./core ./billing https://github.com/acme/ledger.git --json
@@ -574,7 +577,7 @@ It reads the git history, then builds and tests the latest commit once in a temp
 Docker or Podman when one is running). It sends counts and ids: line, size and token counts per commit and file
 with numbers in place of names, the repository's name and commit hashes, and the build and test run's exit codes,
 timings, test counts and logs. File names, authors, commit messages and source are never sent. Everything sent is
-kept in `./kennet-profile/<reference>/`: show the user that folder if they ask what left.
+kept in `./kennet-profile/<run>/sent/`: show the user that folder if they ask what left.
 
 - Exit 0: `{{"reference": "cbp_..."}}`. Tell the user it was received, the reference, and that Metaphi AI reviews
   every profile and replies by email to the address they signed in with. There is nothing to poll.

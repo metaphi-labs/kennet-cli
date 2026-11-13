@@ -382,16 +382,10 @@ def _sent(home: Path, name: str, route: str, body: bytes, answer: dict, say: Cal
         say(f"The server received {got.get('bytes')} bytes for {name}, not the {len(body)} sent ({ledger})")
 
 
-def cmd_profile_codebase(a: argparse.Namespace) -> None:
-    from metaphi import codebase_checks, codebase_profile
-    from metaphi.steps import Steps
-    if a.build and not a.test:
-        raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
-    if a.deep and a.test:
-        raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
-    say = _progress(a)
-    update.current_for(sys.argv[1:], say)   # a profile is read by the version that made it: the newest, every run
-    codebase_profile.say = say
+def _profile_key(a: argparse.Namespace, say: Callable[[str], None]) -> None:
+    """A key that sends codebase profiles, or why not: one saved by a sign-in, picked up when the organization was
+    made or approved since, or got by signing in here when a person is at the terminal."""
+    from metaphi import codebase_profile
     try:
         codebase_profile.key_ready()
     except accounts.Error as e:
@@ -405,21 +399,52 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             got = accounts.login(say=say)
             say(f"Signed in as {got.get('email')}.")
             codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
-    say(codebase_profile.NOTICE)
+
+
+SEND_ASK = "Send these results to Metaphi AI for evaluation? Your source code stays here. [y/N]: "
+
+
+def cmd_profile_codebase(a: argparse.Namespace) -> None:
+    """Measure here, show the checks, then send on the person's word. At a terminal nothing leaves the machine and no
+    sign-in is asked until they answer yes; away from one (a platform's onboarding, CI) the run is sent with the key
+    it holds. --commits and --deep sign in first: the server draws the commits, and hands the model its key."""
+    from metaphi import codebase_checks, codebase_profile
+    from metaphi.steps import Steps
+    if a.build and not a.test:
+        raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
+    if a.deep and a.test:
+        raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
+    say = _progress(a)
+    update.current_for(sys.argv[1:], say)   # a profile is read by the version that made it: the newest, every run
+    codebase_profile.say = say
+    commits = a.commits or a.deep   # past commits are opt-in; the default builds and tests the tip once
+    asking = not commits and not a.json and _interactive()
+    if not asking:
+        _profile_key(a, say)
+    say(codebase_profile.LOCAL_NOTICE if asking else codebase_profile.NOTICE)
     with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
         steps = Steps()
-        body = codebase_profile.packed(doc)
-        with steps.step("send"):
-            answer = codebase_profile.post(body)
-        ref = answer["id"]
-        home = Path.cwd() / PROFILE_HOME / ref
+        home = Path.cwd() / PROFILE_HOME / codebase_profile.run_id(doc)
         home.mkdir(parents=True, exist_ok=True)
         (home / "profile.json").write_text(json.dumps(doc, indent=1))
-        _sent(home, "profile.json.gz", "/codebase-profiles", body, answer, say)
-        say(f"Sent ({ref}); a copy is in {home / 'profile.json'}, every byte sent in {home / 'sent'}")
-        commits = a.commits or a.deep   # past commits are opt-in; the default builds and tests the tip once
+
+        def sent_profile() -> str:
+            """The profile sent once for this run, its reference kept beside it."""
+            try:
+                return (home / "reference").read_text().strip()
+            except OSError:
+                pass
+            body = codebase_profile.packed(doc)
+            with steps.step("send"):
+                answer = codebase_profile.post(body)
+            _sent(home, "profile.json.gz", "/codebase-profiles", body, answer, say)
+            (home / "reference").write_text(answer["id"])
+            for sent in ("checks.sent", "logs.sent"):
+                (home / sent).unlink(missing_ok=True)
+            return answer["id"]
+        ref = sent_profile() if commits else None
         asked = {"test": a.test, "build": a.build, "deep": a.deep, "commits": commits}
         done, report = home / "checks.json", None
         try:
@@ -442,13 +467,31 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             report = codebase_profile.checked(kept, picked or None, plan, say, ref, steps)
             done.write_text(json.dumps(report, indent=1))
             (home / "asked.json").write_text(json.dumps(asked))
+        readiness = codebase_profile.readiness(doc, report)
+        (home / "readiness.json").write_text(json.dumps(readiness, indent=1))
+        missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
+                   for k, r in zip(kept, report["repos"], strict=True)
+                   if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
+        if not a.json:
+            _readiness(readiness)
+        for given, tries in missing:
+            say(_rerun(given, tries))
+        if asking:
+            try:
+                said = input(SEND_ASK).strip().lower()
+            except EOFError:
+                said = ""
+            if said not in ("y", "yes"):
+                say(f"Nothing was sent. The results are in {home}")
+                return
+            _profile_key(a, say)
         try:
+            ref = ref or sent_profile()
             if not (home / "checks.sent").is_file():
                 body = codebase_profile.packed(report)
                 with steps.step("post_checks"):
                     answered = codebase_profile.post_checks(ref, body)
                 _sent(home, "checks.json.gz", f"/codebase-profiles/{ref}/checks", body, answered, say)
-                (home / "readiness.json").write_text(json.dumps(answered.get("readiness") or {}, indent=1))
                 (home / "checks.sent").touch()
             if not (home / "logs.sent").is_file():
                 logs = codebase_profile.logs_packed(home / "logs", ref, [k["name"] for k in kept])
@@ -459,23 +502,13 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         except errors.MetaphiError as e:
             e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"
             raise
-    missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
-               for k, r in zip(kept, report["repos"], strict=True)
-               if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
-    try:
-        readiness = json.loads((home / "readiness.json").read_text())
-    except (OSError, ValueError):
-        readiness = {}
-    if not a.json:
-        _readiness(readiness)
-    for given, tries in missing:
-        say(_rerun(given, tries))
     n, gone = len(doc["repos"]), doc["skipped"]
     if a.json:
         print(json.dumps({"reference": ref, "readiness": readiness or None}, indent=2))
         return
+    say(f"Sent ({ref}); every byte sent is in {home / 'sent'}")
     _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
-               + (f", {len(gone)} skipped (above)" if gone else ""))
+               + (f", {len(gone)} skipped (above)" if gone else "") + ". Metaphi AI contacts you if it accepts")
 
 
 READY_CELL = {"yes": ("32", "\u2713 yes"), "no": ("31", "\u2717 no"), "not_collected": ("2", "\u00b7 not collected"),

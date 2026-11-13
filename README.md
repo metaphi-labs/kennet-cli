@@ -364,9 +364,9 @@ Want a mutual NDA in place first? `kennet mnda` says where your organization's s
 
 Working through a coding agent? `kennet agents install` gives it the `kennet-partner` skill: the whole path, from install to profile to NDA.
 
-Not signed in yet? At a terminal it signs you in first (the browser opens on a code), then goes on: no `kennet login` beforehand.
+At a terminal it runs on this machine and sends nothing until you say so: it shows five checks (CI configuration, service containers, build, tests run, tests pass) and asks `Send these results to Metaphi AI for evaluation? [y/N]`. Answer yes and it signs you in (the browser opens on a code) and sends; answer no and nothing leaves. Away from a terminal (`--json`, CI, a platform's onboarding) it sends with the key it holds. `--commits` and `--deep` sign in first: Metaphi AI draws the commits, and hands the model its key.
 
-It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept byte for byte in `./kennet-profile/<id>/sent/`; `sent.json` lists each file with its sha256 and the sha256 Metaphi AI received. With `--commits`, what Metaphi AI asked this machine to run is in `sample.json`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
+It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept byte for byte in `./kennet-profile/<run>/sent/`; `sent.json` lists each file with its sha256 and the sha256 Metaphi AI received. With `--commits`, what Metaphi AI asked this machine to run is in `sample.json`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
 
 ```sh
 kennet profile-codebase ./core --build 'make' --test 'make test'
