@@ -43,7 +43,7 @@ from typing import IO
 
 import httpx
 
-from metaphi import __version__, accounts, admin, agents, config, errors, skill, update
+from metaphi import __version__, accounts, admin, agents, config, errors, palette, skill, update
 
 FAILED, USAGE, AUTH, LATER, UPGRADE = 1, 2, 3, 4, 5
 
@@ -402,6 +402,28 @@ def _profile_key(a: argparse.Namespace, say: Callable[[str], None]) -> None:
 
 
 SEND_ASK = "Send these results to Metaphi AI for evaluation? Your source code stays here. [y/N]: "
+_STEP = re.compile(r"^([^\s:][^:\n]{0,120}): ")
+_PATH = re.compile(r" \((/[^)]*)\)")
+
+
+def _profile_say(say: Callable[[str], None], stream: IO[str]) -> Callable[[str], None]:
+    """Progress as it reads at a terminal: the repository a line is of in the accent, the inner steps and the paths
+    to look things up in dim; the words as they are everywhere else."""
+    if not palette.on(stream):
+        return say
+
+    def styled(line: str) -> None:
+        if line[:1].isspace():
+            return say(palette.paint(line, "dim", stream))
+        line = _PATH.sub(lambda m: " " + palette.paint(f"({m.group(1)})", "dim", stream), line)
+        say(_STEP.sub(lambda m: palette.paint(m.group(1), "accent", stream) + ": ", line, count=1))
+    return styled
+
+
+def _send_ask(stream: IO[str]) -> str:
+    return (palette.paint("Send these results to Metaphi AI for evaluation?", None, stream, bold=True) + " "
+            + palette.paint("Your source code stays here.", "dim", stream) + " "
+            + palette.paint("[y/N]", "accent", stream) + ": ") if palette.on(stream) else SEND_ASK
 
 
 def cmd_profile_codebase(a: argparse.Namespace) -> None:
@@ -416,12 +438,13 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
     say = _progress(a)
     update.current_for(sys.argv[1:], say)   # a profile is read by the version that made it: the newest, every run
-    codebase_profile.say = say
+    stream = sys.stderr if a.json else sys.stdout
+    say = codebase_profile.say = _profile_say(say, stream)
     commits = a.commits or a.deep   # past commits are opt-in; the default builds and tests the tip once
     asking = not commits and not a.json and _interactive()
     if not asking:
         _profile_key(a, say)
-    say(codebase_profile.LOCAL_NOTICE if asking else codebase_profile.NOTICE)
+    say(palette.paint(codebase_profile.LOCAL_NOTICE if asking else codebase_profile.NOTICE, "dim", stream))
     with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
@@ -478,11 +501,11 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             say(_rerun(given, tries))
         if asking:
             try:
-                said = input(SEND_ASK).strip().lower()
+                said = input(_send_ask(stream)).strip().lower()
             except EOFError:
                 said = ""
             if said not in ("y", "yes"):
-                say(f"Nothing was sent. The results are in {home}")
+                say("Nothing was sent. The results stay here " + palette.paint(f"({home})", "dim", stream))
                 return
             _profile_key(a, say)
         try:
@@ -506,9 +529,10 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     if a.json:
         print(json.dumps({"reference": ref, "readiness": readiness or None}, indent=2))
         return
-    say(f"Sent ({ref}); every byte sent is in {home / 'sent'}")
-    _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
-               + (f", {len(gone)} skipped (above)" if gone else "") + ". Metaphi AI contacts you if it accepts")
+    shared = f"{n} {'repository' if n == 1 else 'repositories'} shared" + (f", {len(gone)} skipped (above)" if gone else "")
+    say(palette.paint("\u2713 Sent.", "ok", stream, bold=True) + f" {shared}. Metaphi AI contacts you if it accepts.")
+    say(f"  Reference {palette.paint(ref, 'accent', stream, bold=True)}  "
+        + palette.paint(f"every byte sent is in {home / 'sent'}", "dim", stream))
 
 
 READY_CELL = {"yes": ("32", "\u2713 yes"), "no": ("31", "\u2717 no"), "not_collected": ("2", "\u00b7 not collected"),
@@ -523,10 +547,12 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
     repos = [r for r in got.get("repos") or [] if isinstance(r, dict) and r.get("checks")]
     if not repos:
         return
-    colour = out.isatty() and not os.environ.get("NO_COLOR")
+    tones = {"2": ("dim", False), "1": (None, True), "32": ("ok", False), "31": ("no", False),
+             "1;32": ("ok", True), "head": ("accent", True)}
 
     def paint(code: str, text: str) -> str:
-        return f"\x1b[{code}m{text}\x1b[0m" if colour and code else text
+        tone, bold = tones.get(code, (None, False))
+        return palette.paint(text, tone, out, bold)
     labels = list(dict.fromkeys(c.get("label", "") for r in repos for c in r["checks"]))
     state = {(r.get("name", ""), c.get("label", "")): c.get("state", "not_collected") for r in repos for c in r["checks"]}
     first = max(len(x) for x in labels + ["Yes"])
@@ -541,7 +567,7 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
             paint("2", "\u2502") + f" {c} " for c in cells) + paint("2", "\u2502"))
         print(file=out)
         print(rule("\u256d", "\u252c", "\u256e"), file=out)
-        print(line(" " * first, [paint("1", r.get("name", "").ljust(w)) for r, w in zip(part, widths)]), file=out)
+        print(line(" " * first, [paint("head", r.get("name", "").ljust(w)) for r, w in zip(part, widths)]), file=out)
         print(rule("\u251c", "\u253c", "\u2524"), file=out)
         for label in labels:
             cells = []
@@ -555,7 +581,7 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
             asked = [c for c in r["checks"] if c.get("state") != "not_needed"]   # not collected counts as not yes
             yes = sum(c.get("state") == "yes" for c in asked)
             text = f"{yes} of {len(asked)}".ljust(w)
-            tallies.append(paint("1;32" if asked and yes == len(asked) else "1;31" if asked else "2", text))
+            tallies.append(paint("1;32" if asked and yes == len(asked) else "1" if asked else "2", text))
         print(line(paint("1", "Yes".ljust(first)), tallies), file=out)
         print(rule("\u2570", "\u2534", "\u256f"), file=out)
     fixes = [(r.get("name", ""), c) for r in repos for c in r["checks"] if c.get("state") == "no" and c.get("fix")]
@@ -563,13 +589,13 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
         print(file=out)
         print(paint("1", "To turn a no to yes"), file=out)
         for name, c in fixes:
-            print(f"  {paint('1', name)} \u00b7 {c.get('label', '')}", file=out)
+            print(f"  {paint('head', name)} \u00b7 {c.get('label', '')}", file=out)
             print(paint("2", f"    {c['fix']}"), file=out)
     if any(c.get("state") == "not_collected" for r in repos for c in r["checks"]):
         print(paint("2", "\n  not collected: the CLI that ran predates this check; run the latest version "
                          "(kennet update) to collect it."), file=out)
     if got.get("note"):
-        print(f"\n{got['note']}", file=out)
+        print("\n" + paint("2", got["note"]), file=out)
     print(file=out)
 
 

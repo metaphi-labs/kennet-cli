@@ -662,7 +662,7 @@ def test_default_finds_nothing(repo, capsys, tmp_path, monkeypatch):
     assert sent["commits"] == [] and sent["breaks"] == []
     out = capsys.readouterr().out
     assert f"No build or test found in {repo}" in out and "--build '<build>' --test '<test>'" in out
-    assert "--deep" in out and "Done. 1 repository shared" in out
+    assert "--deep" in out and "Sent. 1 repository shared" in out
     assert json.loads((_home(tmp_path) / "profile.json").read_text())["repos"]
 
 

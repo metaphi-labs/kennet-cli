@@ -1921,3 +1921,21 @@ def test_org_domain_prints_the_record_and_verifies(capsys):
     respx.get(f"{A}/keys/orgs/acme/domains").respond(json=[{"domain": "acme.test", "status": "verified", "method": "dns"}])
     assert cli.main(["org", "domain"]) == 0
     assert "acme.test" in capsys.readouterr().out
+
+
+def test_the_palette_is_plain_off_a_terminal_and_truecolor_where_said(monkeypatch):
+    import io
+
+    from metaphi import palette
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+    assert palette.paint("cbp_1", "accent", io.StringIO()) == "cbp_1"
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    assert palette.paint("cbp_1", "accent", Tty(), bold=True) == "\x1b[1;38;2;126;140;224mcbp_1\x1b[0m"
+    monkeypatch.setenv("COLORTERM", "")
+    assert palette.paint("yes", "ok", Tty()) == "\x1b[38;5;108myes\x1b[0m"
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert palette.paint("yes", "ok", Tty()) == "yes"
