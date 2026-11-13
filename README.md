@@ -357,7 +357,7 @@ Want a mutual NDA in place first? `kennet mnda` says where your organization's s
 
 Working through a coding agent? `kennet agents install` gives it the `kennet-partner` skill: the whole path, from install to profile to NDA.
 
-At a terminal it runs on this machine and sends nothing until you say so: it shows five checks (CI configuration, service containers, build, tests run, tests pass) and asks `Send these results to Metaphi AI for evaluation? [y/N]`. Answer yes and it signs you in (the browser opens on a code) and sends; answer no and nothing leaves. Away from a terminal (`--json`, CI, a platform's onboarding) it sends with the key it holds. `--commits` and `--deep` sign in first: Metaphi AI draws the commits, and hands the model its key.
+At a terminal it runs locally and sends nothing until you answer yes: it shows five checks (CI config, services start, builds, tests run, tests pass), then asks `Send these results to Metaphi AI? [y/N]`. Yes signs you in (approve in the browser) and sends; no sends nothing. Away from a terminal (`--json`, CI, a platform's onboarding) it sends with the key it holds. `--commits` and `--deep` sign in first.
 
 It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept byte for byte in `./kennet-profile/<run>/sent/`; `sent.json` lists each file with its sha256 and the sha256 Metaphi AI received. With `--commits`, what Metaphi AI asked this machine to run is in `sample.json`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
 
