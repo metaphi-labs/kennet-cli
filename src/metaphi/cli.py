@@ -133,8 +133,6 @@ def _signed_in(a: argparse.Namespace, got: dict, joined: dict | None = None) -> 
 
 
 def cmd_login(a: argparse.Namespace) -> None:
-    if a.json:   # a caller reading JSON is a program: the page and the code are handed over, never a browser tab
-        a.no_browser = True
     key = a.api_key or (_read_key() if a.with_api_key else None)
     if a.with_api_key or a.api_key:
         if not key or not key.startswith(config.KEY_PREFIX):
@@ -145,31 +143,12 @@ def cmd_login(a: argparse.Namespace) -> None:
         config.save(cfg)
         _out(a, {"keys": True}, "key saved on this machine")
         return
-    say = _progress(a)
     # a refusal for a sign-in too old to change an organization (`step_up_required`) asks for a fresh one, not a pickup
     if accounts.pending() is None and not config.load().get("step_up") and (got := accounts.pickup()) is not None:
-        # signed in already: the keys come by the token this machine holds, and nobody opens a browser
-        _signed_in(a, got)
+        _signed_in(a, got)   # signed in already: the keys come by the token this machine holds
         return
-    if a.complete:
-        held = accounts.pending()
-        if held is not None:
-            say("Waiting for the sign-in to be approved")
-        # away from a terminal the caller is a tool call with a clock of its own: answer within it, to be called again
-        _signed_in(a, accounts.finish(wait_s=a.timeout or (None if _interactive() else 60.0), at_once=True))
-        return
-    if a.no_wait or not (a.wait or _interactive()):
-        # away from a terminal nobody reads a prompt that then blocks: hand the page and the code over, and stop
-        held = accounts.pending() or accounts.start()   # asked twice, the code a person may hold stays the code
-        if not a.no_browser:
-            accounts.webbrowser.open(held["open"])
-        _out(a, {"verification_uri": held["verification_uri"], "verification_uri_complete": held["open"],
-                 "user_code": held["user_code"], "expires_in": int(held["expires"] - time.time()), "status": "pending",
-                 "next_step": "kennet login --complete"},
-             f"Sign in at {held['open']}",
-             "Next: kennet login --complete   (waits for the approval; safe to run again)")
-        return
-    _signed_in(a, accounts.login(say=say, open_browser=not a.no_browser))
+    # away from a terminal the caller is a tool call with a clock of its own: wait within it; run again to go on waiting
+    _signed_in(a, accounts.login(say=_progress(a), wait_s=None if _interactive() else 60.0))
 
 
 def cmd_mnda(a: argparse.Namespace) -> None:
@@ -1532,8 +1511,7 @@ examples:
 from an agent or a script (no terminal): add --json; stdout is then the result or the error object alone.
   kennet agents install             teach every coding agent here this CLI, and connect Kennet's MCP server
   kennet skill show                 the guide an agent follows, for this version
-  kennet login --json               prints the page and the code, and returns; never opens a browser
-  kennet login --complete           waits for the approval, saves the keys
+  kennet login --json               opens the browser, waits up to a minute for the approval; again to go on
   METAPHI_API_KEY=mai_sk_... kennet twin trace.json --json    no sign-in: a key from the console
 
 exit status: 0 done, 1 failed, 2 usage, 3 sign-in or key needed, 4 try the same call later, 5 upgrade kennet
@@ -1574,16 +1552,6 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--with-api-key", action="store_true",
                    help="save an organization key on this machine instead of signing in; reads it from stdin")
     s.add_argument("--api-key", action=_OnArgv, help=argparse.SUPPRESS)
-    s.add_argument("--no-browser", action="store_true", help="print the link instead of opening it")
-    how = s.add_mutually_exclusive_group()
-    how.add_argument("--no-wait", action="store_true", help="print the page and the code and return; "
-                     "`kennet login --complete` finishes it. The default away from a terminal")
-    how.add_argument("--complete", action="store_true", help="wait for the approval of the sign-in under way and "
-                     "save the keys")
-    how.add_argument("--wait", action="store_true", help="wait for the approval in this call, even away from a "
-                     "terminal")
-    s.add_argument("--timeout", type=_seconds, help="with --complete: seconds to wait for the approval (default: "
-                   "until the code expires at a terminal, 60 away from one); past it, run --complete again")
     _json_flag(s)
     s.set_defaults(fn=cmd_login)
     sub.add_parser("logout", help="sign out everywhere this sign-in is used, and revoke its keys").set_defaults(

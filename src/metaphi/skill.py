@@ -46,8 +46,7 @@ their data goes.
 ## Rules
 
 - Add `--json` to every command. stdout is then one JSON object: the result, or `{{"error": {{...}}}}`. Progress
-  is on stderr. Read stdout only: stderr repeats an error in words, for a person. Under `--json` nothing opens a
-  browser: `kennet login --json` prints the page and the code for the user to open.
+  is on stderr. Read stdout only: stderr repeats an error in words, for a person.
 - The exit status says what kind of end it was:
 
   | Exit | Meaning |
@@ -66,8 +65,7 @@ their data goes.
 - A command retries a failed request for at most 5 seconds by itself. Past that it returns the error, so a
   command that fails does so quickly; waiting longer is yours to do.
 - Never ask the user to paste a token, key or code into the chat, never print one, never pass one as an
-  argument. The one code they handle is the sign-in's `user_code`, which they check on the page. Keys are saved by
-  `kennet login` or come from `METAPHI_API_KEY`.
+  argument. Keys are saved by `kennet login` or come from `METAPHI_API_KEY`.
 - An organization has one free test run in all (`--test`): a real twin through the same pipeline, of a file up
   to 2 MiB. Spend it on a representative file, and ask the user which one before you do. Once it is used the
   refusal is `test_runs_used` (exit 1; `next_step` is the same command without `--test`): runs from then on are
@@ -131,30 +129,14 @@ It asks the servers, and asks the twin service whether each key works: `key.stat
 kennet login --json
 ```
 
-It returns at once with `"status": "pending"`: nobody is signed in yet. With `--json` it never opens a browser
-(at a terminal, without `--json`, it opens the page; `--no-browser` only prints it). Tell the user, with the page
-and code exactly as printed:
-
-- Open `verification_uri_complete` in any browser: this machine's, or another device's (a phone, a laptop) when
-  this one has none, as over SSH or in a sandbox. The code ties the page to this terminal.
-- Sign in with Google or GitHub as their work email, the address their organization knows them by. The address
-  must be verified with that provider.
-- Before approving, check that the page names the Kennet CLI and shows the same code as `user_code`; if either
-  is off, do not approve. Approve within `expires_in` seconds.
-
-Running it again while that code stands returns the same code. Then:
-
-```sh
-kennet login --complete --json
-```
-
-This waits up to 60 seconds for the approval (`--timeout <seconds>` changes that). `error.code`
-`authorization_pending` means not approved yet: run it again, or stop and wait for the user to say they have.
-`"keys": true` means the organization's live and test keys are saved on this machine: run `kennet whoami --json`
-and tell the user the `email` and `org` it names. `error.code` `no_api_key` means the sign-in worked and no key
-came with it: `reason` beside `error` says why (step 1's table). Each sign-in replaces the keys the one before it
-saved on any machine. On a machine that is signed in already, `kennet login --json` opens no browser and returns
-this result at once.
+It opens the sign-in page in the user's browser and waits up to 60 seconds. Tell the user to approve it there,
+signing in with Google or GitHub as their work email (verified with that provider). `error.code`
+`authorization_pending` means not approved yet: run it again (it waits on the same sign-in, with no new page), or
+stop and wait for the user to say they have. `"keys": true` means the organization's live and test keys are saved
+on this machine: run `kennet whoami --json` and tell the user the `email` and `org` it names. `error.code`
+`no_api_key` means the sign-in worked and no key came with it: `reason` beside `error` says why (step 1's table).
+Each sign-in replaces the keys the one before it saved on any machine. On a machine that is signed in already, it
+opens no browser and returns this result at once.
 
 When the page does not get there:
 
@@ -162,7 +144,7 @@ When the page does not get there:
 | --- | --- |
 | Nothing opens, or the sign-in window closes at once | The browser blocked the popup: allow popups for the page, and click sign-in again. |
 | "email not verified" | The address is not verified with that provider: verify it there (GitHub: Settings, Emails), or sign in with the other provider. |
-| "that code is unknown or expired" (`unknown_or_expired`) | Run `kennet login --json` for a new code, and start again. |
+| "that code is unknown or expired" (`unknown_or_expired`) | Run `kennet login --json` again; it opens a fresh page. |
 | "that sign-in is too old to approve a terminal" (`sign_in_too_old`) | Sign in again on the page with the button, then approve. |
 | `whoami` names the wrong address | Run `kennet logout`, then step 2 again; ask them to sign out of that account in the browser, or use a private window. |
 
@@ -225,7 +207,7 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `update_missing`, `update_broken`, `update_not_permitted` | The update could not be installed here; nothing changed. `next_step` is the install.sh line: ask the user before running it. |
 | `not_signed_in`, `login_expired`, `login_refused` | Step 2, from its start. |
 | `step_up_required` | A change to the organization needs a recent sign-in. Step 2, from its start, then the same command once more. |
-| `authorization_pending` | The user has not approved the code yet. Run `kennet login --complete --json` again, or wait for them. |
+| `authorization_pending` | The user has not approved the sign-in yet. Run `kennet login --json` again, or wait for them. |
 | `no_api_key` | Signed in, and no key came with the sign-in. If `next_step` is `kennet org create <name>`, the user is in no organization: make theirs (step 1). If it is `kennet login`, run `kennet login --json` once: it picks the keys up, with no browser, if access was given since. If it comes back `no_api_key` again, tell the user the message and stop. |
 | `invalid_api_key`, `missing_api_key` | The key was revoked or replaced, often by a later sign-in elsewhere. Step 2, or the user sets a new `METAPHI_API_KEY`. |
 | `insufficient_scope` | The key does not hold access to what the command reaches. Run `kennet login --json` once: a signed-in machine is handed new keys with no browser. If it repeats, tell the user. |
@@ -265,7 +247,7 @@ kennet registry login --json                        # signs docker in to your im
 kennet delivery diff eswe-mini@0.1.0 eswe-mini@0.1.1 --json   # {{"added", "removed", "changed": [{{"name", "grading_changed", "files"}}]}}; either side can be a pulled directory
 ```
 
-From nothing to a set ready to run, in order: `kennet login --json` (and `--complete`), `delivery list`,
+From nothing to a set ready to run, in order: `kennet login --json`, `delivery list`,
 `delivery show <id>` to size the machines, `delivery pull <id>`, `delivery verify <dir>`, `registry login`, then
 pull each image the lock names. Each answer's `next_step` is the command that follows.
 
@@ -351,8 +333,8 @@ kennet org members remove bob@acme.com --json         # {{"org", "email", "statu
 - `--org <id>` names the organization when the user manages several; the error lists them.
 - `error.code` `not_manager`: the user is in the organization but not an owner or admin, so its members are not
   theirs to see or change. Tell them; there is no command for it.
-- `error.code` `step_up_required`: the change needs a recent sign-in. Run `kennet login --json` (and
-  `--complete`, step 2) with the user, then the same command once more.
+- `error.code` `step_up_required`: the change needs a recent sign-in. Run `kennet login --json` (step 2)
+  with the user, then the same command once more.
 - Any other refusal (only an owner changes an owner; the organization keeps one owner; the address belongs to
   another organization) is the server's sentence in `error.message`: tell the user, and do not retry.
 
@@ -491,8 +473,7 @@ Metaphi AI, and nothing leaves their machine that they did not choose to send.
   is on stderr. Decide from `error.code` and `error.next_step`, never from message text. Exit 0 done; 1 failed;
   2 the command line was wrong; 3 a sign-in is needed (`next_step`); 4 try the same call later; 5 `kennet` is too
   old (`next_step` upgrades it: ask, run it, go on).
-- Never ask the user to paste a token, key or code into the chat. The one code they handle is the sign-in's
-  `user_code`, which they check on the page.
+- Never ask the user to paste a token, key or code into the chat.
 - Respect their time: one question at a time, a default they can accept with "yes", and say what you will run
   before you run it.
 
@@ -581,10 +562,8 @@ kept in `./kennet-profile/<run>/sent/`: show the user that folder if they ask wh
 
 - Exit 0: `{{"reference": "cbp_..."}}`. Tell the user it was received, the reference, and that Metaphi AI reviews
   every profile and replies by email to the address they signed in with. There is nothing to poll.
-- `not_signed_in` (exit 3): under `--json` it does not sign in by itself. Run `kennet login --json`, give the user
-  `verification_uri_complete` and `user_code` exactly as printed (they sign in with their work email and check the
-  code matches), then `kennet login --complete --json`, then the same profile command. At a terminal without
-  `--json`, `kennet profile-codebase` signs the user in itself.
+- `not_signed_in` (exit 3): under `--json` it does not sign in by itself. Run `kennet login --json` (step 2),
+  then the same profile command. At a terminal without `--json`, `kennet profile-codebase` signs the user in itself.
 - `no_api_key` with `reason` `no_organization`: ask what their company is called, `kennet org create "<name>"
   --json`, then `kennet login --json` and the profile again.
 - When it found no way to build and test a repository, the output says so. Read its README, CI config and build
@@ -629,7 +608,7 @@ user the link: they sign it in the browser (DocuSign), and Metaphi AI countersig
 | `error.code` | What to do |
 | --- | --- |
 | `not_signed_in`, `login_expired`, `login_refused` | Step 3's sign-in, from its start. |
-| `authorization_pending` | The user has not approved the code yet: `kennet login --complete --json` again, or wait for them. |
+| `authorization_pending` | The user has not approved the sign-in yet: `kennet login --json` again, or wait for them. |
 | `no_api_key` | Read `reason`: `no_organization` is in step 3; `awaiting_approval` means Metaphi AI approves their organization and mails the user; anything else, run `kennet login --json` once, then tell the user the message. |
 | `no_organization` | From `kennet mnda`: make their organization as in step 3, then the same command. |
 | `insufficient_scope` | `kennet login --json` once (no browser on a signed-in machine), then the same command. If it repeats, tell the user the message. |

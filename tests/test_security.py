@@ -93,7 +93,7 @@ def test_a_key_that_is_not_an_organization_key_never_leaves(home, monkeypatch):
 def test_a_non_json_device_answer_is_an_error():
     respx.post(f"{A}/device/code").respond(200, text="<html>gateway</html>")
     with pytest.raises(accounts.Error):
-        accounts.login(say=lambda s: None, open_browser=False, sleep=lambda s: None)
+        accounts.login(say=lambda s: None, sleep=lambda s: None)
 
 
 @respx.mock
@@ -102,7 +102,7 @@ def test_a_non_json_poll_answer_is_an_error():
                                                  "expires_in": 60, "verification_uri": f"{A}/device"})
     respx.post(f"{A}/oauth/token").mock(return_value=httpx.Response(502, text="bad gateway"))
     with pytest.raises(accounts.Error) as e:   # the proxy's page is never the message
-        accounts.login(say=lambda s: None, open_browser=False, sleep=lambda s: None)
+        accounts.login(say=lambda s: None, sleep=lambda s: None)
     assert (e.value.message, e.value.code, e.value.retryable) == (
         "the service answered HTTP 502; try again in a minute", "service_unavailable", True)
 
@@ -112,7 +112,7 @@ def _sign_in(code_body, monkeypatch):
     monkeypatch.setattr(accounts.webbrowser, "open", lambda url: opened.append(url) or True)
     respx.post(f"{A}/device/code").respond(json=code_body)
     respx.post(f"{A}/oauth/token").respond(json={"access_token": "tok"})
-    accounts.login(say=said.append, open_browser=True, sleep=lambda s: None)
+    accounts.login(say=said.append, sleep=lambda s: None)
     return opened, said
 
 
@@ -138,7 +138,7 @@ def test_an_incomplete_or_off_domain_device_code_is_refused(body, monkeypatch):
     monkeypatch.setattr(accounts.webbrowser, "open", lambda url: opened.append(url) or True)
     respx.post(f"{A}/device/code").respond(json=body)
     with pytest.raises(config.Error):
-        accounts.login(say=lambda s: None, open_browser=True, sleep=lambda s: None)
+        accounts.login(say=lambda s: None, sleep=lambda s: None)
     assert opened == []
 
 
