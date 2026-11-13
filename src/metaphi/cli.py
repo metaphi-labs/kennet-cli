@@ -154,20 +154,18 @@ def cmd_login(a: argparse.Namespace) -> None:
     if a.complete:
         held = accounts.pending()
         if held is not None:
-            say(f"Waiting for the approval of code {held['user_code']} at {held['verification_uri']}")
+            say("Waiting for the sign-in to be approved")
         # away from a terminal the caller is a tool call with a clock of its own: answer within it, to be called again
         _signed_in(a, accounts.finish(wait_s=a.timeout or (None if _interactive() else 60.0), at_once=True))
         return
     if a.no_wait or not (a.wait or _interactive()):
         # away from a terminal nobody reads a prompt that then blocks: hand the page and the code over, and stop
         held = accounts.pending() or accounts.start()   # asked twice, the code a person may hold stays the code
-        if not a.no_browser:
-            accounts.webbrowser.open(held["open"])
+        opened = not a.no_browser and accounts.webbrowser.open(held["open"])
         _out(a, {"verification_uri": held["verification_uri"], "verification_uri_complete": held["open"],
                  "user_code": held["user_code"], "expires_in": int(held["expires"] - time.time()), "status": "pending",
                  "next_step": "kennet login --complete"},
-             f"Open {held['verification_uri']} and enter the code {held['user_code']}",
-             f"(or open {held['open']})" if held["open"] != held["verification_uri"] else "",
+             accounts.where_to_approve(held, opened),
              "Next: kennet login --complete   (waits for the approval; safe to run again)")
         return
     _signed_in(a, accounts.login(say=say, open_browser=not a.no_browser))

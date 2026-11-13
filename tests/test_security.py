@@ -109,7 +109,7 @@ def test_a_non_json_poll_answer_is_an_error():
 
 def _sign_in(code_body, monkeypatch):
     opened, said = [], []
-    monkeypatch.setattr(accounts.webbrowser, "open", opened.append)
+    monkeypatch.setattr(accounts.webbrowser, "open", lambda url: opened.append(url) or True)
     respx.post(f"{A}/device/code").respond(json=code_body)
     respx.post(f"{A}/oauth/token").respond(json={"access_token": "tok"})
     accounts.login(say=said.append, open_browser=True, sleep=lambda s: None)
@@ -129,7 +129,12 @@ def test_device_sign_in_opens_the_prefilled_link_when_there_is_one(monkeypatch):
     opened, said = _sign_in({"device_code": "dc", "user_code": "WDJB-MJHT", "verification_uri": f"{A}/device",
                              "verification_uri_complete": f"{A}/device?user_code=WDJB-MJHT"}, monkeypatch)
     assert opened == [f"{A}/device?user_code=WDJB-MJHT"]
-    assert "WDJB-MJHT" in said[0] and f"{A}/device" in said[0]
+    assert said[0] == "Approve the sign-in in your browser."   # nothing to type
+
+
+def test_a_prefilled_link_the_browser_did_not_open_is_printed_whole():
+    held = {"user_code": "WDJB-MJHT", "verification_uri": f"{A}/device", "open": f"{A}/device?user_code=WDJB-MJHT"}
+    assert accounts.where_to_approve(held, opened=False) == f"Sign in at {A}/device?user_code=WDJB-MJHT"
 
 
 @pytest.mark.parametrize("body", [
@@ -143,7 +148,7 @@ def test_device_sign_in_opens_the_prefilled_link_when_there_is_one(monkeypatch):
 @respx.mock
 def test_an_incomplete_or_off_domain_device_code_is_refused(body, monkeypatch):
     opened = []
-    monkeypatch.setattr(accounts.webbrowser, "open", opened.append)
+    monkeypatch.setattr(accounts.webbrowser, "open", lambda url: opened.append(url) or True)
     respx.post(f"{A}/device/code").respond(json=body)
     with pytest.raises(config.Error):
         accounts.login(say=lambda s: None, open_browser=True, sleep=lambda s: None)

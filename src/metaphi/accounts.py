@@ -253,12 +253,20 @@ def _forget() -> None:
 
 def login(say: Callable[[str], None] = print, open_browser: bool = True,
           sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Sign the person in: show a code, open the browser on it, wait for the approval (`start`, then `finish`)."""
+    """Sign the person in: open the browser on the approval page, wait for the approval (`start`, then `finish`)."""
     held = start()
-    say(f"Open {held['verification_uri']} and enter the code {held['user_code']}")
-    if open_browser:
-        webbrowser.open(held["open"])
+    opened = open_browser and webbrowser.open(held["open"])
+    say(where_to_approve(held, opened))
     return finish(sleep)
+
+
+def where_to_approve(held: dict[str, Any], opened: bool = False) -> str:
+    """What the person does to approve. The page's link carries the code (RFC 8628 §3.3.1) and the page names the
+    terminal asking (its address and client), so there is nothing to type or compare; the code is typed only when
+    the server sent no such link."""
+    if held["open"] == held["verification_uri"]:
+        return f"Open {held['verification_uri']} and enter the code {held['user_code']}"
+    return "Approve the sign-in in your browser." if opened else f"Sign in at {held['open']}"
 
 
 def logout() -> None:
