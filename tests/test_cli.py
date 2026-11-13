@@ -31,7 +31,7 @@ def test_login_polls_the_device_grant_until_approved_and_keeps_the_token(home):
         httpx.Response(200, json={"access_token": "tok", "token_type": "Bearer", "email": "alice@example.test"})])
     said, slept = [], []
     got = accounts.login(say=said.append, sleep=slept.append)
-    assert got["email"] == "alice@example.test" and said[0] == "Approve the sign-in in your browser."
+    assert got["email"] == "alice@example.test" and said[0] == "Approve the sign-in in your browser…"
     assert code.calls[0].request.headers["content-type"] == "application/x-www-form-urlencoded"
     assert code.calls[0].request.content == b"client_id=metaphi-cli"
     assert slept == [5.0, 5.0]  # RFC 8628: never faster than 5 s, whatever the server says
@@ -102,7 +102,7 @@ def test_login_away_from_a_terminal_waits_within_a_tool_call_and_goes_on_when_ru
     out = capsys.readouterr()
     error = json.loads(out.out)["error"]
     assert (error["code"], error["retryable"], error["next_step"]) == ("authorization_pending", True, "kennet login")
-    assert opened == [f"{A}/device"] and "Approve the sign-in in your browser." in out.err
+    assert opened == [f"{A}/device"] and "Approve the sign-in in your browser…" in out.err
     assert config.load()["device_code"] == "dc"   # still under way
     approved.append(True)
     assert cli.main(["login", "--json"]) == 0   # run again: the same sign-in, no new page

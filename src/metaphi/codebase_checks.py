@@ -380,7 +380,6 @@ def run(repo: Path, name: str, tip: str, commits: list[dict], order: dict[str, i
         out["commits"] = [{"commit": i, "broke": True} for i in picks]
         out["breaks"] = [{**b, "broke": True} for b in breaks or []]
         return out
-    say(f"{name}: running; logs in {logs.root}")
     tip_cases: list[dict[str, bool] | None] = []
     try:
         if tipped:
@@ -393,11 +392,12 @@ def run(repo: Path, name: str, tip: str, commits: list[dict], order: dict[str, i
         said = out["tip"]
         built = "build" not in said or said["build"]["exit"] == 0
         t = said["tests"][0] if said["tests"] else None
-        say(f"{name}: 000-tip build {'ok' if built else 'failed'}"
-            + (f", tests exit {t['exit']}" + (f", {t['reported'] - t['passed']} of {t['reported']} failed"
-                                              if t.get('reported') else "") if t else ""))
+        tested = "" if not t else (f" \u00b7 {t['passed']} of {t['reported']} tests pass" if t.get("reported")
+                                   else " \u00b7 tests pass" if t["exit"] == 0 else " \u00b7 tests fail")
+        say(("\u2713 " if built and t and t["exit"] == 0 else "\u2717 ") + name
+            + (" builds" if built else " does not build") + tested)
     except Exception as e:   # noqa: BLE001
-        say(f"    000-tip: could not run ({type(e).__name__}: {e})")
+        say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
 
     def label_of(n: int, i: int) -> str:
         return f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"

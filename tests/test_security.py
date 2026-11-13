@@ -121,7 +121,7 @@ def test_device_sign_in_opens_the_prefilled_link_when_there_is_one(monkeypatch):
     opened, said = _sign_in({"device_code": "dc", "user_code": "WDJB-MJHT", "verification_uri": f"{A}/device",
                              "verification_uri_complete": f"{A}/device?user_code=WDJB-MJHT"}, monkeypatch)
     assert opened == [f"{A}/device?user_code=WDJB-MJHT"]
-    assert said[0] == "Approve the sign-in in your browser."   # nothing to type
+    assert said[0] == "Approve the sign-in in your browser…"   # nothing to type
 
 
 @pytest.mark.parametrize("body", [

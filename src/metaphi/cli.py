@@ -331,12 +331,12 @@ def _rerun(given: str, tries: list[dict] | None = None) -> str:
         t = max(ran, key=lambda t: t["test"].get("reported") or 0)["test"]
         what = (f"{t['passed']} of {t['reported']} tests passed" if t.get("reported") is not None
                 else f"the tests exited {t.get('exit')}")
-        head = (f"In {given} the build ran and {what} on this machine. If the tests need a service (a database, a "
-                "cache), run again where it is up, or with your commands:\n")
+        head = (f"In {given}, {what}. If the tests need a service (a database, a cache), start it, or give your "
+                "commands:\n")
     else:
-        head = f"No build or test found in {given}. Run again with your commands:\n"
+        head = f"No build or test found in {given}. Give your commands:\n"
     return (head + f"  kennet profile-codebase {q} --build '<build>' --test '<test>'\n"
-            "Or have a model set it up (this sends file contents to Metaphi AI):\n"
+            "Or let a model set it up (sends file contents to Metaphi AI):\n"
             f"  kennet profile-codebase {q} --deep")
 
 
@@ -375,18 +375,16 @@ def _profile_key(a: argparse.Namespace, say: Callable[[str], None]) -> None:
             raise
         else:
             got = accounts.login(say=say)
-            say(f"Signed in as {got.get('email')}.")
+            say(palette.paint("\u2713", "ok", sys.stdout) + f" Signed in as {got.get('email')}")
             codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
 
 
-SEND_ASK = "Send these results to Metaphi AI for evaluation? Your source code stays here. [y/N]: "
-_STEP = re.compile(r"^([^\s:][^:\n]{0,120}): ")
+SEND_ASK = "? Send these results to Metaphi AI? Your code stays here. [y/N] "
 _PATH = re.compile(r" \((/[^)]*)\)")
 
 
 def _profile_say(say: Callable[[str], None], stream: IO[str]) -> Callable[[str], None]:
-    """Progress as it reads at a terminal: the repository a line is of in the accent, the inner steps and the paths
-    to look things up in dim; the words as they are everywhere else."""
+    """Progress as it reads at a terminal: a mark in its tone, the paths and indented lines dim."""
     if not palette.on(stream):
         return say
 
@@ -394,14 +392,15 @@ def _profile_say(say: Callable[[str], None], stream: IO[str]) -> Callable[[str],
         if line[:1].isspace():
             return say(palette.paint(line, "dim", stream))
         line = _PATH.sub(lambda m: " " + palette.paint(f"({m.group(1)})", "dim", stream), line)
-        say(_STEP.sub(lambda m: palette.paint(m.group(1), "accent", stream) + ": ", line, count=1))
+        mark = {"\u2713": "ok", "\u2717": "no"}.get(line[:1])
+        say(palette.paint(line[0], mark, stream) + line[1:] if mark else line)
     return styled
 
 
 def _send_ask(stream: IO[str]) -> str:
-    return (palette.paint("Send these results to Metaphi AI for evaluation?", None, stream, bold=True) + " "
-            + palette.paint("Your source code stays here.", "dim", stream) + " "
-            + palette.paint("[y/N]", "accent", stream) + ": ") if palette.on(stream) else SEND_ASK
+    return (palette.paint("?", "accent", stream, bold=True) + " "
+            + palette.paint("Send these results to Metaphi AI?", None, stream, bold=True) + " "
+            + palette.paint("Your code stays here. [y/N]", "dim", stream) + " ") if palette.on(stream) else SEND_ASK
 
 
 def cmd_profile_codebase(a: argparse.Namespace) -> None:
@@ -423,6 +422,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
     if not asking:
         _profile_key(a, say)
     say(palette.paint(codebase_profile.LOCAL_NOTICE if asking else codebase_profile.NOTICE, "dim", stream))
+    say("")
     with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
@@ -451,7 +451,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
         try:
             if json.loads((home / "asked.json").read_text()) == asked and done.is_file():
                 report = json.loads(done.read_text())
-                say(f"Checks already ran with these commands ({done})")
+                say("Using the checks from the last run")
         except (OSError, ValueError):
             pass
         if report is None:
@@ -483,7 +483,7 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             except EOFError:
                 said = ""
             if said not in ("y", "yes"):
-                say("Nothing was sent. The results stay here " + palette.paint(f"({home})", "dim", stream))
+                say("Nothing sent. Results are in " + palette.paint(str(home), "dim", stream))
                 return
             _profile_key(a, say)
         try:
@@ -496,21 +496,19 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
                 (home / "checks.sent").touch()
             if not (home / "logs.sent").is_file():
                 logs = codebase_profile.logs_packed(home / "logs", ref, [k["name"] for k in kept])
-                say(f"Sending logs ({len(logs) >> 10} KiB, {home / 'logs'})")
                 _sent(home, "logs.tar.gz", f"/codebase-profiles/{ref}/logs", logs,
                       codebase_profile.post_logs(ref, logs), say)
                 (home / "logs.sent").touch()
         except errors.MetaphiError as e:
             e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"
             raise
-    n, gone = len(doc["repos"]), doc["skipped"]
     if a.json:
         print(json.dumps({"reference": ref, "readiness": readiness or None}, indent=2))
         return
-    shared = f"{n} {'repository' if n == 1 else 'repositories'} shared" + (f", {len(gone)} skipped (above)" if gone else "")
-    say(palette.paint("\u2713 Sent.", "ok", stream, bold=True) + f" {shared}. Metaphi AI contacts you if it accepts.")
-    say(f"  Reference {palette.paint(ref, 'accent', stream, bold=True)}  "
-        + palette.paint(f"every byte sent is in {home / 'sent'}", "dim", stream))
+    if asking:
+        say("")
+    say(palette.paint("\u2713", "ok", stream) + " Sent " + palette.paint(ref, "accent", stream, bold=True)
+        + ". We'll email you if it's accepted.")
 
 
 READY_CELL = {"yes": ("32", "\u2713 yes"), "no": ("31", "\u2717 no"), "not_collected": ("2", "\u00b7 not collected"),
@@ -533,7 +531,7 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
         return palette.paint(text, tone, out, bold)
     labels = list(dict.fromkeys(c.get("label", "") for r in repos for c in r["checks"]))
     state = {(r.get("name", ""), c.get("label", "")): c.get("state", "not_collected") for r in repos for c in r["checks"]}
-    first = max(len(x) for x in labels + ["Yes"])
+    first = max(len(x) for x in labels + ["Passing"])
     cell = max(len(t) for _c, t in READY_CELL.values())
     cols = max(1, (shutil.get_terminal_size((100, 24)).columns - first - 4) // (cell + 3))
     for at in range(0, len(repos), cols):
@@ -560,20 +558,18 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
             yes = sum(c.get("state") == "yes" for c in asked)
             text = f"{yes} of {len(asked)}".ljust(w)
             tallies.append(paint("1;32" if asked and yes == len(asked) else "1" if asked else "2", text))
-        print(line(paint("1", "Yes".ljust(first)), tallies), file=out)
+        print(line(paint("1", "Passing".ljust(first)), tallies), file=out)
         print(rule("\u2570", "\u2534", "\u256f"), file=out)
     fixes = [(r.get("name", ""), c) for r in repos for c in r["checks"] if c.get("state") == "no" and c.get("fix")]
     if fixes:
         print(file=out)
-        print(paint("1", "To turn a no to yes"), file=out)
+        print(paint("1", "To fix"), file=out)
         for name, c in fixes:
-            print(f"  {paint('head', name)} \u00b7 {c.get('label', '')}", file=out)
-            print(paint("2", f"    {c['fix']}"), file=out)
+            print(f"  {paint('head', name)}  {c['fix']}", file=out)
+        if got.get("note"):
+            print(paint("2", f"  {got['note']}"), file=out)
     if any(c.get("state") == "not_collected" for r in repos for c in r["checks"]):
-        print(paint("2", "\n  not collected: the CLI that ran predates this check; run the latest version "
-                         "(kennet update) to collect it."), file=out)
-    if got.get("note"):
-        print("\n" + paint("2", got["note"]), file=out)
+        print(paint("2", "\nNot collected: run `kennet update` for the latest checks."), file=out)
     print(file=out)
 
 

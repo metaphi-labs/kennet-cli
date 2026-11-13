@@ -261,7 +261,7 @@ def login(say: Callable[[str], None] = print, sleep: Callable[[float], None] | N
     if held is None:
         held = start()
         webbrowser.open(held["open"])
-    say("Approve the sign-in in your browser.")
+    say("Approve the sign-in in your browser\u2026")
     return finish(sleep, wait_s=wait_s, at_once=resumed)
 
 

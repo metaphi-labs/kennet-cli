@@ -99,7 +99,7 @@ def test_url_clone(repo, tmp_path, monkeypatch):
     said = []
     doc = codebase_profile.document([f"file://{origin}"], say=said.append)
     assert [r["name"] for r in doc["repos"]] == ["falcon_core"] and doc["skipped"] == []
-    assert said == ["falcon_core: cloning", "falcon_core: computing"]
+    assert said == ["Cloning falcon_core…"]
     local = codebase_profile.document([str(repo)], say=lambda s: None)["repos"][0]
     assert doc["repos"][0]["commits"] == local["commits"]
     assert made and not any(Path(t.name).exists() for t in made)
@@ -111,7 +111,7 @@ def test_url_clone_fails(repo, tmp_path):
     doc = codebase_profile.document([f"file://{tmp_path}/missing.git", str(repo)], say=said.append)
     assert doc["skipped"] == [{"name": "missing", "reason": "clone_failed"}]
     assert [r["name"] for r in doc["repos"]] == ["falcon_core"]
-    assert any(s.startswith("missing: skipped, clone failed: ") and s.endswith("in this terminal") for s in said)
+    assert any(s.startswith("✗ Skipped missing: clone failed (") and s.endswith("in this terminal") for s in said)
 
 
 @pytest.mark.parametrize(("given", "url"), [
@@ -201,16 +201,15 @@ def test_at_a_terminal_nothing_is_sent_or_signed_in_until_the_person_says_yes(ma
     monkeypatch.setattr("builtins.input", lambda q: asked.append(q) or "n")
     assert cli.main(["profile-codebase", str(made)]) in (0, None)
     out = capsys.readouterr().out
-    assert asked == [cli.SEND_ASK] and "Nothing was sent" in out and "sends nothing until you say so" in out
-    for label in ("CI configuration present", "Service containers provisioned", "Build succeeds",
-                  "Test suite executes", "Test suite passes at HEAD"):
+    assert asked == [cli.SEND_ASK] and "Nothing sent" in out and out.startswith("Runs locally.\n")
+    for label in ("CI config", "Services start", "Builds", "Tests run", "Tests pass"):
         assert label in out
     assert not signed and not any(r.called for r in got.values())
     assert json.loads((_home(tmp_path) / "readiness.json").read_text())["repos"][0]["name"] == made.name
     monkeypatch.setattr("builtins.input", lambda q: "y")
     assert cli.main(["profile-codebase", str(made)]) in (0, None)
     out = capsys.readouterr().out
-    assert signed and "Signed in as owner@example.com." in out and ref in out and "Checks already ran" in out
+    assert signed and "✓ Signed in as owner@example.com\n" in out and ref in out and "Using the checks from the last run" in out
     assert all(got[r].called for r in ("profile", "checks", "logs")) and not got["sample"].called
 
 
@@ -452,7 +451,7 @@ def test_setup(tested, capsys, tmp_path, monkeypatch):
     assert "setup_model" in steps and "build" in steps
     assert "pytest" in (logs / "setup" / "model" / "recipe.json").read_text()
     out = capsys.readouterr().out
-    assert "running on this machine" in out and "000-tip build ok" in out and "0 of 2 failed" in out
+    assert "running on this machine" in out and "builds · 2 of 2 tests pass" in out
 
 
 @respx.mock
@@ -662,7 +661,7 @@ def test_default_finds_nothing(repo, capsys, tmp_path, monkeypatch):
     assert sent["commits"] == [] and sent["breaks"] == []
     out = capsys.readouterr().out
     assert f"No build or test found in {repo}" in out and "--build '<build>' --test '<test>'" in out
-    assert "--deep" in out and "Sent. 1 repository shared" in out
+    assert "--deep" in out and "✓ Sent cbp_" in out
     assert json.loads((_home(tmp_path) / "profile.json").read_text())["repos"]
 
 
@@ -912,7 +911,7 @@ def test_the_closing_line_says_the_build_ran_when_only_the_tests_failed():
     tries = [{"build": {"exit": 0, "seconds": 5},
               "test": {"exit": 1, "seconds": 6, "report": "summary", "reported": 10, "passed": 0}}]
     said = cli._rerun("./core", tries)
-    assert "the build ran and 0 of 10 tests passed" in said and "No build or test found" not in said
+    assert "In ./core, 0 of 10 tests passed" in said and "No build or test found" not in said
     assert "No build or test found in ./core" in cli._rerun("./core", [])
 
 

@@ -454,7 +454,6 @@ def find(write: Callable[[Path], None], read: Callable[[str], bytes | None], pat
             src, junit = scratch / f"try-{tried:02d}" / "src", scratch / f"try-{tried:02d}" / "junit"
             write(src)
             junit.mkdir(parents=True)
-            say(f"    trying commands ({tried} of {min(len(chosen), TRIES)})")
             with steps.step("setup_proposals", turn=tried):
                 said, kept, why_, report_ = _tried(r, engine, (src, junit), tests, logs, tried, run_minutes, _run,
                                                    _junit, cache, tries)
