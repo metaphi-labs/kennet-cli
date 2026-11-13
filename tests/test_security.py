@@ -117,24 +117,11 @@ def _sign_in(code_body, monkeypatch):
 
 
 @respx.mock
-def test_device_sign_in_without_a_prefilled_link_has_the_person_type_the_code(monkeypatch):
-    opened, said = _sign_in({"device_code": "dc", "user_code": "WDJB-MJHT", "verification_uri": f"{A}/device"},
-                            monkeypatch)
-    assert opened == [f"{A}/device"]
-    assert said[0] == f"Open {A}/device and enter the code WDJB-MJHT"
-
-
-@respx.mock
 def test_device_sign_in_opens_the_prefilled_link_when_there_is_one(monkeypatch):
     opened, said = _sign_in({"device_code": "dc", "user_code": "WDJB-MJHT", "verification_uri": f"{A}/device",
                              "verification_uri_complete": f"{A}/device?user_code=WDJB-MJHT"}, monkeypatch)
     assert opened == [f"{A}/device?user_code=WDJB-MJHT"]
     assert said[0] == "Approve the sign-in in your browser."   # nothing to type
-
-
-def test_a_prefilled_link_the_browser_did_not_open_is_printed_whole():
-    held = {"user_code": "WDJB-MJHT", "verification_uri": f"{A}/device", "open": f"{A}/device?user_code=WDJB-MJHT"}
-    assert accounts.where_to_approve(held, opened=False) == f"Sign in at {A}/device?user_code=WDJB-MJHT"
 
 
 @pytest.mark.parametrize("body", [

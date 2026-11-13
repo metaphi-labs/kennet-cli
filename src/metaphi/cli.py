@@ -161,11 +161,12 @@ def cmd_login(a: argparse.Namespace) -> None:
     if a.no_wait or not (a.wait or _interactive()):
         # away from a terminal nobody reads a prompt that then blocks: hand the page and the code over, and stop
         held = accounts.pending() or accounts.start()   # asked twice, the code a person may hold stays the code
-        opened = not a.no_browser and accounts.webbrowser.open(held["open"])
+        if not a.no_browser:
+            accounts.webbrowser.open(held["open"])
         _out(a, {"verification_uri": held["verification_uri"], "verification_uri_complete": held["open"],
                  "user_code": held["user_code"], "expires_in": int(held["expires"] - time.time()), "status": "pending",
                  "next_step": "kennet login --complete"},
-             accounts.where_to_approve(held, opened),
+             f"Sign in at {held['open']}",
              "Next: kennet login --complete   (waits for the approval; safe to run again)")
         return
     _signed_in(a, accounts.login(say=say, open_browser=not a.no_browser))

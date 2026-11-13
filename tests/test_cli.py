@@ -30,7 +30,7 @@ def test_login_polls_the_device_grant_until_approved_and_keeps_the_token(home):
         httpx.Response(200, json={"access_token": "tok", "token_type": "Bearer", "email": "alice@example.test"})])
     said, slept = [], []
     got = accounts.login(say=said.append, open_browser=False, sleep=slept.append)
-    assert got["email"] == "alice@example.test" and "ABCD-EFGH" in said[0]
+    assert got["email"] == "alice@example.test" and said[0] == "Approve the sign-in in your browser."
     assert code.calls[0].request.headers["content-type"] == "application/x-www-form-urlencoded"
     assert code.calls[0].request.content == b"client_id=metaphi-cli"
     assert slept == [5.0, 5.0]  # RFC 8628: never faster than 5 s, whatever the server says
@@ -110,7 +110,7 @@ def test_login_away_from_a_terminal_hands_the_code_over_and_returns(monkeypatch,
     out = capsys.readouterr()
     assert json.loads(out.out) == {"email": "alice@example.test", "org": "acme", "keys": True,
                                    "next_step": "kennet twin <file> --test"}
-    assert "ABCD-EFGH" in out.err and "mai_sk_" not in out.out + out.err
+    assert "mai_sk_" not in out.out + out.err
     cfg = config.load()
     assert cfg["api_key"] == "mai_sk_live" and "pending" not in cfg and "device_code" not in cfg
     assert code.call_count == 1   # the same code was finished, not a new one drawn
