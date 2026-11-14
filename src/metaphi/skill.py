@@ -129,10 +129,9 @@ It asks the servers, and asks the twin service whether each key works: `key.stat
 kennet login --json
 ```
 
-It opens the sign-in page in the user's browser and waits up to 60 seconds. Tell the user to approve it there,
-signing in with Google or GitHub as their work email (verified with that provider). `error.code`
-`authorization_pending` means not approved yet: run it again (it waits on the same sign-in, with no new page), or
-stop and wait for the user to say they have. `"keys": true` means the organization's live and test keys are saved
+It opens the sign-in page in the user's browser and waits up to 100 seconds. Tell the user to approve it there,
+signing in with Google or GitHub as their work email (verified with that provider). `error.code` `login_expired`
+means it was not approved in time: run it again when the user is ready. `"keys": true` means the organization's live and test keys are saved
 on this machine: run `kennet whoami --json` and tell the user the `email` and `org` it names. `error.code`
 `no_api_key` means the sign-in worked and no key came with it: `reason` beside `error` says why (step 1's table).
 Each sign-in replaces the keys the one before it saved on any machine. On a machine that is signed in already, it
@@ -207,7 +206,6 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `update_missing`, `update_broken`, `update_not_permitted` | The update could not be installed here; nothing changed. `next_step` is the install.sh line: ask the user before running it. |
 | `not_signed_in`, `login_expired`, `login_refused` | Step 2, from its start. |
 | `step_up_required` | A change to the organization needs a recent sign-in. Step 2, from its start, then the same command once more. |
-| `authorization_pending` | The user has not approved the sign-in yet. Run `kennet login --json` again, or wait for them. |
 | `no_api_key` | Signed in, and no key came with the sign-in. If `next_step` is `kennet org create <name>`, the user is in no organization: make theirs (step 1). If it is `kennet login`, run `kennet login --json` once: it picks the keys up, with no browser, if access was given since. If it comes back `no_api_key` again, tell the user the message and stop. |
 | `invalid_api_key`, `missing_api_key` | The key was revoked or replaced, often by a later sign-in elsewhere. Step 2, or the user sets a new `METAPHI_API_KEY`. |
 | `insufficient_scope` | The key does not hold access to what the command reaches. Run `kennet login --json` once: a signed-in machine is handed new keys with no browser. If it repeats, tell the user. |
@@ -608,7 +606,6 @@ user the link: they sign it in the browser (DocuSign), and Metaphi AI countersig
 | `error.code` | What to do |
 | --- | --- |
 | `not_signed_in`, `login_expired`, `login_refused` | Step 3's sign-in, from its start. |
-| `authorization_pending` | The user has not approved the sign-in yet: `kennet login --json` again, or wait for them. |
 | `no_api_key` | Read `reason`: `no_organization` is in step 3; `awaiting_approval` means Metaphi AI approves their organization and mails the user; anything else, run `kennet login --json` once, then tell the user the message. |
 | `no_organization` | From `kennet mnda`: make their organization as in step 3, then the same command. |
 | `insufficient_scope` | `kennet login --json` once (no browser on a signed-in machine), then the same command. If it repeats, tell the user the message. |

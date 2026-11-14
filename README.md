@@ -120,7 +120,7 @@ alone, and progress goes to stderr. An error that one command clears names it: `
 `next_step` in the JSON.
 
 ```sh
-kennet login --json           # opens the browser; the person approves; waits up to 60 s, run again to go on waiting
+kennet login --json           # opens the browser; the person approves; waits up to 100 s
 kennet whoami --json          # asks the servers: email, organization, balance, and whether each key works
 kennet twin trace.json --no-wait --json    # {"id", "status", "next_step": "kennet twins wait twin_..."}
 kennet twins wait twin_... --json          # {"output", "id"} once it ends
@@ -245,7 +245,6 @@ but for the last:
 | Code | When | `next_step` |
 | --- | --- | --- |
 | `not_signed_in` | no sign-in on this machine, or the server has ended it | `kennet login` |
-| `authorization_pending` | `login` returned before the sign-in was approved (`retryable`) | `kennet login` |
 | `no_api_key` | signed in, but the sign-in was handed no key; the message says why, and `reason` which it is (below). Keys come with a sign-in, so `kennet login` picks them up once the organization has access | `kennet org join <org>` when an organization has invited you (`invitation_pending`); `kennet org create <name>` when you are in no organization and none has; `null` when you were taken out of yours (`removed`: an owner of it adds you back), while yours waits for approval, and from `login` itself; else `kennet login` |
 | `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
 | `confirmation_required` | `kennet keys revoke` away from a terminal, or under `--json`, without `--yes` | the same revoke, by id, with `--yes` |
