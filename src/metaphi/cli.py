@@ -144,11 +144,11 @@ def cmd_login(a: argparse.Namespace) -> None:
         _out(a, {"keys": True}, "key saved on this machine")
         return
     # a refusal for a sign-in too old to change an organization (`step_up_required`) asks for a fresh one, not a pickup
-    if accounts.pending() is None and not config.load().get("step_up") and (got := accounts.pickup()) is not None:
+    if not config.load().get("step_up") and (got := accounts.pickup()) is not None:
         _signed_in(a, got)   # signed in already: the keys come by the token this machine holds
         return
-    # away from a terminal the caller is a tool call with a clock of its own: wait within it; run again to go on waiting
-    _signed_in(a, accounts.login(say=_progress(a), wait_s=None if _interactive() else 60.0))
+    # away from a terminal the caller is a tool call with a clock of its own (two minutes, often): wait within it
+    _signed_in(a, accounts.login(say=_progress(a), wait_s=None if _interactive() else 100.0))
 
 
 def cmd_mnda(a: argparse.Namespace) -> None:
@@ -1507,7 +1507,7 @@ examples:
 from an agent or a script (no terminal): add --json; stdout is then the result or the error object alone.
   kennet agents install             teach every coding agent here this CLI, and connect Kennet's MCP server
   kennet skill show                 the guide an agent follows, for this version
-  kennet login --json               opens the browser, waits up to a minute for the approval; again to go on
+  kennet login --json               opens the browser and waits up to 100 s for the approval
   METAPHI_API_KEY=mai_sk_... kennet twin trace.json --json    no sign-in: a key from the console
 
 exit status: 0 done, 1 failed, 2 usage, 3 sign-in or key needed, 4 try the same call later, 5 upgrade kennet

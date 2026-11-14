@@ -1,5 +1,5 @@
-"""Your Metaphi AI account: sign in from the terminal (RFC 8628, as `stripe login` does) and be handed your
-organization's keys, the organizations you manage, and their credit."""
+"""Your Metaphi AI account: sign in from the terminal (the browser returns to this machine, as gcloud and Claude Code
+sign in), and be handed your organization's keys, the organizations you manage, and their credit."""
 from __future__ import annotations
 
 import contextlib
@@ -19,7 +19,7 @@ CLIENT_ID = "metaphi-cli"
 
 
 CHECKOUT = "https://checkout.stripe.com/"  # the one place a checkout link may send the browser
-MIN_INTERVAL = 5.0  # RFC 8628 §3.5: the default, and the floor whatever the server says
+MIN_INTERVAL = 5.0  # how often a checkout is asked whether it was paid
 ROLES = ("owner", "admin", "billing", "member")   # an organization member's roles, as accounts says them (orgs.ROLES)
 MANAGERS = ("owner", "admin")   # the roles that manage an organization's members
 
@@ -108,86 +108,65 @@ def _http() -> httpx.Client:
                         headers={"user-agent": f"metaphi-cli/{__import__('metaphi').__version__}"})
 
 
-def start() -> dict[str, Any]:
-    """Ask for a device code (RFC 8628 §3.1) and keep it as the sign-in under way: what the person is shown
-    (`verification_uri`, `user_code`) and what `finish` polls with."""
+class _Return:
+    """Where the browser comes back to on this machine (RFC 8252 §7.3, as gcloud and Claude Code sign in): a listener
+    on 127.0.0.1, on whatever port is free, that takes the one request the approval page sends it and passes the
+    browser on to the page that says what came of it."""
+
+    def __init__(self) -> None:
+        import http.server
+        got: dict[str, str] = {}
+        self.got, self.done_url = got, ""
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                from urllib.parse import parse_qsl, urlsplit
+                asked = dict(parse_qsl(urlsplit(self.path).query))
+                if not (asked.get("code") or asked.get("error")):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                got.update(asked)
+                self.send_response(302)
+                self.send_header("Location", outer.done_url + ("?denied=1" if asked.get("error") else "?signed_in=1"))
+                self.end_headers()
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.server.timeout = 0.5
+        self.uri = f"http://127.0.0.1:{self.server.server_port}/"
+
+    def wait(self, until: float) -> dict[str, str]:
+        while not self.got and time.time() < until:
+            self.server.handle_request()
+        return self.got
+
+    def close(self) -> None:
+        self.server.server_close()
+
+
+def start(back: str) -> dict[str, Any]:
+    """Ask for a sign-in (RFC 8628 §3.1) that returns to `back`, this machine's listener: the page to open, and the
+    device code the approval's code is redeemed with."""
     with _http() as h:
-        r = h.post("/device/code", data={"client_id": CLIENT_ID})
+        r = h.post("/device/code", data={"client_id": CLIENT_ID, "redirect_uri": back})
     if r.status_code != 200:
         raise _refused(r)
     code = _json(r)
     if not all(isinstance(code.get(k), str) and code[k] for k in ("device_code", "user_code", "verification_uri")):
         raise Error("the sign-in server sent an incomplete device code")
-    # RFC 8628 §3.3: the person types the code at verification_uri; verification_uri_complete is optional.
     config.check_url(code["verification_uri"], "the sign-in page")
     complete = code.get("verification_uri_complete")
     try:
-        pending = {"user_code": code["user_code"], "verification_uri": code["verification_uri"],
-                   "open": config.check_url(complete, "the sign-in page") if isinstance(complete, str) and complete
-                   else code["verification_uri"],
-                   "interval": max(MIN_INTERVAL, float(code.get("interval") or MIN_INTERVAL)),
-                   "expires": time.time() + min(float(code.get("expires_in") or 600), 1800.0)}
+        return {"device_code": code["device_code"],
+                "open": config.check_url(complete, "the sign-in page") if isinstance(complete, str) and complete
+                else code["verification_uri"],
+                "expires": time.time() + min(float(code.get("expires_in") or 600), 1800.0)}
     except (TypeError, ValueError):
         raise Error("the sign-in server sent an unreadable device code") from None
-    cfg = config.load()
-    cfg.update({"pending": pending, "device_code": code["device_code"]})
-    config.save(cfg)
-    return pending
-
-
-def pending() -> dict[str, Any] | None:
-    """The sign-in `start` left under way, while its code still stands."""
-    cfg = config.load()
-    held = cfg.get("pending")
-    if not isinstance(held, dict) or not cfg.get("device_code") or float(held.get("expires") or 0) <= time.time():
-        return None
-    return held
-
-
-def finish(sleep: Callable[[float], None] | None = None, wait_s: float | None = None,
-           at_once: bool = False) -> dict[str, Any]:
-    """Wait for the approval of the sign-in under way, then keep the token and the organization's keys that come
-    with it (`api_key`, `test_api_key`; `no_api_key` says why none came). `wait_s` bounds the wait: past it the
-    sign-in stays under way and the refusal (`authorization_pending`, retryable) says to call again. `at_once`
-    asks first and waits after: for a call that comes back to a code shown a while ago."""
-    held = pending()
-    if held is None:
-        raise need("no sign-in is under way, or its code expired; run `kennet login`", "login_expired",
-                   "kennet login")
-    sleep = sleep or time.sleep
-    device_code, interval = config.load()["device_code"], float(held["interval"])
-    until = held["expires"] if wait_s is None else min(held["expires"], time.time() + wait_s)
-    first = at_once
-    with _http() as h:
-        while first or time.time() + interval < until:
-            if not first:
-                sleep(interval)
-            first = False
-            r = h.post("/oauth/token", data={"grant_type": DEVICE_GRANT, "device_code": device_code,
-                                              "client_id": CLIENT_ID})
-            body = _json(r)
-            if r.status_code == 200:
-                if not isinstance(body.get("access_token"), str):
-                    raise Error("the sign-in server sent no access token")
-                _keep(body, body["access_token"])
-                return body
-            error = body.get("error")
-            if error == "authorization_pending":
-                continue
-            if error == "slow_down":
-                interval += 5
-                continue
-            _forget()
-            raise need({"expired_token": "the code expired; run `kennet login` again",
-                        "access_denied": "the sign-in was declined"}.get(error, _said(r)),
-                       "login_expired" if error == "expired_token" else "login_refused", "kennet login")
-    if time.time() + interval < held["expires"]:
-        e = need(f"not approved yet: approve the sign-in in your browser ({held['open']})", "authorization_pending",
-                 "kennet login")
-        e.retryable = True
-        raise e
-    _forget()
-    raise need("the code expired; run `kennet login` again", "login_expired", "kennet login")
 
 
 def _keep(body: dict[str, Any], token: str) -> None:
@@ -245,24 +224,33 @@ def pickup() -> dict[str, Any] | None:
     return body
 
 
-def _forget() -> None:
-    cfg = config.load()
-    cfg.pop("pending", None)
-    cfg.pop("device_code", None)
-    config.save(cfg)
-
-
-def login(say: Callable[[str], None] = print, sleep: Callable[[float], None] | None = None,
-          wait_s: float | None = None) -> dict[str, Any]:
-    """Sign the person in: open the browser on the approval page and wait for the approval. Called again while a
-    sign-in is under way, it waits on that one: no second code, no second tab. `wait_s` bounds the wait."""
-    held = pending()
-    resumed = held is not None
-    if held is None:
-        held = start()
+def login(say: Callable[[str], None] = print, wait_s: float | None = None) -> dict[str, Any]:
+    """Sign the person in: open the browser on the approval page, take the approval back on this machine, and keep
+    the token and the organization's keys that come with it. `wait_s` bounds the wait."""
+    from urllib.parse import urlsplit
+    back = _Return()
+    try:
+        held = start(back.uri)
+        page = urlsplit(held["open"])
+        back.done_url = f"{page.scheme}://{page.netloc}/device"
         webbrowser.open(held["open"])
-    say("Approve the sign-in in your browser\u2026")
-    return finish(sleep, wait_s=wait_s, at_once=resumed)
+        say("Approve the sign-in in your browser\u2026")
+        got = back.wait(held["expires"] if wait_s is None else min(held["expires"], time.time() + wait_s))
+    finally:
+        back.close()
+    if got.get("error"):
+        raise need("the sign-in was declined", "login_refused", "kennet login")
+    if not got:
+        raise need("the sign-in was not approved in time; run `kennet login` again", "login_expired", "kennet login")
+    with _http() as h:
+        r = h.post("/oauth/token", data={"grant_type": DEVICE_GRANT, "device_code": held["device_code"],
+                                          "client_id": CLIENT_ID, "code": got["code"]})
+    body = _json(r)
+    if r.status_code != 200 or not isinstance(body.get("access_token"), str):
+        raise need(_said(r) if r.status_code != 200 else "the sign-in server sent no access token", "login_refused",
+                   "kennet login")
+    _keep(body, body["access_token"])
+    return body
 
 
 def logout() -> None:
