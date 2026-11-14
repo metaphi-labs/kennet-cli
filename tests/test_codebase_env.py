@@ -101,7 +101,7 @@ def test_the_readiness_table_draws_the_answer_and_not_collected_counts_as_not_ye
     cli._readiness(got)
     out = capsys.readouterr().out
     assert "\x1b[" not in out                                   # not a terminal: no colour
-    assert "│ Yes" in out and "1 of 3" in out and "· not collected" in out and "– n/a" in out
-    assert "core · CI config included\n    No CI config found." in out and out.rstrip().endswith("Each no.")
+    assert "│ Passing" in out and "1 of 3" in out and "· not collected" in out and "– n/a" in out
+    assert "To fix\n  core  No CI config found.\n  Each no.\n" in out
     cli._readiness({"repos": []})
     assert capsys.readouterr().out == ""

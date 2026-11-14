@@ -144,7 +144,7 @@ def pending() -> dict[str, Any] | None:
     return held
 
 
-def finish(sleep: Callable[[float], None] = time.sleep, wait_s: float | None = None,
+def finish(sleep: Callable[[float], None] | None = None, wait_s: float | None = None,
            at_once: bool = False) -> dict[str, Any]:
     """Wait for the approval of the sign-in under way, then keep the token and the organization's keys that come
     with it (`api_key`, `test_api_key`; `no_api_key` says why none came). `wait_s` bounds the wait: past it the
@@ -154,6 +154,7 @@ def finish(sleep: Callable[[float], None] = time.sleep, wait_s: float | None = N
     if held is None:
         raise need("no sign-in is under way, or its code expired; run `kennet login`", "login_expired",
                    "kennet login")
+    sleep = sleep or time.sleep
     device_code, interval = config.load()["device_code"], float(held["interval"])
     until = held["expires"] if wait_s is None else min(held["expires"], time.time() + wait_s)
     first = at_once
@@ -181,8 +182,8 @@ def finish(sleep: Callable[[float], None] = time.sleep, wait_s: float | None = N
                         "access_denied": "the sign-in was declined"}.get(error, _said(r)),
                        "login_expired" if error == "expired_token" else "login_refused", "kennet login")
     if time.time() + interval < held["expires"]:
-        e = need(f"not approved yet: the code {held['user_code']} waits at {held['open']}", "authorization_pending",
-                 "kennet login --complete")
+        e = need(f"not approved yet: approve the sign-in in your browser ({held['open']})", "authorization_pending",
+                 "kennet login")
         e.retryable = True
         raise e
     _forget()
@@ -251,14 +252,17 @@ def _forget() -> None:
     config.save(cfg)
 
 
-def login(say: Callable[[str], None] = print, open_browser: bool = True,
-          sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Sign the person in: show a code, open the browser on it, wait for the approval (`start`, then `finish`)."""
-    held = start()
-    say(f"Open {held['verification_uri']} and enter the code {held['user_code']}")
-    if open_browser:
+def login(say: Callable[[str], None] = print, sleep: Callable[[float], None] | None = None,
+          wait_s: float | None = None) -> dict[str, Any]:
+    """Sign the person in: open the browser on the approval page and wait for the approval. Called again while a
+    sign-in is under way, it waits on that one: no second code, no second tab. `wait_s` bounds the wait."""
+    held = pending()
+    resumed = held is not None
+    if held is None:
+        held = start()
         webbrowser.open(held["open"])
-    return finish(sleep)
+    say("Approve the sign-in in your browser\u2026")
+    return finish(sleep, wait_s=wait_s, at_once=resumed)
 
 
 def logout() -> None:

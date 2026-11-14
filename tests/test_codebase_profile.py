@@ -43,6 +43,11 @@ def repo(tmp_path):
     return r
 
 
+def _home(tmp_path: Path) -> Path:
+    """The run folder the latest profile-codebase made under ./kennet-profile."""
+    return max((tmp_path / "kennet-profile").iterdir(), key=lambda d: d.stat().st_mtime_ns)
+
+
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("METAPHI_HOME", str(tmp_path / "cfg"))
@@ -94,7 +99,7 @@ def test_url_clone(repo, tmp_path, monkeypatch):
     said = []
     doc = codebase_profile.document([f"file://{origin}"], say=said.append)
     assert [r["name"] for r in doc["repos"]] == ["falcon_core"] and doc["skipped"] == []
-    assert said == ["falcon_core: cloning", "falcon_core: computing"]
+    assert said == ["Cloning falcon_core…"]
     local = codebase_profile.document([str(repo)], say=lambda s: None)["repos"][0]
     assert doc["repos"][0]["commits"] == local["commits"]
     assert made and not any(Path(t.name).exists() for t in made)
@@ -106,7 +111,7 @@ def test_url_clone_fails(repo, tmp_path):
     doc = codebase_profile.document([f"file://{tmp_path}/missing.git", str(repo)], say=said.append)
     assert doc["skipped"] == [{"name": "missing", "reason": "clone_failed"}]
     assert [r["name"] for r in doc["repos"]] == ["falcon_core"]
-    assert any(s.startswith("missing: skipped, clone failed: ") and s.endswith("in this terminal") for s in said)
+    assert any(s.startswith("✗ Skipped missing: clone failed (") and s.endswith("in this terminal") for s in said)
 
 
 @pytest.mark.parametrize(("given", "url"), [
@@ -177,10 +182,13 @@ def test_key_checked_first(repo, capsys, monkeypatch):
 
 
 @respx.mock
-def test_a_person_not_signed_in_signs_in_and_the_profile_goes_on(repo, capsys, monkeypatch):
+def test_at_a_terminal_nothing_is_sent_or_signed_in_until_the_person_says_yes(made, capsys, tmp_path, monkeypatch):
+    from metaphi import codebase_setup
+    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
+    monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))
     monkeypatch.delenv("METAPHI_API_KEY")
     monkeypatch.setattr(cli, "_interactive", lambda: True)
-    signed = []
+    signed, asked = [], []
 
     def login(say=print, **kw):
         signed.append(True)
@@ -188,12 +196,21 @@ def test_a_person_not_signed_in_signs_in_and_the_profile_goes_on(repo, capsys, m
         return {"email": "owner@example.com"}
 
     monkeypatch.setattr(cli.accounts, "login", login)
-    respx.get(f"{API}/codebase-profiles/access").mock(return_value=httpx.Response(204))
-    monkeypatch.setattr(codebase_profile, "profiled", lambda *a, **k: pytest.fail("profiled") if not signed else
-                        (_ for _ in ()).throw(SystemExit(0)))
-    with pytest.raises(SystemExit):
-        cli.main(["profile-codebase", str(repo)])
-    assert signed and "Signed in as owner@example.com." in capsys.readouterr().out
+    ref = "cbp_" + "5" * 16
+    got = _server(ref)
+    monkeypatch.setattr("builtins.input", lambda q: asked.append(q) or "n")
+    assert cli.main(["profile-codebase", str(made)]) in (0, None)
+    out = capsys.readouterr().out
+    assert asked == [cli.SEND_ASK] and "Nothing sent" in out and out.startswith("Runs locally.\n")
+    for label in ("CI config", "Services start", "Builds", "Tests run", "Tests pass"):
+        assert label in out
+    assert not signed and not any(r.called for r in got.values())
+    assert json.loads((_home(tmp_path) / "readiness.json").read_text())["repos"][0]["name"] == made.name
+    monkeypatch.setattr("builtins.input", lambda q: "y")
+    assert cli.main(["profile-codebase", str(made)]) in (0, None)
+    out = capsys.readouterr().out
+    assert signed and "✓ Signed in as owner@example.com\n" in out and ref in out and "Using the checks from the last run" in out
+    assert all(got[r].called for r in ("profile", "checks", "logs")) and not got["sample"].called
 
 
 @respx.mock
@@ -429,12 +446,12 @@ def test_setup(tested, capsys, tmp_path, monkeypatch):
     from metaphi.steps import NAMES
     assert {"profile", "setup", "setup_model", "setup_proposals", "tip", "commits", "build", "test"} <= set(
         sent["seconds"]) <= NAMES and all(isinstance(v, int) for v in sent["seconds"].values())
-    logs = tmp_path / "kennet-profile" / ("cbp_" + "2" * 16) / "logs" / "falcon_calc"
+    logs = _home(tmp_path) / "logs" / "falcon_calc"
     steps = [json.loads(x)["step"] for x in (logs / "steps.jsonl").open()]
     assert "setup_model" in steps and "build" in steps
     assert "pytest" in (logs / "setup" / "model" / "recipe.json").read_text()
     out = capsys.readouterr().out
-    assert "running on this machine" in out and "000-tip build ok" in out and "0 of 2 failed" in out
+    assert "running on this machine" in out and "builds · 2 of 2 tests pass" in out
 
 
 @respx.mock
@@ -446,7 +463,7 @@ def test_setup_fails(tested, monkeypatch, tmp_path):
     assert sent["setup"][1]["why"] == "gave_up_license"
     assert sent["commits"] == [{"commit": 2, "broke": True}, {"commit": 3, "broke": True}]
     assert "licensed" not in json.dumps(sent)
-    logs = tmp_path / "kennet-profile" / ("cbp_" + "2" * 16) / "logs" / "falcon_calc"
+    logs = _home(tmp_path) / "logs" / "falcon_calc"
     assert "licensed" in (logs / "setup" / "model" / "gave-up.txt").read_text()
 
 
@@ -644,8 +661,8 @@ def test_default_finds_nothing(repo, capsys, tmp_path, monkeypatch):
     assert sent["commits"] == [] and sent["breaks"] == []
     out = capsys.readouterr().out
     assert f"No build or test found in {repo}" in out and "--build '<build>' --test '<test>'" in out
-    assert "--deep" in out and "Done. 1 repository shared" in out
-    assert json.loads((tmp_path / "kennet-profile" / ref / "profile.json").read_text())["repos"]
+    assert "--deep" in out and "✓ Sent cbp_" in out
+    assert json.loads((_home(tmp_path) / "profile.json").read_text())["repos"]
 
 
 @pytest.fixture
@@ -682,12 +699,12 @@ def test_default_finds_commands(made, capsys, tmp_path, monkeypatch):
     assert sent["tip"]["tests"][0]["reported"] == 2 and sent["tip"]["tests"][0]["passed"] == 2
     assert sent["commits"] == [] and sent["runs"] == 0 and not got["sample"].called
     assert not got["setup"].called and "No build or test found" not in capsys.readouterr().out
-    assert "make test" in (tmp_path / "kennet-profile" / ref / "logs" / "falcon_made" / "setup" / "recipe.json").read_text()
+    assert "make test" in (_home(tmp_path) / "logs" / "falcon_made" / "setup" / "recipe.json").read_text()
     # past commits, before and after each change, only when asked
     assert cli.main(["profile-codebase", str(made), "--commits"]) in (0, None)
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
     assert got["sample"].call_count == 1 and sent["commits"][0]["fail_to_pass"] == 1
-    assert json.loads((tmp_path / "kennet-profile" / ref / "sample.json").read_text())["repos"] == [[2]]
+    assert json.loads((_home(tmp_path) / "sample.json").read_text())["repos"] == [[2]]
 
 
 @respx.mock
@@ -894,7 +911,7 @@ def test_the_closing_line_says_the_build_ran_when_only_the_tests_failed():
     tries = [{"build": {"exit": 0, "seconds": 5},
               "test": {"exit": 1, "seconds": 6, "report": "summary", "reported": 10, "passed": 0}}]
     said = cli._rerun("./core", tries)
-    assert "the build ran and 0 of 10 tests passed" in said and "No build or test found" not in said
+    assert "In ./core, 0 of 10 tests passed" in said and "No build or test found" not in said
     assert "No build or test found in ./core" in cli._rerun("./core", [])
 
 
@@ -983,7 +1000,7 @@ def test_every_byte_sent_is_kept_and_matched_against_the_servers_receipt(made, c
     for route in ("profile", "checks", "logs"):
         got[route].mock(side_effect=receipt(route))
     assert cli.main(["profile-codebase", str(made)]) in (0, None)
-    sent = tmp_path / "kennet-profile" / ref / "sent"
+    sent = _home(tmp_path) / "sent"
     rows = {r["file"]: r for r in json.loads((sent / "sent.json").read_text())}
     assert sorted(rows) == ["checks.json.gz", "logs.tar.gz", "profile.json.gz"]
     for name, route in (("profile.json.gz", "profile"), ("checks.json.gz", "checks"), ("logs.tar.gz", "logs")):

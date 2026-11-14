@@ -93,7 +93,7 @@ def test_a_key_that_is_not_an_organization_key_never_leaves(home, monkeypatch):
 def test_a_non_json_device_answer_is_an_error():
     respx.post(f"{A}/device/code").respond(200, text="<html>gateway</html>")
     with pytest.raises(accounts.Error):
-        accounts.login(say=lambda s: None, open_browser=False, sleep=lambda s: None)
+        accounts.login(say=lambda s: None, sleep=lambda s: None)
 
 
 @respx.mock
@@ -102,26 +102,18 @@ def test_a_non_json_poll_answer_is_an_error():
                                                  "expires_in": 60, "verification_uri": f"{A}/device"})
     respx.post(f"{A}/oauth/token").mock(return_value=httpx.Response(502, text="bad gateway"))
     with pytest.raises(accounts.Error) as e:   # the proxy's page is never the message
-        accounts.login(say=lambda s: None, open_browser=False, sleep=lambda s: None)
+        accounts.login(say=lambda s: None, sleep=lambda s: None)
     assert (e.value.message, e.value.code, e.value.retryable) == (
         "the service answered HTTP 502; try again in a minute", "service_unavailable", True)
 
 
 def _sign_in(code_body, monkeypatch):
     opened, said = [], []
-    monkeypatch.setattr(accounts.webbrowser, "open", opened.append)
+    monkeypatch.setattr(accounts.webbrowser, "open", lambda url: opened.append(url) or True)
     respx.post(f"{A}/device/code").respond(json=code_body)
     respx.post(f"{A}/oauth/token").respond(json={"access_token": "tok"})
-    accounts.login(say=said.append, open_browser=True, sleep=lambda s: None)
+    accounts.login(say=said.append, sleep=lambda s: None)
     return opened, said
-
-
-@respx.mock
-def test_device_sign_in_without_a_prefilled_link_has_the_person_type_the_code(monkeypatch):
-    opened, said = _sign_in({"device_code": "dc", "user_code": "WDJB-MJHT", "verification_uri": f"{A}/device"},
-                            monkeypatch)
-    assert opened == [f"{A}/device"]
-    assert said[0] == f"Open {A}/device and enter the code WDJB-MJHT"
 
 
 @respx.mock
@@ -129,7 +121,7 @@ def test_device_sign_in_opens_the_prefilled_link_when_there_is_one(monkeypatch):
     opened, said = _sign_in({"device_code": "dc", "user_code": "WDJB-MJHT", "verification_uri": f"{A}/device",
                              "verification_uri_complete": f"{A}/device?user_code=WDJB-MJHT"}, monkeypatch)
     assert opened == [f"{A}/device?user_code=WDJB-MJHT"]
-    assert "WDJB-MJHT" in said[0] and f"{A}/device" in said[0]
+    assert said[0] == "Approve the sign-in in your browser…"   # nothing to type
 
 
 @pytest.mark.parametrize("body", [
@@ -143,10 +135,10 @@ def test_device_sign_in_opens_the_prefilled_link_when_there_is_one(monkeypatch):
 @respx.mock
 def test_an_incomplete_or_off_domain_device_code_is_refused(body, monkeypatch):
     opened = []
-    monkeypatch.setattr(accounts.webbrowser, "open", opened.append)
+    monkeypatch.setattr(accounts.webbrowser, "open", lambda url: opened.append(url) or True)
     respx.post(f"{A}/device/code").respond(json=body)
     with pytest.raises(config.Error):
-        accounts.login(say=lambda s: None, open_browser=True, sleep=lambda s: None)
+        accounts.login(say=lambda s: None, sleep=lambda s: None)
     assert opened == []
 
 

@@ -120,19 +120,12 @@ alone, and progress goes to stderr. An error that one command clears names it: `
 `next_step` in the JSON.
 
 ```sh
-kennet login --json           # {"verification_uri", "user_code", "expires_in", "next_step": "kennet login --complete"}
-                               # the person opens the page and confirms the code
-kennet login --complete       # waits for the approval (60 s away from a terminal) and saves the keys; safe to run again
+kennet login --json           # opens the browser; the person approves; waits up to 60 s, run again to go on waiting
 kennet whoami --json          # asks the servers: email, organization, balance, and whether each key works
 kennet twin trace.json --no-wait --json    # {"id", "status", "next_step": "kennet twins wait twin_..."}
 kennet twins wait twin_... --json          # {"output", "id"} once it ends
 kennet twins list --json      # the organization's twins, newest first
 ```
-
-Away from a terminal `kennet login` is `--no-wait` by itself: it prints the page and the code and returns, so the
-agent can show them to its person. `--wait` keeps the old behaviour, one call that waits for the approval.
-`--json` never opens a browser: it implies `--no-browser`, so a program's call never opens a tab on someone's
-screen.
 
 Whatever goes wrong ends in one line on stderr and a next step, never a traceback, and under `--json` in the error
 object. A request that never got an answer is `network` (`retryable`, exit 4): `error: can't reach
@@ -252,7 +245,7 @@ but for the last:
 | Code | When | `next_step` |
 | --- | --- | --- |
 | `not_signed_in` | no sign-in on this machine, or the server has ended it | `kennet login` |
-| `authorization_pending` | `login --complete` returned before the code was approved (`retryable`) | `kennet login --complete` |
+| `authorization_pending` | `login` returned before the sign-in was approved (`retryable`) | `kennet login` |
 | `no_api_key` | signed in, but the sign-in was handed no key; the message says why, and `reason` which it is (below). Keys come with a sign-in, so `kennet login` picks them up once the organization has access | `kennet org join <org>` when an organization has invited you (`invitation_pending`); `kennet org create <name>` when you are in no organization and none has; `null` when you were taken out of yours (`removed`: an owner of it adds you back), while yours waits for approval, and from `login` itself; else `kennet login` |
 | `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
 | `confirmation_required` | `kennet keys revoke` away from a terminal, or under `--json`, without `--yes` | the same revoke, by id, with `--yes` |
@@ -364,9 +357,9 @@ Want a mutual NDA in place first? `kennet mnda` says where your organization's s
 
 Working through a coding agent? `kennet agents install` gives it the `kennet-partner` skill: the whole path, from install to profile to NDA.
 
-Not signed in yet? At a terminal it signs you in first (the browser opens on a code), then goes on: no `kennet login` beforehand.
+At a terminal it runs locally and sends nothing until you answer yes: it shows five checks (CI config, services start, builds, tests run, tests pass), then asks `Send these results to Metaphi AI? [y/N]`. Yes signs you in (approve in the browser) and sends; no sends nothing. Away from a terminal (`--json`, CI, a platform's onboarding) it sends with the key it holds. `--commits` and `--deep` sign in first.
 
-It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept byte for byte in `./kennet-profile/<id>/sent/`; `sent.json` lists each file with its sha256 and the sha256 Metaphi AI received. With `--commits`, what Metaphi AI asked this machine to run is in `sample.json`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
+It reads each repository's history and builds and tests its latest commit once, on this machine, in Docker or Podman when one is running, in a temporary copy; your code stays here. Everything it sends is kept byte for byte in `./kennet-profile/<run>/sent/`; `sent.json` lists each file with its sha256 and the sha256 Metaphi AI received. With `--commits`, what Metaphi AI asked this machine to run is in `sample.json`. When it cannot find how a repository builds and tests, it says so; run it again with your commands, or with `--deep`:
 
 ```sh
 kennet profile-codebase ./core --build 'make' --test 'make test'

@@ -1,5 +1,6 @@
 """The CLI against stand-ins for accounts and the twin API: sign-in, the keys it hands over, and one trace end to end."""
 import json
+import time
 
 import httpx
 import pytest
@@ -29,8 +30,8 @@ def test_login_polls_the_device_grant_until_approved_and_keeps_the_token(home):
         httpx.Response(400, json={"error": "authorization_pending"}),
         httpx.Response(200, json={"access_token": "tok", "token_type": "Bearer", "email": "alice@example.test"})])
     said, slept = [], []
-    got = accounts.login(say=said.append, open_browser=False, sleep=slept.append)
-    assert got["email"] == "alice@example.test" and "ABCD-EFGH" in said[0]
+    got = accounts.login(say=said.append, sleep=slept.append)
+    assert got["email"] == "alice@example.test" and said[0] == "Approve the sign-in in your browser…"
     assert code.calls[0].request.headers["content-type"] == "application/x-www-form-urlencoded"
     assert code.calls[0].request.content == b"client_id=metaphi-cli"
     assert slept == [5.0, 5.0]  # RFC 8628: never faster than 5 s, whatever the server says
@@ -48,7 +49,8 @@ def _login(monkeypatch, **handed) -> int:
     respx.post(f"{A}/device/code").respond(json=CODE)
     respx.post(f"{A}/oauth/token").respond(json={**SIGNED, **handed})
     monkeypatch.setattr(accounts.time, "sleep", lambda s: None)
-    return cli.main(["login", "--no-browser", "--wait"])
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    return cli.main(["login"])
 
 
 @respx.mock
@@ -85,44 +87,31 @@ def test_a_login_handed_no_key_drops_only_the_key_a_login_handed(monkeypatch, ca
 
 
 @respx.mock
-def test_login_away_from_a_terminal_hands_the_code_over_and_returns(monkeypatch, capsys):
-    code = respx.post(f"{A}/device/code").respond(json=CODE)
-    token = respx.post(f"{A}/oauth/token").mock(side_effect=[
-        httpx.Response(400, json={"error": "authorization_pending"}),
-        httpx.Response(200, json={**SIGNED, "org": "acme", "api_key": "mai_sk_live",
-                                  "test_api_key": "mai_sk_test_t"})])
-    monkeypatch.setattr(accounts.time, "sleep", lambda s: None)
-    assert cli.main(["login", "--no-browser", "--json"]) == 0   # pytest is no terminal: no --no-wait needed
+def test_login_away_from_a_terminal_waits_within_a_tool_call_and_goes_on_when_run_again(monkeypatch, capsys):
+    code = respx.post(f"{A}/device/code").respond(json={**CODE, "expires_in": 600})
+    approved = []
+    respx.post(f"{A}/oauth/token").mock(side_effect=lambda req: httpx.Response(200, json={
+        **SIGNED, "org": "acme", "api_key": "mai_sk_live", "test_api_key": "mai_sk_test_t"}) if approved
+        else httpx.Response(400, json={"error": "authorization_pending"}))
+    opened = []
+    monkeypatch.setattr(accounts.webbrowser, "open", opened.append)
+    real, ahead = time.time, [0.0]   # each poll's sleep moves the clock on, without waiting
+    monkeypatch.setattr(accounts.time, "time", lambda: real() + ahead[0])
+    monkeypatch.setattr(accounts.time, "sleep", lambda s: ahead.__setitem__(0, ahead[0] + s))
+    assert cli.main(["login", "--json"]) == cli.AUTH   # pytest is no terminal: a bounded wait, then said so
     out = capsys.readouterr()
-    got = json.loads(out.out)
-    assert (got["verification_uri"], got["user_code"]) == (f"{A}/device", "ABCD-EFGH")
-    assert got["next_step"] == "kennet login --complete" and 0 < got["expires_in"] <= 60
-    assert got["status"] == "pending"
-    assert code.call_count == 1 and not token.called and "token" not in config.load()
-    assert cli.main(["login", "--no-browser", "--json"]) == 0   # asked again: the code a person may hold stands
-    assert json.loads(capsys.readouterr().out)["user_code"] == "ABCD-EFGH" and code.call_count == 1
-    assert cli.main(["login", "--complete", "--json", "--timeout", "1"]) == cli.AUTH   # not approved yet, and said so
-    error = json.loads(capsys.readouterr().out)["error"]
-    assert (error["code"], error["retryable"], error["next_step"]) == ("authorization_pending", True,
-                                                                         "kennet login --complete")
-    assert token.call_count == 1 and config.load()["device_code"] == "dc"   # still under way
-    assert cli.main(["login", "--complete", "--json"]) == 0
+    error = json.loads(out.out)["error"]
+    assert (error["code"], error["retryable"], error["next_step"]) == ("authorization_pending", True, "kennet login")
+    assert opened == [f"{A}/device"] and "Approve the sign-in in your browser…" in out.err
+    assert config.load()["device_code"] == "dc"   # still under way
+    approved.append(True)
+    assert cli.main(["login", "--json"]) == 0   # run again: the same sign-in, no new page
     out = capsys.readouterr()
     assert json.loads(out.out) == {"email": "alice@example.test", "org": "acme", "keys": True,
                                    "next_step": "kennet twin <file> --test"}
-    assert "ABCD-EFGH" in out.err and "mai_sk_" not in out.out + out.err
+    assert "mai_sk_" not in out.out + out.err and opened == [f"{A}/device"] and code.call_count == 1
     cfg = config.load()
     assert cfg["api_key"] == "mai_sk_live" and "pending" not in cfg and "device_code" not in cfg
-    assert code.call_count == 1   # the same code was finished, not a new one drawn
-
-
-def test_login_complete_with_nothing_under_way_names_the_next_command(capsys):
-    assert cli.main(["login", "--complete", "--json"]) == cli.AUTH
-    out = capsys.readouterr()
-    error = json.loads(out.out)["error"]
-    assert (error["type"], error["code"], error["next_step"]) == ("auth_error", "login_expired", "kennet login")
-    assert out.err.endswith("Next: kennet login\n")
-
 
 @respx.mock
 def test_a_new_organization_that_can_profile_at_once_saves_its_keys_and_points_at_the_profile(capsys):
@@ -306,10 +295,10 @@ def test_a_person_in_no_organization_makes_theirs_and_is_told_it_waits_for_appro
     assert "no_api_key" not in cfg and "pending" not in cfg
     # a sign-in that has ended, or a server that knows no pickup, falls through to the browser sign-in
     pick.respond(401, json={"detail": "sign in"})
-    respx.post(f"{A}/device/code").respond(json=CODE)
-    assert cli.main(["login", "--no-browser", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "pending"
-    config.save({k: v for k, v in config.load().items() if k not in ("pending", "device_code")})
+    device = respx.post(f"{A}/device/code").respond(json=CODE)
+    respx.post(f"{A}/oauth/token").respond(400, json={"error": "expired_token"})
+    assert cli.main(["login", "--json"]) == cli.AUTH and device.called
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "login_expired"
     # a resource that asks for no approval admits it at once: the sign-in is what is left
     made.respond(json={"id": "acme", "name": "Acme", "role": "owner", "access": "active",
                        "message": "Acme is made and you own it. Run `kennet login` again for its keys."})
@@ -1067,11 +1056,9 @@ def test_a_stale_sign_in_is_step_up_required_and_the_next_login_signs_in_afresh(
     # `kennet login` does not pick the keys up by the stale token: it starts a new sign-in
     pick = respx.post(f"{A}/keys/cli").respond(json={"email": "alice@acme.test"})
     respx.post(f"{A}/device/code").respond(json=CODE)
-    assert cli.main(["login", "--no-browser", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "pending" and pick.call_count == 0
     respx.post(f"{A}/oauth/token").respond(json=SIGNED)
-    cli.main(["login", "--complete", "--json"])
-    assert "step_up" not in config.load()
+    cli.main(["login", "--json"])
+    assert pick.call_count == 0 and "step_up" not in config.load()
 
 
 @respx.mock
@@ -1235,15 +1222,6 @@ def test_whoami_with_no_key_names_an_invitation_sent_since_the_sign_in(capsys):
     assert got.err.endswith("Next: kennet org join acme\n") and "org create" not in got.out + got.err
 
 
-def test_login_json_never_opens_a_browser(monkeypatch, capsys):
-    opened = []
-    monkeypatch.setattr(accounts.webbrowser, "open", opened.append)
-    with respx.mock:
-        respx.post(f"{A}/device/code").respond(json=CODE)
-        assert cli.main(["login", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "pending" and opened == []
-
-
 @respx.mock
 def test_a_network_failure_is_one_line_retryable_and_never_a_traceback(capsys):
     config.save({"token": "tok"})
@@ -1372,6 +1350,7 @@ def test_a_pickup_that_fails_is_the_error_and_never_a_fresh_sign_in(capsys):
     config.save({"token": "tok", "email": "alice@example.test"})
     pick = respx.post(f"{A}/keys/cli").respond(502, text=GATEWAY)
     device = respx.post(f"{A}/device/code").respond(json=CODE)
+    respx.post(f"{A}/oauth/token").respond(400, json={"error": "expired_token"})
     assert cli.main(["login", "--json"]) == cli.LATER
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "service_unavailable"
     assert not device.called and config.load()["token"] == "tok"
@@ -1380,8 +1359,8 @@ def test_a_pickup_that_fails_is_the_error_and_never_a_fresh_sign_in(capsys):
     assert json.loads(capsys.readouterr().out)["error"]["message"] == "the database is down"
     for status in (401, 403):   # the sign-in has ended: a fresh one
         pick.respond(status, json={"detail": "sign in"})
-        assert cli.main(["login", "--json"]) == 0
-        assert json.loads(capsys.readouterr().out)["status"] == "pending"
+        assert cli.main(["login", "--json"]) == cli.AUTH   # a fresh sign-in, here never approved
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "login_expired"
         config.save({"token": "tok"})
     assert device.call_count == 2
 
@@ -1921,3 +1900,21 @@ def test_org_domain_prints_the_record_and_verifies(capsys):
     respx.get(f"{A}/keys/orgs/acme/domains").respond(json=[{"domain": "acme.test", "status": "verified", "method": "dns"}])
     assert cli.main(["org", "domain"]) == 0
     assert "acme.test" in capsys.readouterr().out
+
+
+def test_the_palette_is_plain_off_a_terminal_and_truecolor_where_said(monkeypatch):
+    import io
+
+    from metaphi import palette
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+    assert palette.paint("cbp_1", "accent", io.StringIO()) == "cbp_1"
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    assert palette.paint("cbp_1", "accent", Tty(), bold=True) == "\x1b[1;38;2;126;140;224mcbp_1\x1b[0m"
+    monkeypatch.setenv("COLORTERM", "")
+    assert palette.paint("yes", "ok", Tty()) == "\x1b[38;5;108myes\x1b[0m"
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert palette.paint("yes", "ok", Tty()) == "yes"

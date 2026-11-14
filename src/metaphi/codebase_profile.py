@@ -30,8 +30,8 @@ CHECKS_SCHEMA = "kennet.repo_checks.v1"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
 NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
-NOTICE = ("Counts and ids are shared with Metaphi AI to assess the codebase for licensing; your source code stays "
-          "here. A mutual NDA first: `kennet mnda`")
+NOTICE = "Runs locally. Results are sent to Metaphi AI; your code stays here."
+LOCAL_NOTICE = "Runs locally."
 MAX_BLOB = 2_000_000
 
 SOURCE = frozenset(["go", "py", "java", "kt", "kts", "scala", "groovy", "jelly", "js", "jsx", "mjs", "cjs", "ts", "tsx", "vue", "svelte", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "fs", "rb", "php", "rs", "dart", "swift", "cbl", "cob", "cpy", "jcl", "bms", "st", "gs", "pl", "pm", "f", "f90", "for", "sh", "bash", "ps1", "m", "mm", "ex", "exs", "erl", "hs", "ml", "clj", "lua", "vb", "pas", "sql", "r", "jl", "zig", "nim", "sol", "v", "sv", "vhd", "vhdl", "tf", "abap", "rpg", "pli"])
@@ -467,19 +467,18 @@ def profiled(paths: list[str], say: Callable[[str], None] = print
                 name = f"{name[:120]}-{n}"
             used.add(name)
             if url:
-                say(f"{name}: cloning")
+                say(f"Cloning {name}\u2026")
                 path = Path(scratch) / f"{n}.git"
                 failed = _clone(given, path)
                 if failed:
-                    say(f"{name}: skipped, clone failed: {failed}. {SKIPPED_FIX['clone_failed']}")
+                    say(f"\u2717 Skipped {name}: clone failed ({failed}). {SKIPPED_FIX['clone_failed']}")
                     skipped.append({"name": name, "reason": "clone_failed"})
                     continue
             reason = why_not(path) if path.is_dir() else "not_a_git_repository"
             if reason:
-                say(f"{name}: skipped, {SKIPPED_FIX[reason]}")
+                say(f"\u2717 Skipped {name}: {SKIPPED_FIX[reason]}")
                 skipped.append({"name": name, "reason": reason})
                 continue
-            say(f"{name}: computing")
             local: dict = {"name": name, "given": given}
             began = time.monotonic()
             try:
@@ -487,7 +486,7 @@ def profiled(paths: list[str], say: Callable[[str], None] = print
                 local["seconds"] = time.monotonic() - began
                 kept.append(local)
             except (Unreadable, ValueError, OSError):
-                say(f"{name}: skipped, {SKIPPED_FIX['unreadable']}")
+                say(f"\u2717 Skipped {name}: {SKIPPED_FIX['unreadable']}")
                 skipped.append({"name": name, "reason": "unreadable"})
         yield {"schema": SCHEMA, "tool_version": __version__, "repos": repos, "skipped": skipped}, kept
 
@@ -511,6 +510,71 @@ def _reader(repo: Path, tree: dict[str, tuple[str, str]]) -> Callable[[str], byt
     return read
 
 
+def run_id(doc: dict[str, Any]) -> str:
+    """This run's folder under ./kennet-profile: the repositories as measured, the same for the same commits, so a run
+    again finds what it kept."""
+    said = json.dumps([[r["name"], r["tip"]] for r in doc["repos"]]).encode()
+    return "run_" + hashlib.sha256(said).hexdigest()[:16]
+
+
+READY_NOTE = "Fix what you can and run the same command again."
+WHY_FIX = {
+    "service": "The tests could not reach a service (a database, a queue). Start it, or install Docker.",
+    "config": "The tests need configuration (an environment variable or config file). Set it and run again.",
+    "timeout": "The tests ran too long. Run again with a faster suite: --test '<command>'.",
+}
+
+
+def _tip_test(got: dict) -> dict:
+    """The tip's own test run, else the found try that counted the most tests."""
+    tests = (got.get("tip") or {}).get("tests") or []
+    if tests:
+        return tests[0]
+    tried = [t["test"] for x in got.get("setup") or [] for t in x.get("tries") or [] if t.get("test")]
+    return max(tried, key=lambda t: t.get("reported") or 0, default={})
+
+
+def readiness(doc: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    """The five checks the seller is shown before anything is sent: per repository, each yes, no, not collected or
+    not needed, and for a no, what would turn it to yes. Facts this run saw on this machine, never how Metaphi AI
+    weighs them. Only what the seller can change by running again is asked: never the history, rights or licences."""
+    out = []
+    for repo, got in zip(doc["repos"], report["repos"], strict=True):
+        got, env = got or {}, repo.get("env")
+        tip = got.get("tip") or {}
+        builds = [tip["build"]] if tip.get("build") else [t["build"] for x in got.get("setup") or []
+                                                           for t in x.get("tries") or [] if t.get("build")]
+        test = _tip_test(got)
+        # counted but none passed, for want of a service or configuration, or crashing: the tests never got to run
+        stopped = not test.get("passed") and test.get("why") in ("service", "config", "crash")
+        ran = (bool(test.get("reported")) or (test.get("exit") == 0 and bool(test))) and not stopped
+        whole = ran and test.get("exit") == 0 and test.get("reported") == test.get("passed")
+        rows: list[dict] = []
+
+        def check(key: str, label: str, ok: bool | None, fix: str, state: str | None = None, rows: list = rows) -> None:
+            state = state or ("not_collected" if ok is None else "yes" if ok else "no")
+            rows.append({"key": key, "label": label, "state": state, **({"fix": fix} if state == "no" else {})})
+        check("ci", "CI config", None if env is None else env["ci_files"] > 0,
+              "No CI config found. Add the one your team runs its tests with.")
+        needed = env and env["ci_services"] + env["compose_services"] - env["compose_built"]
+        check("services", "Services start",
+              None if env is None else (got.get("services") or {}).get("up", False),
+              "The tests need services (databases, queues). Install Docker and run again." if not got.get("services")
+              else "The services did not start; see services.log.",
+              None if env is None or needed else "not_needed")
+        check("build", "Builds", None if not got else any(b.get("exit") == 0 for b in builds) or (ran and not builds),
+              "The build failed. Run again with yours: --build '<command>' --test '<command>'.")
+        check("tests_run", "Tests run", None if not got else ran,
+              WHY_FIX.get(test.get("why") or "", "No tests ran. Run again with yours: --test '<command>'."))
+        failed = (test.get("reported") or 0) - (test.get("passed") or 0)
+        check("tests_pass", "Tests pass", None if not got else whole,
+              " ".join(x for x in (f"{failed} of {test['reported']} tests fail."
+                                   if test.get("reported") else "The tests did not pass.",
+                                   WHY_FIX.get(test.get("why") or "")) if x))
+        out.append({"name": repo["name"], "checks": rows})
+    return {"repos": out, "note": READY_NOTE}
+
+
 def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_checks.Plan,
             say: Callable[[str], None] = print, ref: str | None = None, steps: Steps | None = None) -> dict[str, Any]:
     import dataclasses
@@ -520,7 +584,8 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
     steps = steps or Steps()
     if plan.test is None:
         box = codebase_setup.engine()
-        say(f"Setup: {box} containers" if box else "Setup: no Docker or Podman; running on this machine")
+        if not box:
+            say("No Docker or Podman: running on this machine")
     # services run in containers even where the seller's own commands run here: their ports are published here
     engine = box or (codebase_setup.engine() if any(k.get("start") for k in kept) else None)
 
@@ -573,20 +638,21 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                 services = codebase_env.Services(engine, local["start"],
                                                  lambda d, t=tip_tree, r=repo: codebase_checks._write(r, t, d),
                                                  logs / "services.log")
-                say(f"{local['name']}: starting {services.got['count']} services its "
-                    f"{'CI' if local['start']['from'] == 'ci' else 'compose file'} declares ({logs / 'services.log'})")
+                say(f"Starting {local['name']}'s services\u2026")
                 with mine.steps.step("services"):
                     up = services.up()
-                say(f"{local['name']}: services {'up' if up['up'] else 'did not start'} ({up['seconds']} s)")
+                if not up["up"]:
+                    say(f"\u2717 {local['name']}'s services did not start ({logs / 'services.log'})")
                 codebase_setup.NETWORK[:] = ["--network", "host"] if up["up"] else []
             # a mainframe estate (harwell.toml) is built on Harwell, never here: `--deep` alone sends its files
             built = codebase_harwell.checked(repo, local["tip"], local["name"], _key(None, False), say,
                                              mine.steps) if plan.deep and ref else None
             try:
                 if plan.test is None:
-                    say(f"{local['name']}: setup")
+                    say(f"Setting up {local['name']}\u2026")
                     recipe = setup_at(local["tip"], logs / "setup", None, None)
-                    say(f"{local['name']}: setup {'ok' if recipe else 'failed'} ({logs / 'setup'})")
+                    if not recipe:
+                        say(f"\u2717 Could not set up {local['name']} ({logs / 'setup'})")
                     if recipe:
                         found = (recipe, box)
                 era_of = (picked.get("eras") or [[]] * len(kept))[n][:len(picks)] or None
@@ -600,7 +666,7 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
                                           (picked.get("breaks") or [[]] * len(kept))[n], local.get("paths"),
                                           tip or None)
             except Exception as e:   # noqa: BLE001
-                say(f"{local['name']}: tests stopped ({type(e).__name__}: {e})")
+                say(f"\u2717 {local['name']}: tests stopped ({type(e).__name__}: {e})")
                 got = {"from": "tip", "runs": picked["runs"], "build_given": plan.build is not None,
                        "test_given": plan.test is not None, "stopped": "error", "commits": [], "breaks": []}
             finally:
@@ -614,7 +680,6 @@ def checked(kept: list[dict], picked: dict[str, Any] | None, plan: codebase_chec
             if built:
                 got["build_remote"] = built
             got["seconds"] = mine.steps.seconds()
-            say(f"{local['name']}: took {mine.steps.said()} ({logs / 'steps.jsonl'})")
             out.append(got)
             if box and mine.cache:
                 try:

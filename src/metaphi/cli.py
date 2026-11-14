@@ -43,7 +43,7 @@ from typing import IO
 
 import httpx
 
-from metaphi import __version__, accounts, admin, agents, config, errors, skill, update
+from metaphi import __version__, accounts, admin, agents, config, errors, palette, skill, update
 
 FAILED, USAGE, AUTH, LATER, UPGRADE = 1, 2, 3, 4, 5
 
@@ -133,8 +133,6 @@ def _signed_in(a: argparse.Namespace, got: dict, joined: dict | None = None) -> 
 
 
 def cmd_login(a: argparse.Namespace) -> None:
-    if a.json:   # a caller reading JSON is a program: the page and the code are handed over, never a browser tab
-        a.no_browser = True
     key = a.api_key or (_read_key() if a.with_api_key else None)
     if a.with_api_key or a.api_key:
         if not key or not key.startswith(config.KEY_PREFIX):
@@ -145,32 +143,12 @@ def cmd_login(a: argparse.Namespace) -> None:
         config.save(cfg)
         _out(a, {"keys": True}, "key saved on this machine")
         return
-    say = _progress(a)
     # a refusal for a sign-in too old to change an organization (`step_up_required`) asks for a fresh one, not a pickup
     if accounts.pending() is None and not config.load().get("step_up") and (got := accounts.pickup()) is not None:
-        # signed in already: the keys come by the token this machine holds, and nobody opens a browser
-        _signed_in(a, got)
+        _signed_in(a, got)   # signed in already: the keys come by the token this machine holds
         return
-    if a.complete:
-        held = accounts.pending()
-        if held is not None:
-            say(f"Waiting for the approval of code {held['user_code']} at {held['verification_uri']}")
-        # away from a terminal the caller is a tool call with a clock of its own: answer within it, to be called again
-        _signed_in(a, accounts.finish(wait_s=a.timeout or (None if _interactive() else 60.0), at_once=True))
-        return
-    if a.no_wait or not (a.wait or _interactive()):
-        # away from a terminal nobody reads a prompt that then blocks: hand the page and the code over, and stop
-        held = accounts.pending() or accounts.start()   # asked twice, the code a person may hold stays the code
-        if not a.no_browser:
-            accounts.webbrowser.open(held["open"])
-        _out(a, {"verification_uri": held["verification_uri"], "verification_uri_complete": held["open"],
-                 "user_code": held["user_code"], "expires_in": int(held["expires"] - time.time()), "status": "pending",
-                 "next_step": "kennet login --complete"},
-             f"Open {held['verification_uri']} and enter the code {held['user_code']}",
-             f"(or open {held['open']})" if held["open"] != held["verification_uri"] else "",
-             "Next: kennet login --complete   (waits for the approval; safe to run again)")
-        return
-    _signed_in(a, accounts.login(say=say, open_browser=not a.no_browser))
+    # away from a terminal the caller is a tool call with a clock of its own: wait within it; run again to go on waiting
+    _signed_in(a, accounts.login(say=_progress(a), wait_s=None if _interactive() else 60.0))
 
 
 def cmd_mnda(a: argparse.Namespace) -> None:
@@ -353,12 +331,12 @@ def _rerun(given: str, tries: list[dict] | None = None) -> str:
         t = max(ran, key=lambda t: t["test"].get("reported") or 0)["test"]
         what = (f"{t['passed']} of {t['reported']} tests passed" if t.get("reported") is not None
                 else f"the tests exited {t.get('exit')}")
-        head = (f"In {given} the build ran and {what} on this machine. If the tests need a service (a database, a "
-                "cache), run again where it is up, or with your commands:\n")
+        head = (f"In {given}, {what}. If the tests need a service (a database, a cache), start it, or give your "
+                "commands:\n")
     else:
-        head = f"No build or test found in {given}. Run again with your commands:\n"
+        head = f"No build or test found in {given}. Give your commands:\n"
     return (head + f"  kennet profile-codebase {q} --build '<build>' --test '<test>'\n"
-            "Or have a model set it up (this sends file contents to Metaphi AI):\n"
+            "Or let a model set it up (sends file contents to Metaphi AI):\n"
             f"  kennet profile-codebase {q} --deep")
 
 
@@ -382,16 +360,10 @@ def _sent(home: Path, name: str, route: str, body: bytes, answer: dict, say: Cal
         say(f"The server received {got.get('bytes')} bytes for {name}, not the {len(body)} sent ({ledger})")
 
 
-def cmd_profile_codebase(a: argparse.Namespace) -> None:
-    from metaphi import codebase_checks, codebase_profile
-    from metaphi.steps import Steps
-    if a.build and not a.test:
-        raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
-    if a.deep and a.test:
-        raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
-    say = _progress(a)
-    update.current_for(sys.argv[1:], say)   # a profile is read by the version that made it: the newest, every run
-    codebase_profile.say = say
+def _profile_key(a: argparse.Namespace, say: Callable[[str], None]) -> None:
+    """A key that sends codebase profiles, or why not: one saved by a sign-in, picked up when the organization was
+    made or approved since, or got by signing in here when a person is at the terminal."""
+    from metaphi import codebase_profile
     try:
         codebase_profile.key_ready()
     except accounts.Error as e:
@@ -403,29 +375,83 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             raise
         else:
             got = accounts.login(say=say)
-            say(f"Signed in as {got.get('email')}.")
+            say(palette.paint("\u2713", "ok", sys.stdout) + f" Signed in as {got.get('email')}")
             codebase_profile.key_ready()   # no key with the sign-in: the refusal says why (awaiting approval, no access)
-    say(codebase_profile.NOTICE)
+
+
+SEND_ASK = "? Send these results to Metaphi AI? Your code stays here. [y/N] "
+_PATH = re.compile(r" \((/[^)]*)\)")
+
+
+def _profile_say(say: Callable[[str], None], stream: IO[str]) -> Callable[[str], None]:
+    """Progress as it reads at a terminal: a mark in its tone, the paths and indented lines dim."""
+    if not palette.on(stream):
+        return say
+
+    def styled(line: str) -> None:
+        if line[:1].isspace():
+            return say(palette.paint(line, "dim", stream))
+        line = _PATH.sub(lambda m: " " + palette.paint(f"({m.group(1)})", "dim", stream), line)
+        mark = {"\u2713": "ok", "\u2717": "no"}.get(line[:1])
+        say(palette.paint(line[0], mark, stream) + line[1:] if mark else line)
+    return styled
+
+
+def _send_ask(stream: IO[str]) -> str:
+    return (palette.paint("?", "accent", stream, bold=True) + " "
+            + palette.paint("Send these results to Metaphi AI?", None, stream, bold=True) + " "
+            + palette.paint("Your code stays here. [y/N]", "dim", stream) + " ") if palette.on(stream) else SEND_ASK
+
+
+def cmd_profile_codebase(a: argparse.Namespace) -> None:
+    """Measure here, show the checks, then send on the person's word. At a terminal nothing leaves the machine and no
+    sign-in is asked until they answer yes; away from one (a platform's onboarding, CI) the run is sent with the key
+    it holds. --commits and --deep sign in first: the server draws the commits, and hands the model its key."""
+    from metaphi import codebase_checks, codebase_profile
+    from metaphi.steps import Steps
+    if a.build and not a.test:
+        raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
+    if a.deep and a.test:
+        raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
+    say = _progress(a)
+    update.current_for(sys.argv[1:], say)   # a profile is read by the version that made it: the newest, every run
+    stream = sys.stderr if a.json else sys.stdout
+    say = codebase_profile.say = _profile_say(say, stream)
+    commits = a.commits or a.deep   # past commits are opt-in; the default builds and tests the tip once
+    asking = not commits and not a.json and _interactive()
+    if not asking:
+        _profile_key(a, say)
+    say(palette.paint(codebase_profile.LOCAL_NOTICE if asking else codebase_profile.NOTICE, "dim", stream))
+    say("")
     with codebase_profile.profiled(codebase_profile.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
         steps = Steps()
-        body = codebase_profile.packed(doc)
-        with steps.step("send"):
-            answer = codebase_profile.post(body)
-        ref = answer["id"]
-        home = Path.cwd() / PROFILE_HOME / ref
+        home = Path.cwd() / PROFILE_HOME / codebase_profile.run_id(doc)
         home.mkdir(parents=True, exist_ok=True)
         (home / "profile.json").write_text(json.dumps(doc, indent=1))
-        _sent(home, "profile.json.gz", "/codebase-profiles", body, answer, say)
-        say(f"Sent ({ref}); a copy is in {home / 'profile.json'}, every byte sent in {home / 'sent'}")
-        commits = a.commits or a.deep   # past commits are opt-in; the default builds and tests the tip once
+
+        def sent_profile() -> str:
+            """The profile sent once for this run, its reference kept beside it."""
+            try:
+                return (home / "reference").read_text().strip()
+            except OSError:
+                pass
+            body = codebase_profile.packed(doc)
+            with steps.step("send"):
+                answer = codebase_profile.post(body)
+            _sent(home, "profile.json.gz", "/codebase-profiles", body, answer, say)
+            (home / "reference").write_text(answer["id"])
+            for sent in ("checks.sent", "logs.sent"):
+                (home / sent).unlink(missing_ok=True)
+            return answer["id"]
+        ref = sent_profile() if commits else None
         asked = {"test": a.test, "build": a.build, "deep": a.deep, "commits": commits}
         done, report = home / "checks.json", None
         try:
             if json.loads((home / "asked.json").read_text()) == asked and done.is_file():
                 report = json.loads(done.read_text())
-                say(f"Checks already ran with these commands ({done})")
+                say("Using the checks from the last run")
         except (OSError, ValueError):
             pass
         if report is None:
@@ -442,40 +468,47 @@ def cmd_profile_codebase(a: argparse.Namespace) -> None:
             report = codebase_profile.checked(kept, picked or None, plan, say, ref, steps)
             done.write_text(json.dumps(report, indent=1))
             (home / "asked.json").write_text(json.dumps(asked))
+        readiness = codebase_profile.readiness(doc, report)
+        (home / "readiness.json").write_text(json.dumps(readiness, indent=1))
+        missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
+                   for k, r in zip(kept, report["repos"], strict=True)
+                   if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
+        if not a.json:
+            _readiness(readiness)
+        for given, tries in missing:
+            say(_rerun(given, tries))
+        if asking:
+            try:
+                said = input(_send_ask(stream)).strip().lower()
+            except EOFError:
+                said = ""
+            if said not in ("y", "yes"):
+                say("Nothing sent. Results are in " + palette.paint(str(home), "dim", stream))
+                return
+            _profile_key(a, say)
         try:
+            ref = ref or sent_profile()
             if not (home / "checks.sent").is_file():
                 body = codebase_profile.packed(report)
                 with steps.step("post_checks"):
                     answered = codebase_profile.post_checks(ref, body)
                 _sent(home, "checks.json.gz", f"/codebase-profiles/{ref}/checks", body, answered, say)
-                (home / "readiness.json").write_text(json.dumps(answered.get("readiness") or {}, indent=1))
                 (home / "checks.sent").touch()
             if not (home / "logs.sent").is_file():
                 logs = codebase_profile.logs_packed(home / "logs", ref, [k["name"] for k in kept])
-                say(f"Sending logs ({len(logs) >> 10} KiB, {home / 'logs'})")
                 _sent(home, "logs.tar.gz", f"/codebase-profiles/{ref}/logs", logs,
                       codebase_profile.post_logs(ref, logs), say)
                 (home / "logs.sent").touch()
         except errors.MetaphiError as e:
             e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"
             raise
-    missing = [(k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
-               for k, r in zip(kept, report["repos"], strict=True)
-               if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])]
-    try:
-        readiness = json.loads((home / "readiness.json").read_text())
-    except (OSError, ValueError):
-        readiness = {}
-    if not a.json:
-        _readiness(readiness)
-    for given, tries in missing:
-        say(_rerun(given, tries))
-    n, gone = len(doc["repos"]), doc["skipped"]
     if a.json:
         print(json.dumps({"reference": ref, "readiness": readiness or None}, indent=2))
         return
-    _said_sent(a, ref, f"{n} {'repository' if n == 1 else 'repositories'} shared"
-               + (f", {len(gone)} skipped (above)" if gone else ""))
+    if asking:
+        say("")
+    say(palette.paint("\u2713", "ok", stream) + " Sent " + palette.paint(ref, "accent", stream, bold=True)
+        + ". We'll email you if it's accepted.")
 
 
 READY_CELL = {"yes": ("32", "\u2713 yes"), "no": ("31", "\u2717 no"), "not_collected": ("2", "\u00b7 not collected"),
@@ -490,13 +523,15 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
     repos = [r for r in got.get("repos") or [] if isinstance(r, dict) and r.get("checks")]
     if not repos:
         return
-    colour = out.isatty() and not os.environ.get("NO_COLOR")
+    tones = {"2": ("dim", False), "1": (None, True), "32": ("ok", False), "31": ("no", False),
+             "1;32": ("ok", True), "head": ("accent", True)}
 
     def paint(code: str, text: str) -> str:
-        return f"\x1b[{code}m{text}\x1b[0m" if colour and code else text
+        tone, bold = tones.get(code, (None, False))
+        return palette.paint(text, tone, out, bold)
     labels = list(dict.fromkeys(c.get("label", "") for r in repos for c in r["checks"]))
     state = {(r.get("name", ""), c.get("label", "")): c.get("state", "not_collected") for r in repos for c in r["checks"]}
-    first = max(len(x) for x in labels + ["Yes"])
+    first = max(len(x) for x in labels + ["Passing"])
     cell = max(len(t) for _c, t in READY_CELL.values())
     cols = max(1, (shutil.get_terminal_size((100, 24)).columns - first - 4) // (cell + 3))
     for at in range(0, len(repos), cols):
@@ -508,7 +543,7 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
             paint("2", "\u2502") + f" {c} " for c in cells) + paint("2", "\u2502"))
         print(file=out)
         print(rule("\u256d", "\u252c", "\u256e"), file=out)
-        print(line(" " * first, [paint("1", r.get("name", "").ljust(w)) for r, w in zip(part, widths)]), file=out)
+        print(line(" " * first, [paint("head", r.get("name", "").ljust(w)) for r, w in zip(part, widths)]), file=out)
         print(rule("\u251c", "\u253c", "\u2524"), file=out)
         for label in labels:
             cells = []
@@ -522,21 +557,19 @@ def _readiness(got: dict, out: IO[str] | None = None) -> None:
             asked = [c for c in r["checks"] if c.get("state") != "not_needed"]   # not collected counts as not yes
             yes = sum(c.get("state") == "yes" for c in asked)
             text = f"{yes} of {len(asked)}".ljust(w)
-            tallies.append(paint("1;32" if asked and yes == len(asked) else "1;31" if asked else "2", text))
-        print(line(paint("1", "Yes".ljust(first)), tallies), file=out)
+            tallies.append(paint("1;32" if asked and yes == len(asked) else "1" if asked else "2", text))
+        print(line(paint("1", "Passing".ljust(first)), tallies), file=out)
         print(rule("\u2570", "\u2534", "\u256f"), file=out)
     fixes = [(r.get("name", ""), c) for r in repos for c in r["checks"] if c.get("state") == "no" and c.get("fix")]
     if fixes:
         print(file=out)
-        print(paint("1", "To turn a no to yes"), file=out)
+        print(paint("1", "To fix"), file=out)
         for name, c in fixes:
-            print(f"  {paint('1', name)} \u00b7 {c.get('label', '')}", file=out)
-            print(paint("2", f"    {c['fix']}"), file=out)
+            print(f"  {paint('head', name)}  {c['fix']}", file=out)
+        if got.get("note"):
+            print(paint("2", f"  {got['note']}"), file=out)
     if any(c.get("state") == "not_collected" for r in repos for c in r["checks"]):
-        print(paint("2", "\n  not collected: the CLI that ran predates this check; run the latest version "
-                         "(kennet update) to collect it."), file=out)
-    if got.get("note"):
-        print(f"\n{got['note']}", file=out)
+        print(paint("2", "\nNot collected: run `kennet update` for the latest checks."), file=out)
     print(file=out)
 
 
@@ -1474,8 +1507,7 @@ examples:
 from an agent or a script (no terminal): add --json; stdout is then the result or the error object alone.
   kennet agents install             teach every coding agent here this CLI, and connect Kennet's MCP server
   kennet skill show                 the guide an agent follows, for this version
-  kennet login --json               prints the page and the code, and returns; never opens a browser
-  kennet login --complete           waits for the approval, saves the keys
+  kennet login --json               opens the browser, waits up to a minute for the approval; again to go on
   METAPHI_API_KEY=mai_sk_... kennet twin trace.json --json    no sign-in: a key from the console
 
 exit status: 0 done, 1 failed, 2 usage, 3 sign-in or key needed, 4 try the same call later, 5 upgrade kennet
@@ -1516,16 +1548,6 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--with-api-key", action="store_true",
                    help="save an organization key on this machine instead of signing in; reads it from stdin")
     s.add_argument("--api-key", action=_OnArgv, help=argparse.SUPPRESS)
-    s.add_argument("--no-browser", action="store_true", help="print the link instead of opening it")
-    how = s.add_mutually_exclusive_group()
-    how.add_argument("--no-wait", action="store_true", help="print the page and the code and return; "
-                     "`kennet login --complete` finishes it. The default away from a terminal")
-    how.add_argument("--complete", action="store_true", help="wait for the approval of the sign-in under way and "
-                     "save the keys")
-    how.add_argument("--wait", action="store_true", help="wait for the approval in this call, even away from a "
-                     "terminal")
-    s.add_argument("--timeout", type=_seconds, help="with --complete: seconds to wait for the approval (default: "
-                   "until the code expires at a terminal, 60 away from one); past it, run --complete again")
     _json_flag(s)
     s.set_defaults(fn=cmd_login)
     sub.add_parser("logout", help="sign out everywhere this sign-in is used, and revoke its keys").set_defaults(
