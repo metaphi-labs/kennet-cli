@@ -1,0 +1,61 @@
+[project]
+name = "kennet"
+version = "0.1.55"
+description = "The Kennet command line for Metaphi AI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"]
+authors = [{ name = "Metaphi AI" }]
+keywords = ["kennet", "metaphi", "cli", "reinforcement-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = ["httpx>=0.28", "pyyaml>=6.0.3", "tiktoken>=0.14"]
+
+[project.scripts]
+kennet = "metaphi.cli:main"
+
+[project.urls]
+Homepage = "https://metaphi.ai"
+Source = "https://github.com/metaphi-labs/kennet-cli"
+Issues = "https://github.com/metaphi-labs/kennet-cli/issues"
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Markdown documents held as strings: their tables cannot wrap.
+"src/metaphi/skill.py" = ["E501"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/metaphi"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "README.md", "pyproject.toml", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "SECURITY.md",
+                "TRADEMARKS.md"]
+
+[dependency-groups]
+dev = ["pytest>=8", "respx>=0.22"]
+release = ["pyinstaller==6.22.3"]
+
+[tool.uv.dependency-groups]
+release = {requires-python = ">=3.10,<3.16"}

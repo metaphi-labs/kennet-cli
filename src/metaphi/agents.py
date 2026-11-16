@@ -1,0 +1,645 @@
+from __future__ import annotations
+
+import copy
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from metaphi import config, errors, skill
+
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+SERVER = "kennet"
+MCP_URL = "https://kennet.metaphi.ai/mcp/"
+URL = "{url}"
+
+
+def _dir(var: str, default: Path) -> Path:
+    return Path(os.environ.get(var) or default)
+
+
+def _claude() -> Path:
+    return _dir("CLAUDE_CONFIG_DIR", Path.home() / ".claude")
+
+
+def _claude_json() -> Path:
+    d = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(d) / ".claude.json" if d else Path.home() / ".claude.json"
+
+
+def _gemini() -> Path:
+    return _dir("GEMINI_CLI_HOME", Path.home()) / ".gemini"
+
+
+def _opencode() -> Path:
+    return _dir("XDG_CONFIG_HOME", Path.home() / ".config") / "opencode"
+
+
+def _jsonc_or_json(d: Path, stem: str) -> Path:
+    return d / f"{stem}.jsonc" if (d / f"{stem}.jsonc").exists() else d / f"{stem}.json"
+
+
+@dataclass(frozen=True)
+class Harness:
+    name: str
+    title: str
+    commands: tuple[str, ...]
+    home: Callable[[], Path]
+    skills: Callable[[], Path]
+    project_skills: str
+    user_config: Callable[[], Path]
+    user_layout: str
+    project_config: Callable[[Path], Path]
+    project_layout: str
+    entry: dict[str, Any] = field(default_factory=dict)
+    add: tuple[str, ...] = ()
+    remove: tuple[str, ...] = ()
+    overwrites: bool = False
+    sign_in: str | None = None
+    sign_in_here: str = ""
+
+    def present(self) -> bool:
+        return any(shutil.which(c) for c in self.commands) or self.home().is_dir()
+
+    def command(self) -> str | None:
+        return next((found for c in self.commands if (found := shutil.which(c))), None)
+
+
+def _agents() -> Path:
+    return Path.home() / ".agents" / "skills"
+
+
+_HTTP = {"type": "http", "url": URL}
+
+HARNESSES = (
+    Harness(
+        "claude",
+        "Claude Code",
+        ("claude",),
+        _claude,
+        lambda: _claude() / "skills",
+        ".claude/skills",
+        _claude_json,
+        "json:mcpServers",
+        lambda r: r / ".mcp.json",
+        "json:mcpServers",
+        _HTTP,
+        add=("mcp", "add", "--transport", "http", "--scope", "user", SERVER, URL),
+        remove=("mcp", "remove", "--scope", "user", SERVER),
+        sign_in=f"claude mcp login {SERVER}",
+    ),
+    Harness(
+        "codex",
+        "Codex",
+        ("codex",),
+        lambda: _dir("CODEX_HOME", Path.home() / ".codex"),
+        _agents,
+        ".agents/skills",
+        lambda: _dir("CODEX_HOME", Path.home() / ".codex") / "config.toml",
+        "toml:codex",
+        lambda r: r / ".codex" / "config.toml",
+        "toml:codex",
+        sign_in=f"codex mcp login {SERVER}",
+    ),
+    Harness(
+        "gemini",
+        "Gemini CLI",
+        ("gemini",),
+        _gemini,
+        _agents,
+        ".agents/skills",
+        lambda: _gemini() / "settings.json",
+        "json:mcpServers",
+        lambda r: r / ".gemini" / "settings.json",
+        "json:mcpServers",
+        {"httpUrl": URL},
+        add=("mcp", "add", "--scope", "user", "--transport", "http", SERVER, URL),
+        remove=("mcp", "remove", "--scope", "user", SERVER),
+        overwrites=True,
+        sign_in_here=f"/mcp auth {SERVER} in Gemini CLI",
+    ),
+    Harness(
+        "copilot",
+        "GitHub Copilot CLI",
+        ("copilot",),
+        lambda: _dir("COPILOT_HOME", Path.home() / ".copilot"),
+        _agents,
+        ".agents/skills",
+        lambda: _dir("COPILOT_HOME", Path.home() / ".copilot") / "mcp-config.json",
+        "json:mcpServers",
+        lambda r: r / ".mcp.json",
+        "json:mcpServers",
+        _HTTP,
+        add=("mcp", "add", "--transport", "http", SERVER, URL),
+        remove=("mcp", "remove", SERVER),
+        overwrites=True,
+        sign_in_here=f"/mcp auth {SERVER} in Copilot CLI",
+    ),
+    Harness(
+        "cursor",
+        "Cursor",
+        ("cursor-agent", "cursor"),
+        lambda: Path.home() / ".cursor",
+        _agents,
+        ".agents/skills",
+        lambda: Path.home() / ".cursor" / "mcp.json",
+        "json:mcpServers",
+        lambda r: r / ".cursor" / "mcp.json",
+        "json:mcpServers",
+        {"url": URL},
+        sign_in_here=f"Cursor's MCP settings (or `cursor-agent mcp login {SERVER}`)",
+    ),
+    Harness(
+        "opencode",
+        "opencode",
+        ("opencode",),
+        _opencode,
+        _agents,
+        ".agents/skills",
+        lambda: _dir("OPENCODE_CONFIG", _jsonc_or_json(_opencode(), "opencode")),
+        "json:mcp",
+        lambda r: _jsonc_or_json(r, "opencode"),
+        "json:mcp",
+        {"type": "remote", "url": URL},
+        sign_in=f"opencode mcp auth {SERVER}",
+    ),
+)
+NAMES = tuple(h.name for h in HARNESSES)
+BY_NAME = {h.name: h for h in HARNESSES}
+
+_TOML = {"codex": f'[mcp_servers.{SERVER}]\nurl = "{URL}"\n'}
+
+
+def chosen(names: list[str] | None) -> list[Harness]:
+    if names:
+        return [BY_NAME[n] for n in dict.fromkeys(names)]
+    return [h for h in HARNESSES if h.present()]
+
+
+def project_root() -> Path:
+    here = Path.cwd().resolve()
+    home = Path.home().resolve()
+    for d in (here, *here.parents):
+        if d == home:
+            break
+        if (d / ".git").exists():
+            return d
+    raise errors.MetaphiError(
+        "--project writes a repository's files: run it inside a repository (not your home directory)",
+        code="not_a_repository",
+    )
+
+
+class _Unreadable(Exception):
+    pass
+
+
+def _read(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError:
+        raise _Unreadable(f"{path} is not UTF-8 text") from None
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else None
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _indent(text: str) -> str | int:
+    m = re.search(r"^([ \t]+)\S", text, re.MULTILINE)
+    return m.group(1) if m else 2
+
+
+def _json(text: str | None, path: Path) -> dict[str, Any]:
+    if text is None or not text.strip():
+        return {}
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        raise _Unreadable(f"{path} is not plain JSON (comments?)") from None
+    if not isinstance(doc, dict):
+        raise _Unreadable(f"{path} does not hold a JSON object")
+    return doc
+
+
+def _toml(text: str | None, path: Path) -> dict[str, Any]:
+    if tomllib is None:
+        raise _Unreadable(f"Python 3.10 cannot read TOML, so {path} is not changed")
+    try:
+        return tomllib.loads(text or "")
+    except ValueError:
+        raise _Unreadable(f"{path} is not valid TOML") from None
+
+
+def _container(layout: str) -> str:
+    return "mcp_servers" if layout == "toml:codex" else layout.split(":")[1]
+
+
+def _servers(doc: dict[str, Any], layout: str) -> dict[str, Any]:
+    got = doc.get(_container(layout))
+    return got if isinstance(got, dict) else {}
+
+
+def _without(doc: dict[str, Any], layout: str) -> dict[str, Any]:
+    doc = copy.deepcopy(doc)
+    name = _container(layout)
+    if isinstance(doc.get(name), dict):
+        doc[name].pop(SERVER, None)
+    if name in doc and not doc[name]:
+        del doc[name]
+    return doc
+
+
+def _entry(h: Harness, layout: str, u: str) -> dict[str, Any]:
+    if layout == "toml:codex":
+        return {"url": u}
+    return {k: (u if v == URL else v) for k, v in h.entry.items()}
+
+
+def declared(path: Path, layout: str) -> dict[str, Any] | None:
+    text = _read(path)
+    doc = _toml(text, path) if layout.startswith("toml") else _json(text, path)
+    got = _servers(doc, layout).get(SERVER)
+    return None if got is None else got if isinstance(got, dict) else {}
+
+
+def _file_add(path: Path, layout: str, entry: dict[str, Any]) -> tuple[str, bool]:
+    text = _read(path)
+    made = text is None
+    if layout.startswith("toml"):
+        doc = _toml(text, path)
+        if SERVER in _servers(doc, layout):
+            return "present", False
+        old = text or ""
+        pad = "" if not old or old.endswith("\n\n") else ("\n" if old.endswith("\n") else "\n\n")
+        new = old + pad + _TOML[layout.split(":")[1]].replace(URL, entry["url"])
+        after = _toml(new, path)
+        if _servers(after, layout).get(SERVER) != entry or _without(after, layout) != _without(doc, layout):
+            raise _Unreadable(f"{path} declares its servers in a shape kennet does not add to")
+        _write(path, new)
+        return "added", made
+    doc = _json(text, path)
+    key = _container(layout)
+    servers = doc.setdefault(key, {})
+    if not isinstance(servers, dict):
+        raise _Unreadable(f"{path} does not hold a JSON object under {key!r}")
+    if SERVER in servers:
+        return "present", False
+    servers[SERVER] = entry
+    _write(path, json.dumps(doc, indent=_indent(text or ""), ensure_ascii=False) + "\n")
+    return "added", made
+
+
+def _file_remove(path: Path, layout: str, entry: dict[str, Any], made: bool) -> str:
+    text = _read(path)
+    if text is None:
+        return ""
+    if layout.startswith("toml"):
+        doc = _toml(text, path)
+        if _servers(doc, layout).get(SERVER) != entry:
+            return f"{path} declares {SERVER} differently from what kennet wrote; left as it is"
+        block = _TOML[layout.split(":")[1]].replace(URL, entry["url"])
+        if block not in text:
+            return f"{path} declares {SERVER} in other words than kennet's; left as it is"
+        i = text.index(block)
+        before, after = text[:i], text[i + len(block) :]
+        if before.endswith("\n\n") and (not after or after.startswith("\n")):
+            before = before[:-1]
+        new = before + after
+        new = new.rstrip("\n") + "\n" if new.strip() else ""
+        if _toml(new, path) != _without(doc, layout):
+            return f"{path} holds more under {SERVER}'s table than kennet wrote; left as it is"
+    else:
+        doc = _json(text, path)
+        key = _container(layout)
+        if not isinstance(doc.get(key), dict) or doc[key].get(SERVER) != entry:
+            return f"{path} declares {SERVER} differently from what kennet wrote; left as it is"
+        left = _without(doc, layout)
+        new = json.dumps(left, indent=_indent(text), ensure_ascii=False) + "\n" if left or not made else ""
+    if not new and made:
+        path.unlink()
+    else:
+        _write(path, new)
+    return ""
+
+
+def _ledger() -> list[dict[str, Any]]:
+    got = config.load().get("agents")
+    return [x for x in got if isinstance(x, dict) and x.get("harness") in BY_NAME] if isinstance(got, list) else []
+
+
+def _save(rows: list[dict[str, Any]]) -> None:
+    cfg = config.load()
+    if rows:
+        cfg["agents"] = rows
+    else:
+        cfg.pop("agents", None)
+    config.save(cfg)
+
+
+def _note(rows: list[dict[str, Any]], row: dict[str, Any]) -> None:
+    if not any(
+        x["harness"] == row["harness"] and x["kind"] == row["kind"] and x["target"] == row["target"] for x in rows
+    ):
+        rows.append(row)
+
+
+def skill_path(h: Harness, root: Path | None, name: str = skill.NAME) -> Path:
+    return (root / h.project_skills if root else h.skills()) / name / "SKILL.md"
+
+
+def skill_paths(h: Harness, root: Path | None) -> list[str]:
+    return [str(skill_path(h, root, name)) for name in skill.SKILLS]
+
+
+def _write_skill(path: Path, force: bool, stub: str = skill.STUB) -> str:
+    text = _read(path) if path.exists() else None
+    if text is not None and skill.MARK not in text and not force:
+        return "kept"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(stub, encoding="utf-8")
+    return "written"
+
+
+def _remove_skill(path: Path) -> bool:
+    try:
+        text = _read(path)
+    except _Unreadable:
+        return False
+    if text is None or skill.MARK not in text:
+        return False
+    path.unlink()
+    if not any(path.parent.iterdir()):
+        path.parent.rmdir()
+    return True
+
+
+def skill_installed() -> bool:
+    return any(skill_path(h, None).exists() for h in HARNESSES)
+
+
+def _mcp_target(h: Harness, root: Path | None) -> tuple[str, str]:
+    if root:
+        return str(h.project_config(root)), h.project_layout
+    if not h.add:
+        return str(h.user_config()), h.user_layout
+    return f"{h.name}:{h.user_config()}", "cli"
+
+
+def _run(cmd: str, args: tuple[str, ...], u: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [cmd, *(u if a == URL else a for a in args)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def _said(ran: subprocess.CompletedProcess[str]) -> str:
+    lines = (ran.stderr.strip() or ran.stdout.strip()).splitlines()
+    return lines[-1].strip() if lines else f"exit {ran.returncode}"
+
+
+def _by_hand(h: Harness, layout: str, u: str) -> str:
+    if layout.startswith("toml"):
+        return _TOML[layout.split(":")[1]].replace(URL, u).strip().replace("\n", " ")
+    return json.dumps({_container(layout): {SERVER: _entry(h, layout, u)}})
+
+
+def _add_mcp(h: Harness, root: Path | None, u: str) -> tuple[str, str, bool]:
+    target, via = _mcp_target(h, root)
+    if via != "cli":
+        path = Path(target)
+        try:
+            state, made = _file_add(path, via, _entry(h, via, u))
+        except _Unreadable as e:
+            return "skipped", f"{e}; add {_by_hand(h, via, u)} to it by hand", False
+        except OSError as e:
+            return "skipped", f"cannot write {path}: {e.strerror or e}", False
+        return state, target, made
+    cmd = h.command()
+    if cmd is None:
+        return "skipped", f"`{h.commands[0]}` is not on the PATH; run `kennet agents install` again where it is", False
+    if h.overwrites:
+        try:
+            if declared(h.user_config(), h.user_layout) is not None:
+                return "present", f"{h.user_config()} declares {SERVER} already", False
+        except _Unreadable as e:
+            return (
+                "skipped",
+                (
+                    f"{e}, so whether it declares {SERVER} cannot be told; add "
+                    f"{_by_hand(h, h.user_layout, u)} to it by hand"
+                ),
+                False,
+            )
+        except OSError as e:
+            return "skipped", f"cannot read {h.user_config()}: {e.strerror or e}", False
+    try:
+        ran = _run(cmd, h.add, u)
+    except (OSError, subprocess.SubprocessError) as e:
+        return "skipped", f"`{h.commands[0]} mcp add` did not run: {e}", False
+    if ran.returncode == 0:
+        return "added", f"`{h.commands[0]} mcp add`", False
+    said = _said(ran)
+    if re.search(r"already (exists|names|configured)", said):
+        return "present", said, False
+    return "skipped", f"`{h.commands[0]} mcp add` refused: {said}", False
+
+
+def _remove_mcp(h: Harness, row: dict[str, Any]) -> tuple[str, bool]:
+    target, via, u = str(row["target"]), str(row.get("via") or "cli"), str(row.get("url") or MCP_URL)
+    if via != "cli":
+        try:
+            return _file_remove(Path(target), via, _entry(h, via, u), bool(row.get("made"))), False
+        except _Unreadable as e:
+            return f"{e}; left as it is", False
+        except OSError as e:
+            return f"cannot write {target}: {e.strerror or e}", True
+    cmd = h.command()
+    if cmd is None:
+        return f"`{h.commands[0]}` is not on the PATH", True
+    try:
+        got = declared(h.user_config(), h.user_layout)
+    except _Unreadable as e:
+        return f"{e}; left as it is", False
+    except OSError as e:
+        return f"cannot read {h.user_config()}: {e.strerror or e}", True
+    if got is None:
+        return "", False
+    if u not in (got.get("url"), got.get("httpUrl")):
+        return f"{h.title}'s {SERVER} is no longer at {u}; left as it is", False
+    try:
+        ran = _run(cmd, h.remove, u)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"`{h.commands[0]} mcp remove` did not run: {e}", True
+    return ("", False) if ran.returncode == 0 else (_said(ran), False)
+
+
+def install(names: list[str] | None = None, project: bool = False, force: bool = False) -> list[dict[str, Any]]:
+    root = project_root() if project else None
+    harnesses = chosen(names)
+    if not harnesses:
+        raise errors.MetaphiError(
+            "no coding agent found on this machine (looked for " + ", ".join(NAMES) + ")",
+            code="no_agent_found",
+            next_step="kennet agents install --harness claude",
+        )
+    u = MCP_URL
+    ledger = _ledger()
+    skills: dict[str, str] = {}
+    targets: dict[str, tuple[str, str, bool]] = {}
+    rows = []
+    for h in harnesses:
+        written: dict[str, str] = {}
+        for name, stub in skill.SKILLS.items():
+            path = skill_path(h, root, name)
+            if str(path) not in skills:
+                try:
+                    skills[str(path)] = _write_skill(path, force, stub)
+                except _Unreadable:
+                    skills[str(path)] = "kept"
+                except OSError as e:
+                    skills[str(path)] = f"skipped: cannot write {path}: {e.strerror or e}"
+            written[name] = skills[str(path)]
+            if written[name] == "written":
+                _note(ledger, {"harness": h.name, "kind": "skill", "target": str(path)})
+        path = skill_path(h, root)
+        state = written[skill.NAME]
+        row: dict[str, Any] = {
+            "harness": h.name,
+            "skill": str(path),
+            "skill_state": state.split(":")[0],
+            "skills": {name: x.split(":")[0] for name, x in written.items()},
+        }
+        if state.startswith("skipped"):
+            row["skill_detail"] = state.split(": ", 1)[1]
+        target, via = _mcp_target(h, root)
+        if target not in targets:
+            state, detail, made = _add_mcp(h, root, u)
+            if state == "present" and any(x["kind"] == "mcp" and x["target"] == target for x in ledger):
+                state = "installed"
+            targets[target] = (state, detail, made)
+        state, detail, made = targets[target]
+        row["mcp"], row["mcp_detail"] = state, detail
+        if state in ("added", "installed"):
+            first = next((x for x in ledger if x["kind"] == "mcp" and x["target"] == target), None)
+            _note(
+                ledger,
+                {
+                    "harness": h.name,
+                    "kind": "mcp",
+                    "target": target,
+                    "via": via,
+                    "url": u,
+                    "made": first.get("made", False) if first else made,
+                },
+            )
+            row["sign_in"] = h.sign_in or h.sign_in_here
+        rows.append(row)
+    _save(ledger)
+    if not any(r["skill_state"] == "written" or r["mcp"] in ("added", "installed") for r in rows):
+        e = errors.MetaphiError(
+            "nothing was installed: "
+            + "; ".join(
+                f"{r['harness']}: skill {r['skill_state']}, server {r['mcp']} ({r['mcp_detail']})" for r in rows
+            ),
+            code="nothing_installed",
+        )
+        e.context = {"harnesses": rows}
+        raise e
+    return rows
+
+
+def _in_scope(row: dict[str, Any], h: Harness, root: Path | None) -> bool:
+    if row["kind"] == "skill":
+        return row["target"] in skill_paths(h, root)
+    return row["target"] == _mcp_target(h, root)[0]
+
+
+def remove(names: list[str] | None = None, project: bool = False) -> dict[str, Any]:
+    root = project_root() if project else None
+    harnesses = [BY_NAME[n] for n in dict.fromkeys(names)] if names else list(HARNESSES)
+    ledger = _ledger()
+    mine = [x for x in ledger if (h := BY_NAME[x["harness"]]) in harnesses and _in_scope(x, h, root)]
+    others = [x for x in ledger if x not in mine]
+    removed: list[str] = []
+    left: list[dict[str, str]] = []
+    keep: list[dict[str, Any]] = []
+    unlisted = [
+        {"harness": h.name, "kind": "skill", "target": target} for h in harnesses for target in skill_paths(h, root)
+    ]
+    done: set[tuple[str, str]] = set()
+    for x in mine + [x for x in unlisted if not any(y["target"] == x["target"] for y in ledger)]:
+        key = (x["kind"], x["target"])
+        if key in done:
+            continue
+        done.add(key)
+        users = sorted({y["harness"] for y in others if (y["kind"], y["target"]) == key})
+        if users:
+            left.append({"harness": x["harness"], "target": x["target"], "why": f"still read by {', '.join(users)}"})
+            continue
+        if x["kind"] == "skill":
+            if _remove_skill(Path(x["target"])):
+                removed.append(x["target"])
+            continue
+        why, again = _remove_mcp(BY_NAME[x["harness"]], x)
+        if not why:
+            removed.append(x["target"] if x.get("via") != "cli" else f"{x['harness']}: mcp server {SERVER}")
+            continue
+        left.append({"harness": x["harness"], "target": x["target"], "why": why})
+        if again:
+            keep += [y for y in mine if (y["kind"], y["target"]) == key]
+    _save(others + keep)
+    return {"removed": removed, "left": left}
+
+
+def status(project: bool = False) -> list[dict[str, Any]]:
+    root = project_root() if project else None
+    ledger = _ledger()
+    rows = []
+    for h in HARNESSES:
+        ours = [x for x in ledger if x["harness"] == h.name and _in_scope(x, h, root)]
+        row: dict[str, Any] = {"harness": h.name, "present": h.present()}
+        if row["present"] or ours:
+            path = skill_path(h, root)
+            try:
+                text = _read(path)
+            except (_Unreadable, OSError):
+                text = ""
+            row["skill"] = str(path)
+            row["skill_state"] = "absent" if text is None else "written" if skill.MARK in text else "kept"
+            row["skills"] = {}
+            for name in skill.SKILLS:
+                try:
+                    each = _read(skill_path(h, root, name))
+                except (_Unreadable, OSError):
+                    each = ""
+                row["skills"][name] = "absent" if each is None else "written" if skill.MARK in each else "kept"
+            row["mcp"] = "installed" if any(x["kind"] == "mcp" for x in ours) else "absent"
+        rows.append(row)
+    return rows
