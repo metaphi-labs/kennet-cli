@@ -1417,7 +1417,6 @@ def test_tags_carry_their_commit_date_and_release_shape_but_not_their_names(repo
     git(repo, "commit", "-qm", "agents")
     doc = _document([str(repo)], say=lambda s: None)
     r = doc["repos"][0]
-    assert r["git"]["tags"] == 2
     assert [(t["commit"], t["annotated"], t["release"]) for t in r["git"]["tag_refs"]] == [
         (2, False, False),
         (3, True, True),

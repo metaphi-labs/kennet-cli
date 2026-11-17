@@ -753,8 +753,7 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
         "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split(),
         "git": {
             "branches": len(_text(repo, "for-each-ref", "--format=x", "refs/heads", "refs/remotes").split()),
-            "tags": len(tags := _tags(repo, order)),
-            "tag_refs": tags,
+            "tag_refs": _tags(repo, order),
             "submodules": sum(m == "160000" for m, _s, _z in tree.values()),
             "lfs": lfs,
             "pack_bytes": int(pack[1]) * 1024 if pack else 0,
