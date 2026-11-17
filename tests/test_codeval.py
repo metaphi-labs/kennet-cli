@@ -1407,3 +1407,21 @@ def test_the_setup_model_address_is_checked(monkeypatch):
     )
     with pytest.raises(config.Error, match="not on metaphi.ai"):
         codeval.setup_reach(ref)
+
+
+def test_tags_carry_their_commit_date_and_release_shape_but_not_their_names(repo):
+    git(repo, "tag", "falcon-launch", "HEAD~1")
+    git(repo, "tag", "-a", "v2.1.0", "-m", "billing", "HEAD", GIT_COMMITTER_DATE="2024-03-01T00:00:00Z")
+    (repo / "AGENTS.md").write_text("x\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "agents")
+    doc = _document([str(repo)], say=lambda s: None)
+    r = doc["repos"][0]
+    assert r["git"]["tags"] == 2
+    assert [(t["commit"], t["annotated"], t["release"]) for t in r["git"]["tag_refs"]] == [
+        (2, False, False),
+        (3, True, True),
+    ]
+    assert r["git"]["tag_refs"][1]["at"] == 1709251200
+    assert "falcon-launch" not in json.dumps(doc) and "v2.1.0" not in json.dumps(doc)
+    assert any(f["known_name"] == "agents.md" for f in r["files"])
