@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -221,6 +222,63 @@ def _copied(src: str, dst: str) -> None:
         pass
 
 
+COVER = "kennet.cover"
+MEASURED_RUNS = ("build", "tests")
+COVER_LINE = re.compile(r"^(.+\.go):(\d+\.\d+,\d+\.\d+) (\d+) (\d+)$")
+
+
+def _installed(src: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(src):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _modules(src: Path) -> list[tuple[str, str]]:
+    out = []
+    for mod in src.rglob("go.mod"):
+        try:
+            text = mod.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        name = re.search(r"^module\s+(\S+)", text, re.MULTILINE)
+        if name:
+            rel = mod.parent.relative_to(src).as_posix()
+            out.append((name.group(1).strip('"'), "" if rel == "." else rel + "/"))
+    return sorted(out, key=lambda m: -len(m[0]))
+
+
+def go_coverage(profile: Path, src: Path, paths: dict[int, str]) -> list[dict[str, Any]] | None:
+    try:
+        lines = profile.read_text("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    ids = {p: i for i, p in paths.items()}
+    modules = _modules(src)
+    blocks: dict[tuple[str, str], tuple[int, int]] = {}
+    for line in lines:
+        m = COVER_LINE.match(line)
+        if not m:
+            continue
+        name, at, n, hits = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+        rel = next((d + name[len(mod) + 1 :] for mod, d in modules if name.startswith(mod + "/")), None)
+        if rel is None:
+            continue
+        seen = blocks.get((rel, at), (n, 0))
+        blocks[rel, at] = (n, max(seen[1], hits))
+    per: dict[int, list[int]] = {}
+    for (rel, _), (n, hits) in blocks.items():
+        if rel in ids:
+            row = per.setdefault(ids[rel], [0, 0])
+            row[0] += n
+            row[1] += n if hits else 0
+    return [{"file": f, "unit": "statement", "total": t, "covered": c} for f, (t, c) in sorted(per.items())]
+
+
 def _tail(path: Path, lines: int = 15) -> list[str]:
     try:
         said = path.read_bytes()[-20000:].decode("utf-8", "replace").splitlines()
@@ -262,6 +320,7 @@ def _side(
     found: tuple[Recipe, str | None] | None = None,
     jobs: int = 1,
     edit: Callable[[Path], None] | None = None,
+    measure: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     _write(repo, tree, into / "src")
     if edit:
@@ -271,7 +330,7 @@ def _side(
     recipe, engine = found or (None, None)
     shell = Shell(engine, recipe.image if recipe else None, into / "src", junit, jobs=jobs, cache=plan.cache)
     try:
-        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe)
+        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe, measure)
     finally:
         shell.close()
 
@@ -285,6 +344,7 @@ def _ran_side(
     label: str,
     say: Callable[[str], None],
     recipe: Recipe | None,
+    measure: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     junit = shell.junit
     build = (
@@ -302,13 +362,14 @@ def _ran_side(
             head = f"    {label} {step}: {'stopped (too long)' if code is None else f'exit {code}'} ({path})"
             say("\n".join([head, *_tail(path)]))
 
+    before = _installed(shell.src) if measure is not None else 0
     if build:
         with logs.open(f"{label}.build.log") as log, plan.steps.step("build", at=label):
             path = Path(log.name)
             code, took = _run(
                 shell.line(build, tests),
                 shell.src,
-                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit)},
+                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
             )
@@ -318,6 +379,13 @@ def _ran_side(
             shell.stop()
         if code != 0:
             return side
+    go = measure is not None and any(shell.src.rglob("go.mod"))
+    if measure is not None:
+        side["installed_bytes"] = max(_installed(shell.src) - before, 0)
+        if go:
+            at = "/kennet/junit" if shell.name else str(junit)
+            given = (("" if shell.name else env.get("GOFLAGS", "")) + f" -coverprofile={at}/{COVER}").strip()
+            shell.extra = {"GOFLAGS": given}
     for n in range(runs):
         shell.empty()
         with logs.open(f"{label}.test-{n + 1}.log") as log, plan.steps.step("test", at=label):
@@ -325,7 +393,7 @@ def _ran_side(
             code, took = _run(
                 shell.line(test, tests),
                 shell.src,
-                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit)},
+                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
             )
@@ -341,9 +409,23 @@ def _ran_side(
             pass
         side["tests"].append(_tested(code, took, _junit(junit), path))
         shown(f"test {n + 1}", code, path)
+        if measure is not None and n == 0:
+            shell.extra = {}
+            if go:
+                side["coverage"] = go_coverage(junit / COVER, shell.src, measure)
         if code is None:
             shell.stop()
             break
+    if measure is not None and side["tests"] and side["tests"][0]["exit"] is not None:
+        if shell.offline():
+            shell.empty()
+            with logs.open(f"{label}.offline.log") as log, plan.steps.step("offline", at=label):
+                path = Path(log.name)
+                code, took = _run(shell.line(test, tests), shell.src, shell.env(tests), seconds, log)
+            side["offline"] = _tested(code, took, _junit(junit), path)
+            if code is None:
+                shell.stop()
+        side["memory_peak_bytes"] = shell.memory_peak()
     return side
 
 
@@ -492,26 +574,25 @@ def run(
         out["edits"] = [{**b, "broke": True} for b in edits or []]
         return out
     try:
-        if tipped:
-            out["tip"] = tipped
-        else:
-            with (
-                tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch,
-                plan.steps.step("tip"),
-            ):
-                out["tip"] = _side(
-                    repo,
-                    _tree(repo, tip),
-                    Path(scratch) / "tip",
-                    plan,
-                    {**os.environ, "KENNET_TESTS": ""},
-                    1,
-                    logs,
-                    "000-tip",
-                    say,
-                    found,
-                    jobs,
-                )
+        with (
+            tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch,
+            plan.steps.step("tip"),
+        ):
+            measured = _side(
+                repo,
+                _tree(repo, tip),
+                Path(scratch) / "tip",
+                plan,
+                {**os.environ, "KENNET_TESTS": ""},
+                1,
+                logs,
+                "000-tip",
+                say,
+                found,
+                jobs,
+                measure=paths or {},
+            )
+        out["tip"] = {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
         said = out["tip"]
         built = "build" not in said or said["build"]["exit"] == 0
         t = said["tests"][0] if said["tests"] else None

@@ -1,5 +1,6 @@
 import gzip
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -993,7 +994,7 @@ def test_blobs_in_the_one_run(tested, capsys, tmp_path):
     got["checks"].mock(return_value=httpx.Response(200, json={"id": ref}))
     assert cli.main(run) in (0, None) and "Using the checks from the last run" in capsys.readouterr().out
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))
-    assert sent["schema"] == "kennet.repo_checks.v2" and sent["repos"][0]["blobs"] == blob
+    assert sent["schema"] == codeval.CHECKS_SCHEMA and sent["repos"][0]["blobs"] == blob
     assert list(blob) == [str(f)] and len(blob[str(f)]) == 40 and got["plan"].call_count == 1
 
 
@@ -1424,3 +1425,52 @@ def test_tags_carry_their_commit_date_and_release_shape_but_not_their_names(repo
     assert r["git"]["tag_refs"][1]["at"] == 1709251200
     assert "falcon-launch" not in json.dumps(doc) and "v2.1.0" not in json.dumps(doc)
     assert any(f["known_name"] == "agents.md" for f in r["files"])
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="needs go")
+def test_the_tip_run_measures_go_line_coverage_by_file_id_and_what_the_build_installed(tmp_path):
+    from metaphi import codebase_checks
+
+    r = tmp_path / "falcon_core"
+    (r / "billing").mkdir(parents=True)
+    git(r, "init", "-q", "-b", "main")
+    (r / "go.mod").write_text("module git.acme.test/falcon_core\n\ngo 1.21\n")
+    (r / "billing/ledger.go").write_text(
+        "package billing\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\n"
+        "func Sub(a, b int) int {\n\treturn a - b\n}\n"
+    )
+    (r / "billing/ledger_test.go").write_text(
+        'package billing\n\nimport "testing"\n\n'
+        'func TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal("hunter2")\n\t}\n}\n'
+    )
+    git(r, "add", "-A")
+    git(r, "commit", "-qm", "ledger")
+    plan = codebase_checks.Plan(test="go test ./...", build="mkdir -p vendor && head -c 4096 /dev/zero > vendor/blob")
+    with codeval.profiled([str(r)], say=lambda s: None) as (_doc, kept):
+        ledger = next(i for i, p in kept[0]["paths"].items() if p == "billing/ledger.go")
+        got = codeval.checked(kept, {"runs": 1, "repos": [[]], "edits": [[]]}, plan, lambda s: None)
+    tip = got["repos"][0]["tip"]
+    assert tip["tests"][0]["exit"] == 0 and tip["installed_bytes"] >= 4096
+    assert tip["coverage"] == [{"file": ledger, "unit": "statement", "total": 2, "covered": 1}]
+    assert "offline" not in tip and tip["memory_peak_bytes"] is None
+    for word in ("ledger", "billing", "falcon_core", "hunter2", "TestAdd"):
+        assert word not in json.dumps(tip), word
+
+
+def test_a_contained_tip_run_is_rerun_with_its_networks_detached_and_reports_peak_memory(tmp_path):
+    from metaphi.codebase_setup import Shell
+
+    calls: list[list[str]] = []
+
+    def fake(args, **_kw):
+        calls.append(args)
+        out = {"inspect": '{"bridge": {}}', "cat": "734003200\n"}.get(args[1] if args[1] != "exec" else args[3], "")
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    shell = Shell(None, None, tmp_path, tmp_path)
+    shell.engine, shell.name = "docker", "box"
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(subprocess, "run", fake)
+        assert shell.offline() and shell.memory_peak() == 734003200
+    assert ["docker", "network", "disconnect", "-f", "bridge", "box"] in calls
+    assert not Shell(None, None, tmp_path, tmp_path).offline()

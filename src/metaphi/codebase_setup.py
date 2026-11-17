@@ -75,6 +75,7 @@ KEPT_ENV = frozenset(
         "GOROOT",
         "GOCACHE",
         "GOMODCACHE",
+        "GOFLAGS",
         "CARGO_HOME",
         "RUSTUP_HOME",
         "PYENV_ROOT",
@@ -179,6 +180,7 @@ class Shell:
         self, engine: str | None, image: str | None, src: Path, junit: Path, jobs: int = 0, cache: Path | None = None
     ):
         self.engine, self.image, self.src, self.junit, self.name = engine, image, src, junit, None
+        self.extra: dict[str, str] = {}
         self.jobs = jobs or os.cpu_count() or 1
         if engine and image:
             name = f"kennet-setup-{uuid.uuid4().hex[:12]}"
@@ -216,7 +218,13 @@ class Shell:
     def line(self, command: str, tests: str) -> str:
         if not self.name:
             return command
-        given = {"KENNET_TESTS": tests, "KENNET_JUNIT": "/kennet/junit", "KENNET_JOBS": str(self.jobs), **CACHES}
+        given = {
+            "KENNET_TESTS": tests,
+            "KENNET_JUNIT": "/kennet/junit",
+            "KENNET_JOBS": str(self.jobs),
+            **CACHES,
+            **self.extra,
+        }
         return shlex.join(
             [
                 self.engine,
@@ -237,7 +245,40 @@ class Shell:
             "KENNET_TESTS": tests,
             "KENNET_JUNIT": str(self.junit),
             "KENNET_JOBS": str(self.jobs),
+            **self.extra,
         }
+
+    def _exec(self, *args: str, timeout: int = 60) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(
+                [str(self.engine), *args], capture_output=True, timeout=timeout, check=False, text=True
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def memory_peak(self) -> int | None:
+        if not self.name:
+            return None
+        got = self._exec("exec", self.name, "cat", "/sys/fs/cgroup/memory.peak")
+        return int(got.stdout) if got and got.returncode == 0 and got.stdout.strip().isdigit() else None
+
+    def offline(self) -> bool:
+        if not self.name:
+            return False
+        got = self._exec("inspect", "-f", "{{json .NetworkSettings.Networks}}", self.name)
+        if not got or got.returncode != 0:
+            return False
+        try:
+            networks = list(json.loads(got.stdout) or {})
+        except ValueError:
+            return False
+        for net in networks:
+            if net == "none":
+                continue
+            out = self._exec("network", "disconnect", "-f", net, self.name)
+            if not out or out.returncode != 0:
+                return False
+        return bool(networks)
 
     def stop(self) -> None:
         if self.name:

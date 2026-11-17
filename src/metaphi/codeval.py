@@ -25,7 +25,7 @@ from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 
 SCHEMA = "kennet.repo_metadata.v15"
-CHECKS_SCHEMA = "kennet.repo_checks.v2"
+CHECKS_SCHEMA = "kennet.repo_checks.v3"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
 NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
