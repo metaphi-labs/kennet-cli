@@ -16,7 +16,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import httpx
 
@@ -1048,6 +1048,7 @@ def checked(
                     (planned.get("edits") or [[]] * len(kept))[n],
                     local.get("paths"),
                     tip or None,
+                    stream,
                 )
             except Exception as e:  # noqa: BLE001
                 say(f"\u2717 {local['name']}: tests stopped ({type(e).__name__}: {e})")
@@ -1146,6 +1147,7 @@ def _named(e: errors.MetaphiError) -> errors.MetaphiError:
 
 
 say: Callable[[str], None] | None = None
+stream: IO[str] | None = None
 
 
 def _call(method: str, path: str, sleep: Callable[[float], None], answered: bool = True, **kw: Any) -> dict[str, Any]:

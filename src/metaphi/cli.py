@@ -501,6 +501,7 @@ def cmd_codeval(a: argparse.Namespace) -> None:
     update.current_for(sys.argv[1:], say)
     stream = sys.stderr if a.json else sys.stdout
     say = codeval.say = _codeval_say(say, stream)
+    codeval.stream = stream
     agreed = a.yes
     if agreed:
         _codeval_key(a, say)
