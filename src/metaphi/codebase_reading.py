@@ -97,6 +97,14 @@ def _jest(t: str) -> tuple[int, int] | None:
     return (_n(m[-1], "p") + _n(m[-1], "f"), _n(m[-1], "p")) if m else None
 
 
+def _vitest(t: str) -> tuple[int, int] | None:
+    m = re.findall(r"^\s*Tests\s+((?:\d+ (?:passed|failed|skipped|todo)(?: \| )?)+)\s*\(\d+\)\s*$", t, re.MULTILINE)
+    if not m:
+        return None
+    said = {k: int(n) for n, k in re.findall(r"(\d+) (passed|failed|skipped|todo)", m[-1])}
+    return said.get("passed", 0) + said.get("failed", 0), said.get("passed", 0)
+
+
 def _maven(t: str) -> tuple[int, int] | None:
     found = re.findall(
         r"Results:\s*\n(?:.*\n){0,40}?.*Tests run: (\d+), Failures: (\d+), Errors: (\d+), "
@@ -233,6 +241,7 @@ READERS = (
     _go,
     _maven,
     _jest,
+    _vitest,
     _tap,
     _lein,
     _julia,

@@ -1253,6 +1253,9 @@ def test_the_closing_line_says_the_build_ran_when_only_the_tests_failed():
     said = cli._rerun("./core", tries)
     assert "In ./core, 0 of 10 tests passed" in said and "No build or test found" not in said
     assert "No build or test found in ./core" in cli._rerun("./core", [])
+    unread = [{"build": {"exit": 0, "seconds": 5}, "test": {"exit": 0, "seconds": 6, "report": None, "reported": None}}]
+    said = cli._rerun("./core", unread)
+    assert "the tests passed but how many ran could not be read" in said and "database" not in said
 
 
 @respx.mock
