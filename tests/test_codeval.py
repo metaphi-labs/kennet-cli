@@ -1533,3 +1533,14 @@ def test_the_board_redraws_on_a_terminal_and_prints_lines_elsewhere():
     board.end("001-aaaa", False, "calc: 001-aaaa build failed (1/2)", "about 1 min left")
     board.close()
     assert plain == ["calc: 001-aaaa build failed (1/2) · about 1 min left"]
+
+
+def test_a_trailer_value_with_carriage_returns_is_one_trailer():
+    block = (
+        "Stacktrace: at A.B(String s) in c:\\Projects\\a.cs:line 1\r at C.D() in c:\\Projects\\b.cs\n"
+        "Signed-off-by: A <a@x.org>"
+    )
+    assert codeval._trailers(block) == [
+        {"key": "stacktrace", "domain": ""},
+        {"key": "signed-off-by", "domain": "x.org"},
+    ]

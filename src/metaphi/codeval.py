@@ -419,13 +419,17 @@ def _commits(
     return commits
 
 
+TRAILER_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+
+
 def _trailers(block: str) -> list[dict[str, str]]:
     out = []
-    for line in block.splitlines():
+    for line in block.split("\n"):
         key, sep, value = line.partition(":")
-        if sep and key.strip():
+        key = key.strip().lower()
+        if sep and TRAILER_KEY.fullmatch(key):
             m = EMAIL_DOMAIN.search(value)
-            out.append({"key": key.strip().lower(), "domain": m[1].lower().rstrip(".") if m else ""})
+            out.append({"key": key, "domain": m[1].lower().rstrip(".") if m else ""})
     return out
 
 
