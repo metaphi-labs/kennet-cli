@@ -364,19 +364,21 @@ kennet codeval ./core --dry-run
 ```
 
 `kennet codeval` profiles a git repository's history and tests: it reads the history, then builds and tests the
-latest commit once, in a temporary copy on this machine, in Docker or Podman when one is running. It may also run
-your tests on small single-line edits Metaphi AI names; only results leave the machine. Your source code stays
-here. What is sent to Metaphi AI:
+latest commit and a few past commits Metaphi AI names, in temporary copies on this machine, in Docker or Podman when
+one is running. It also runs your tests on small single-line edits Metaphi AI names; only results leave the machine.
+Your source code stays here. On a large repository this takes hours; each progress line says about how long is left,
+and a repository stops after the hours Metaphi AI sets for it. What is sent to Metaphi AI:
 
 - counts and ids for files, folders, commits and authors;
 - the shape of commit messages, never their text;
 - build and test output and logs, with common secret and token patterns replaced;
 - the git ids of files Metaphi AI names.
 
-It lists this before sending anything. At a terminal it then asks `Send to Metaphi AI? [y/N]`; yes signs you in if
-needed and sends, no sends nothing. Away from a terminal, or under `--json`, it sends only with `--yes`; without it,
-it fails with `confirmation_required` and `next_step` is the same command with `--yes`. `--dry-run` runs everything
-and writes what would be sent, and sends nothing.
+It lists this once it has read the history, before anything is built or sent. At a terminal it then asks
+`Send to Metaphi AI? [y/N]`; yes signs you in if needed, sends the history profile, which names the past commits, and
+sends the build and test results when they finish; no sends nothing. Away from a terminal, or under `--json`, it
+runs only with `--yes`; without it, it fails with `confirmation_required` and `next_step` is the same command with
+`--yes`. `--dry-run` builds and tests the latest commit only, writes what would be sent, and sends nothing.
 
 Everything is kept in `./kennet-codeval/<run>/`. What was sent, byte for byte, is in `sent/`; `sent.json` lists each
 file with its sha256, the sha256 Metaphi AI received, and how many secrets of each kind were replaced in the logs.
@@ -387,17 +389,15 @@ When it cannot find how a repository builds and tests, it says so. Run it again 
 
 ```sh
 kennet codeval ./core --build 'make' --test 'make test'
-kennet codeval ./core --commits
 kennet codeval ./core --deep
 ```
 
 | Flag | What it does |
 | --- | --- |
 | `--test`, `--build` | The commands to test, and to build when that is separate. |
-| `--commits` | Also runs the tests at a few past commits. The profile is sent first, so it asks first; what runs is in `plan.json`. |
-| `--deep` | Lets a model set up the build when no recipe fits, inside containers; needs Docker or Podman (`container_required` otherwise). Sends the contents of the files it reads. Implies `--commits`. |
+| `--deep` | Lets a model set up the build when no recipe fits, inside containers; needs Docker or Podman (`container_required` otherwise). Sends the contents of the files it reads. |
 | `--yes` | Send without asking. |
-| `--dry-run` | Send nothing; write what would be sent to `sent/`. Not with `--commits`, `--deep` or `--yes`. |
+| `--dry-run` | Send nothing; write what would be sent to `sent/`. Not with `--deep` or `--yes`. |
 
 Builds and tests run with a fixed set of environment variables (`PATH`, `HOME`, locale and the like), never your
 keys or cloud credentials. Containers run with all but a few file-ownership capabilities dropped, no new privileges,

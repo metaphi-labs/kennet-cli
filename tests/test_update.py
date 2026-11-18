@@ -385,9 +385,9 @@ def _before_run(monkeypatch, method, latest="9.9.9", link=True):
 
 def test_a_binary_install_updates_before_a_profile_and_runs_the_same_command_again(monkeypatch):
     u, calls, said = _before_run(monkeypatch, "binary")
-    u.current_for(["codeval", ".", "--commits"], said.append)
+    u.current_for(["codeval", ".", "--yes"], said.append)
     assert calls["install"] == ["9.9.9"]
-    assert calls["exec"] == [("/v/9.9.9/kennet", ["/v/9.9.9/kennet", "codeval", ".", "--commits"])]
+    assert calls["exec"] == [("/v/9.9.9/kennet", ["/v/9.9.9/kennet", "codeval", ".", "--yes"])]
     assert said[0].startswith("Updating kennet") and u.os.environ["KENNET_UPDATED"] == "9.9.9"
     monkeypatch.delenv("KENNET_UPDATED")
 

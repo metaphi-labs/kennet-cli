@@ -208,7 +208,7 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `run_unavailable` | The twin started and failed on Metaphi AI's side; nothing was written or charged. "Upload the trace again" means run `next_step`, `kennet twin <file>`, with the options you used before. Do that once. If it fails the same way, stop and give the user both `run_id`s. |
 | `git_too_old` | `kennet codeval` needs a newer git. Tell the user; nothing was sent. |
 | `no_repository` | `kennet codeval` found no full git clone at the paths given; each path's reason is in the output. Tell the user to clone it in full and run the same command. |
-| `build_without_test`, `deep_with_test`, `dry_run_with_commits`, `dry_run_with_yes` | `kennet codeval` was given flags that do not go together. Fix the flags and run it again; nothing ran or was sent. |
+| `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes` | `kennet codeval` was given flags that do not go together. Fix the flags and run it again; nothing ran or was sent. |
 | `container_required` | `kennet codeval --deep` needs Docker or Podman running. Tell the user; nothing ran or was sent. |
 | `confirmation_required` | Nothing was sent. Ask the user; on yes, run `next_step`, the same command with `--yes`. |
 | `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
@@ -453,9 +453,9 @@ kennet codeval ./their-repo --yes --json
 kennet codeval ./core ./billing https://github.com/acme/ledger.git --yes --json
 ```
 
-It reads each repository's history, then builds and tests its latest commit once in a temporary copy on this
-machine, in Docker or Podman when one is running. It may also run the tests on small single-line edits Metaphi AI
-names; only results leave the machine. What is sent:
+It reads each repository's history, then builds and tests its latest commit and a few past commits Metaphi AI
+names, in temporary copies on this machine, in Docker or Podman when one is running. It also runs the tests on small
+single-line edits Metaphi AI names; only results leave the machine. What is sent:
 
 - counts and ids for files, folders, commits and authors;
 - the shape of commit messages, never their text;
@@ -471,8 +471,9 @@ in `sent/`, listed with sha256 sums in `sent/sent.json`. `--dry-run` writes `sen
 - When no build or test was found, the output says so. Read the repository's README, CI configuration and build
   files (ask first: that is content), propose the commands, and on the user's yes run the same command with
   `--test '<command>'`, and `--build '<command>'` when the build is separate.
-- `--commits` also runs the tests at a few past commits. It sends the profile first, so it needs `--yes` away from a
-  terminal.
+- A run takes a while, hours on a large repository. With the user's yes the history profile is sent first, then the
+  builds and tests run, then their results are sent. Tell the user it has started; each progress line on stderr
+  says about how long is left. `--dry-run` builds and tests the latest commit only.
 - `--deep` lets a model set up the build when no recipe fits, inside containers; it needs Docker or Podman.
 - A send that failed: run the same command again. It sends what was kept and runs nothing twice.
 
@@ -504,7 +505,7 @@ It answers `pending` with its `url`: give the user the link to sign in the brows
 | `container_required` | `--deep` needs Docker or Podman running: tell the user. |
 | `git_too_old` | Ask the user to update git; nothing was sent. |
 | `no_repository` | No full git clone at a path given; each path's reason is in the output. Ask the user to clone it in full, then run the same command. |
-| `build_without_test`, `deep_with_test`, `dry_run_with_commits`, `dry_run_with_yes` | The flags do not go together: fix them. |
+| `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes` | The flags do not go together: fix them. |
 | `network`, `service_unavailable`, `unavailable` | Nothing changed. Wait `retry_after_s` (30 seconds when absent), run the same command once more, then tell the user with `request_id`. |
 | `upgrade_required` | Ask the user, run `next_step`, then the same command. |
 | anything else | If `retryable`, wait and try once more. Else tell the user the message and `request_id`. |

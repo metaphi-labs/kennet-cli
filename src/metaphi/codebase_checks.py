@@ -3,10 +3,12 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -221,6 +223,63 @@ def _copied(src: str, dst: str) -> None:
         pass
 
 
+COVER = "kennet.cover"
+MEASURED_RUNS = ("build", "tests")
+COVER_LINE = re.compile(r"^(.+\.go):(\d+\.\d+,\d+\.\d+) (\d+) (\d+)$")
+
+
+def _installed(src: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(src):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _modules(src: Path) -> list[tuple[str, str]]:
+    out = []
+    for mod in src.rglob("go.mod"):
+        try:
+            text = mod.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        name = re.search(r"^module\s+(\S+)", text, re.MULTILINE)
+        if name:
+            rel = mod.parent.relative_to(src).as_posix()
+            out.append((name.group(1).strip('"'), "" if rel == "." else rel + "/"))
+    return sorted(out, key=lambda m: -len(m[0]))
+
+
+def go_coverage(profile: Path, src: Path, paths: dict[int, str]) -> list[dict[str, Any]] | None:
+    try:
+        lines = profile.read_text("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    ids = {p: i for i, p in paths.items()}
+    modules = _modules(src)
+    blocks: dict[tuple[str, str], tuple[int, int]] = {}
+    for line in lines:
+        m = COVER_LINE.match(line)
+        if not m:
+            continue
+        name, at, n, hits = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+        rel = next((d + name[len(mod) + 1 :] for mod, d in modules if name.startswith(mod + "/")), None)
+        if rel is None:
+            continue
+        seen = blocks.get((rel, at), (n, 0))
+        blocks[rel, at] = (n, max(seen[1], hits))
+    per: dict[int, list[int]] = {}
+    for (rel, _), (n, hits) in blocks.items():
+        if rel in ids:
+            row = per.setdefault(ids[rel], [0, 0])
+            row[0] += n
+            row[1] += n if hits else 0
+    return [{"file": f, "unit": "statement", "total": t, "covered": c} for f, (t, c) in sorted(per.items())]
+
+
 def _tail(path: Path, lines: int = 15) -> list[str]:
     try:
         said = path.read_bytes()[-20000:].decode("utf-8", "replace").splitlines()
@@ -262,6 +321,7 @@ def _side(
     found: tuple[Recipe, str | None] | None = None,
     jobs: int = 1,
     edit: Callable[[Path], None] | None = None,
+    measure: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     _write(repo, tree, into / "src")
     if edit:
@@ -271,7 +331,7 @@ def _side(
     recipe, engine = found or (None, None)
     shell = Shell(engine, recipe.image if recipe else None, into / "src", junit, jobs=jobs, cache=plan.cache)
     try:
-        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe)
+        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe, measure)
     finally:
         shell.close()
 
@@ -285,6 +345,7 @@ def _ran_side(
     label: str,
     say: Callable[[str], None],
     recipe: Recipe | None,
+    measure: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     junit = shell.junit
     build = (
@@ -302,13 +363,14 @@ def _ran_side(
             head = f"    {label} {step}: {'stopped (too long)' if code is None else f'exit {code}'} ({path})"
             say("\n".join([head, *_tail(path)]))
 
+    before = _installed(shell.src) if measure is not None else 0
     if build:
         with logs.open(f"{label}.build.log") as log, plan.steps.step("build", at=label):
             path = Path(log.name)
             code, took = _run(
                 shell.line(build, tests),
                 shell.src,
-                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit)},
+                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
             )
@@ -318,6 +380,13 @@ def _ran_side(
             shell.stop()
         if code != 0:
             return side
+    go = measure is not None and any(shell.src.rglob("go.mod"))
+    if measure is not None:
+        side["installed_bytes"] = max(_installed(shell.src) - before, 0)
+        if go:
+            at = "/kennet/junit" if shell.name else str(junit)
+            given = (("" if shell.name else env.get("GOFLAGS", "")) + f" -coverprofile={at}/{COVER}").strip()
+            shell.extra = {"GOFLAGS": given}
     for n in range(runs):
         shell.empty()
         with logs.open(f"{label}.test-{n + 1}.log") as log, plan.steps.step("test", at=label):
@@ -325,7 +394,7 @@ def _ran_side(
             code, took = _run(
                 shell.line(test, tests),
                 shell.src,
-                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit)},
+                shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
             )
@@ -341,9 +410,23 @@ def _ran_side(
             pass
         side["tests"].append(_tested(code, took, _junit(junit), path))
         shown(f"test {n + 1}", code, path)
+        if measure is not None and n == 0:
+            shell.extra = {}
+            if go:
+                side["coverage"] = go_coverage(junit / COVER, shell.src, measure)
         if code is None:
             shell.stop()
             break
+    if measure is not None and side["tests"] and side["tests"][0]["exit"] is not None:
+        if shell.offline():
+            shell.empty()
+            with logs.open(f"{label}.offline.log") as log, plan.steps.step("offline", at=label):
+                path = Path(log.name)
+                code, took = _run(shell.line(test, tests), shell.src, shell.env(tests), seconds, log)
+            side["offline"] = _tested(code, took, _junit(junit), path)
+            if code is None:
+                shell.stop()
+        side["memory_peak_bytes"] = shell.memory_peak()
     return side
 
 
@@ -451,6 +534,35 @@ def workers(n: int) -> tuple[int, int]:
 Repair = Callable[[int, str, str], "tuple[Recipe, str | None] | None"]
 
 
+def about(seconds: float) -> str:
+    if seconds < 60:
+        return "under a minute"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"about {minutes} min"
+    hours, minutes = divmod(5 * round(minutes / 5), 60)
+    return f"about {hours} h" + (f" {minutes} min" if minutes else "")
+
+
+class Eta:
+    def __init__(self, units: float, at_once: int, unit_s: float | None, deadline: float):
+        self.left, self.done, self.at_once, self.unit_s, self.deadline = units, 0.0, at_once, unit_s, deadline
+        self.began, self.lock = time.monotonic(), threading.Lock()
+
+    def _left(self, seconds: float) -> str:
+        return about(max(0.0, min(seconds, self.deadline - time.monotonic())))
+
+    def first(self) -> str | None:
+        return self._left(self.left * self.unit_s / self.at_once) if self.unit_s else None
+
+    def tick(self, units: float) -> str:
+        with self.lock:
+            self.done, self.left = self.done + units, max(0.0, self.left - units)
+            if not self.left:
+                return ""
+            return " \u00b7 " + self._left(self.left * (time.monotonic() - self.began) / self.done) + " left"
+
+
 def _neither_built(row: dict) -> bool:
     return not row.get("broke") and all((row[s].get("build") or {}).get("exit", 0) != 0 for s in ("pre", "post"))
 
@@ -491,27 +603,29 @@ def run(
         out["commits"] = [{"commit": i, "broke": True} for i in targets]
         out["edits"] = [{**b, "broke": True} for b in edits or []]
         return out
+    tip_s: float | None = None
     try:
-        if tipped:
-            out["tip"] = tipped
-        else:
-            with (
-                tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch,
-                plan.steps.step("tip"),
-            ):
-                out["tip"] = _side(
-                    repo,
-                    _tree(repo, tip),
-                    Path(scratch) / "tip",
-                    plan,
-                    {**os.environ, "KENNET_TESTS": ""},
-                    1,
-                    logs,
-                    "000-tip",
-                    say,
-                    found,
-                    jobs,
-                )
+        began = time.monotonic()
+        with (
+            tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch,
+            plan.steps.step("tip"),
+        ):
+            measured = _side(
+                repo,
+                _tree(repo, tip),
+                Path(scratch) / "tip",
+                plan,
+                {**os.environ, "KENNET_TESTS": ""},
+                1,
+                logs,
+                "000-tip",
+                say,
+                found,
+                jobs,
+                measure=paths or {},
+            )
+        tip_s = time.monotonic() - began
+        out["tip"] = {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
         said = out["tip"]
         built = "build" not in said or said["build"]["exit"] == 0
         t = said["tests"][0] if said["tests"] else None
@@ -535,6 +649,21 @@ def run(
     except Exception as e:  # noqa: BLE001
         say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
 
+    edits = edits or []
+    eta = Eta(len(targets) * (1 + runs) + len(edits) * runs, at_once, tip_s, deadline)
+    if targets or edits:
+        work = " and ".join(
+            f"{k} {what}{'s' if k != 1 else ''}"
+            for k, what in ((len(targets), "past commit"), (len(edits), "edit"))
+            if k
+        )
+        took = eta.first()
+        say(
+            f"{name}: building and testing {work}"
+            + (f", {took}" if took else "")
+            + f"; it stops after {plan.hours:g} h"
+        )
+
     def label_of(n: int, i: int) -> str:
         return f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
 
@@ -546,13 +675,16 @@ def run(
             c = by_id[i]
             row = {
                 "commit": i,
-                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], say, with_, jobs),
+                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], lambda _s: None, with_, jobs),
             }
             b = (row["post"].get("build") or {}).get("exit", 0)
-            say(f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})")
+            left = eta.tick(1 + runs) if not again else ""
+            say(f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)}){left}")
             return row
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
+            if not again:
+                eta.tick(1 + runs)
             return {"commit": i, "broke": True}
 
     rows: list[dict | None] = []
@@ -613,10 +745,12 @@ def run(
                     ),
                 }
                 built = (row["post"].get("build") or {}).get("exit", 0)
-                say(f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n}/{len(edits)})")
+                left = eta.tick(runs)
+                say(f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)}){left}")
                 return row
             except Exception as e:  # noqa: BLE001
                 say(f"    {label}: could not run ({type(e).__name__}: {e})")
+                eta.tick(runs)
                 return {**b, "broke": True}
 
         with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("edits", at_once=at_once):
@@ -628,4 +762,4 @@ def run(
     return out
 
 
-__all__ = ["Plan", "outcomes", "run"]
+__all__ = ["Eta", "Plan", "about", "outcomes", "run"]

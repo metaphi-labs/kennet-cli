@@ -24,8 +24,8 @@ from metaphi import __version__, api, codebase_checks, codebase_env, codebase_si
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 
-SCHEMA = "kennet.repo_metadata.v14"
-CHECKS_SCHEMA = "kennet.repo_checks.v2"
+SCHEMA = "kennet.repo_metadata.v15"
+CHECKS_SCHEMA = "kennet.repo_checks.v3"
 LOGS_SCHEMA = "kennet.repo_logs.v1"
 LOG_FILE_MOST = 4 << 20
 NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
@@ -177,6 +177,13 @@ KNOWN = frozenset(
         "contributing.md",
         "changelog.md",
         "codeowners",
+        "agents.md",
+        "claude.md",
+        "gemini.md",
+        "copilot-instructions.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".aider.conf.yml",
         ".gitmodules",
         ".gitattributes",
     ]
@@ -264,6 +271,28 @@ _FIXED = (
 
 class Unreadable(Exception):
     pass
+
+
+RELEASE = re.compile(r"^v?\d+(\.\d+)+")
+TAG_FORMAT = (
+    "%(objecttype)%00%(objectname)%00%(*objectname)%00%(taggerdate:unix)%00%(creatordate:unix)%00%(refname:lstrip=2)"
+)
+
+
+def _tags(repo: Path, order: dict[str, int]) -> list[dict[str, Any]]:
+    out = []
+    for line in _text(repo, "for-each-ref", f"--format={TAG_FORMAT}", "refs/tags").splitlines():
+        kind, obj, target, tagged, created, name = line.split("\0")
+        at = tagged or created
+        out.append(
+            {
+                "commit": order.get(target if kind == "tag" else obj, 0),
+                "at": int(at) if at.lstrip("-").isdigit() else None,
+                "annotated": kind == "tag",
+                "release": bool(RELEASE.match(name)),
+            }
+        )
+    return sorted(out, key=lambda t: (t["commit"], t["at"] or 0))
 
 
 def _git(repo: Path, *args: str) -> list[str]:
@@ -724,7 +753,7 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
         "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split(),
         "git": {
             "branches": len(_text(repo, "for-each-ref", "--format=x", "refs/heads", "refs/remotes").split()),
-            "tags": len(_text(repo, "for-each-ref", "--format=x", "refs/tags").split()),
+            "tag_refs": _tags(repo, order),
             "submodules": sum(m == "160000" for m, _s, _z in tree.values()),
             "lfs": lfs,
             "pack_bytes": int(pack[1]) * 1024 if pack else 0,
@@ -1090,6 +1119,7 @@ SENT = (
     "  \u00b7 the git ids of files Metaphi AI names",
 )
 DEEP_SENT = "  \u00b7 with --deep: the contents of files read to set up the build"
+TAKES = "Then it builds and tests past commits here, which can take hours; the time left shows as it runs."
 
 
 def sent_lines(deep: bool = False) -> tuple[str, ...]:
@@ -1169,8 +1199,8 @@ def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
     _call("GET", "/codeval/access", sleep, answered=False)
 
 
-def plan(ref: str, sleep: Callable[[float], None] = time.sleep, only: str | None = None) -> dict[str, Any]:
-    return _call("POST", f"/codeval/{ref}/plan", sleep, **({"json": {"only": only}} if only else {}))
+def plan(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    return _call("POST", f"/codeval/{ref}/plan", sleep)
 
 
 def setup_reach(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
@@ -1260,6 +1290,7 @@ __all__ = [
     "NOTICE",
     "SCHEMA",
     "SENT",
+    "TAKES",
     "add_blobs",
     "checked",
     "compute",
