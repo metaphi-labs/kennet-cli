@@ -1547,3 +1547,29 @@ def test_a_trailer_value_with_carriage_returns_is_one_trailer():
         {"key": "stacktrace", "domain": ""},
         {"key": "signed-off-by", "domain": "x.org"},
     ]
+
+
+def test_each_commit_installs_its_own_dependencies_on_a_set_up_image(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from metaphi import codebase_checks
+    from metaphi.codebase_setup import Recipe
+
+    ran = []
+    monkeypatch.setattr(codebase_checks, "_run", lambda line, *a: (ran.append(line), (0, 0.1))[1])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "junit").mkdir()
+    shell = SimpleNamespace(
+        src=tmp_path / "src",
+        junit=tmp_path / "junit",
+        name="box",
+        extra={},
+        line=lambda cmd, tests: cmd,
+        env=lambda tests: {},
+        empty=lambda: None,
+        stop=lambda: None,
+    )
+    recipe = Recipe("npm ci", "true", "npm test", "kennet-setup:abc")
+    plan = codebase_checks.Plan(logs=tmp_path)
+    codebase_checks._ran_side(shell, plan, {}, 1, codebase_checks._Logs(tmp_path / "logs"), "001", print, recipe)
+    assert ran[0] == "(npm ci) && (true)" and ran[1] == "npm test"

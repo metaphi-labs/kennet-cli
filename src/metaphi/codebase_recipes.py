@@ -445,7 +445,7 @@ def _markers(paths: set[str], read: Callable[[str], bytes | None]) -> list[Recip
         out.append(
             Recipe(
                 "true",
-                f"mvn -B -q -T {JOBS} -DskipTests install",
+                f"mvn -B -q -T {JOBS} -DskipTests -DskipITs install",
                 f"mvn -B -fae test; {copy}",
                 f"maven:3-eclipse-temurin-{JDK}",
             )
