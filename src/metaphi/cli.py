@@ -463,14 +463,13 @@ def _codeval_again(a: argparse.Namespace) -> str:
     for flag in ("build", "test"):
         if getattr(a, flag):
             line += [f"--{flag}", getattr(a, flag)]
-    line += [f"--{flag}" for flag in ("deep", "commits", "json") if getattr(a, flag)]
+    line += [f"--{flag}" for flag in ("deep", "json") if getattr(a, flag)]
     return shlex.join([*line, "--yes"])
 
 
-def _unconfirmed(a: argparse.Namespace, home: Path | None = None) -> errors.MetaphiError:
-    where = f"; results are in {home}" if home else ""
+def _unconfirmed(a: argparse.Namespace) -> errors.MetaphiError:
     return errors.MetaphiError(
-        f"nothing was sent: sending needs --yes away from a terminal{where}",
+        "nothing was sent: sending needs --yes away from a terminal",
         code="confirmation_required",
         next_step=_codeval_again(a),
     )
@@ -484,9 +483,9 @@ def cmd_codeval(a: argparse.Namespace) -> None:
         raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
     if a.deep and a.test:
         raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
-    commits = a.commits or a.deep
-    if a.dry_run and commits:
-        raise errors.MetaphiError("--dry-run runs without --commits or --deep", code="dry_run_with_commits")
+    if a.dry_run and a.deep:
+        raise errors.MetaphiError("--dry-run runs without --deep", code="dry_run_with_deep")
+    commits = not a.dry_run
     if a.dry_run and a.yes:
         raise errors.MetaphiError("--dry-run sends nothing: give --dry-run or --yes", code="dry_run_with_yes")
     if a.deep and not codebase_setup.engine():
@@ -538,7 +537,7 @@ def cmd_codeval(a: argparse.Namespace) -> None:
             return answer["id"]
 
         if commits:
-            for line in codeval.sent_lines(a.deep):
+            for line in (*codeval.sent_lines(a.deep), codeval.TAKES):
                 say(line)
             if not agreed:
                 if not ask():
@@ -597,10 +596,9 @@ def cmd_codeval(a: argparse.Namespace) -> None:
             )
         for given, tries in missing:
             say(_rerun(given, tries))
-        if not commits:
+        if a.dry_run:
             for line in codeval.sent_lines(a.deep):
                 say(line)
-        if a.dry_run:
             _sent(home, "codeval.json.gz", "/codeval", codeval.packed(doc), None, say)
             _sent(home, "checks.json.gz", "/codeval/<reference>/checks", codeval.packed(report), None, say)
             logs, redactions = codeval.logs_packed(home / "logs", "", [k["name"] for k in kept])
@@ -613,25 +611,7 @@ def cmd_codeval(a: argparse.Namespace) -> None:
                     + palette.paint(str(home / "sent"), "dim", stream)
                 )
             return
-        if not agreed:
-            if not interactive:
-                raise _unconfirmed(a, home)
-            if not ask():
-                say("Nothing sent. Results are in " + palette.paint(str(home), "dim", stream))
-                return
-            _codeval_key(a, say)
         try:
-            ref = ref or sent_profile()
-            if (
-                not commits
-                and not (home / "checks.sent").is_file()
-                and not any(r and "blobs" in r for r in report["repos"])
-            ):
-                with steps.step("plan"):
-                    planned = codeval.plan(ref, only="blobs")
-                (home / "plan.json").write_text(json.dumps(planned, indent=1))
-                codeval.add_blobs(kept, report, planned)
-                done.write_text(json.dumps(report, indent=1))
             if not (home / "checks.sent").is_file():
                 body = codeval.packed(report)
                 with steps.step("post_checks"):
@@ -1884,7 +1864,6 @@ def parser() -> argparse.ArgumentParser:
         help="let a model set up the build when no recipe fits; sends the "
         "contents of files it reads; needs Docker or Podman",
     )
-    s.add_argument("--commits", action="store_true", help="also run the tests at a few past commits")
     s.add_argument("--yes", action="store_true", help="send without asking (required away from a terminal)")
     s.add_argument(
         "--dry-run",

@@ -1119,6 +1119,7 @@ SENT = (
     "  \u00b7 the git ids of files Metaphi AI names",
 )
 DEEP_SENT = "  \u00b7 with --deep: the contents of files read to set up the build"
+TAKES = "Then it builds and tests past commits here, which can take hours; the time left shows as it runs."
 
 
 def sent_lines(deep: bool = False) -> tuple[str, ...]:
@@ -1198,8 +1199,8 @@ def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
     _call("GET", "/codeval/access", sleep, answered=False)
 
 
-def plan(ref: str, sleep: Callable[[float], None] = time.sleep, only: str | None = None) -> dict[str, Any]:
-    return _call("POST", f"/codeval/{ref}/plan", sleep, **({"json": {"only": only}} if only else {}))
+def plan(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    return _call("POST", f"/codeval/{ref}/plan", sleep)
 
 
 def setup_reach(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
@@ -1289,6 +1290,7 @@ __all__ = [
     "NOTICE",
     "SCHEMA",
     "SENT",
+    "TAKES",
     "add_blobs",
     "checked",
     "compute",

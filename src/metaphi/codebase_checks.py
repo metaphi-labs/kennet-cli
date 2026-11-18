@@ -8,6 +8,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -533,6 +534,35 @@ def workers(n: int) -> tuple[int, int]:
 Repair = Callable[[int, str, str], "tuple[Recipe, str | None] | None"]
 
 
+def about(seconds: float) -> str:
+    if seconds < 60:
+        return "under a minute"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"about {minutes} min"
+    hours, minutes = divmod(5 * round(minutes / 5), 60)
+    return f"about {hours} h" + (f" {minutes} min" if minutes else "")
+
+
+class Eta:
+    def __init__(self, units: float, at_once: int, unit_s: float | None, deadline: float):
+        self.left, self.done, self.at_once, self.unit_s, self.deadline = units, 0.0, at_once, unit_s, deadline
+        self.began, self.lock = time.monotonic(), threading.Lock()
+
+    def _left(self, seconds: float) -> str:
+        return about(max(0.0, min(seconds, self.deadline - time.monotonic())))
+
+    def first(self) -> str | None:
+        return self._left(self.left * self.unit_s / self.at_once) if self.unit_s else None
+
+    def tick(self, units: float) -> str:
+        with self.lock:
+            self.done, self.left = self.done + units, max(0.0, self.left - units)
+            if not self.left:
+                return ""
+            return " \u00b7 " + self._left(self.left * (time.monotonic() - self.began) / self.done) + " left"
+
+
 def _neither_built(row: dict) -> bool:
     return not row.get("broke") and all((row[s].get("build") or {}).get("exit", 0) != 0 for s in ("pre", "post"))
 
@@ -573,7 +603,9 @@ def run(
         out["commits"] = [{"commit": i, "broke": True} for i in targets]
         out["edits"] = [{**b, "broke": True} for b in edits or []]
         return out
+    tip_s: float | None = None
     try:
+        began = time.monotonic()
         with (
             tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch,
             plan.steps.step("tip"),
@@ -592,6 +624,7 @@ def run(
                 jobs,
                 measure=paths or {},
             )
+        tip_s = time.monotonic() - began
         out["tip"] = {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
         said = out["tip"]
         built = "build" not in said or said["build"]["exit"] == 0
@@ -616,6 +649,21 @@ def run(
     except Exception as e:  # noqa: BLE001
         say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
 
+    edits = edits or []
+    eta = Eta(len(targets) * (1 + runs) + len(edits) * runs, at_once, tip_s, deadline)
+    if targets or edits:
+        work = " and ".join(
+            f"{k} {what}{'s' if k != 1 else ''}"
+            for k, what in ((len(targets), "past commit"), (len(edits), "edit"))
+            if k
+        )
+        took = eta.first()
+        say(
+            f"{name}: building and testing {work}"
+            + (f", {took}" if took else "")
+            + f"; it stops after {plan.hours:g} h"
+        )
+
     def label_of(n: int, i: int) -> str:
         return f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
 
@@ -627,13 +675,16 @@ def run(
             c = by_id[i]
             row = {
                 "commit": i,
-                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], say, with_, jobs),
+                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], lambda _s: None, with_, jobs),
             }
             b = (row["post"].get("build") or {}).get("exit", 0)
-            say(f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})")
+            left = eta.tick(1 + runs) if not again else ""
+            say(f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)}){left}")
             return row
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
+            if not again:
+                eta.tick(1 + runs)
             return {"commit": i, "broke": True}
 
     rows: list[dict | None] = []
@@ -694,10 +745,12 @@ def run(
                     ),
                 }
                 built = (row["post"].get("build") or {}).get("exit", 0)
-                say(f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n}/{len(edits)})")
+                left = eta.tick(runs)
+                say(f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)}){left}")
                 return row
             except Exception as e:  # noqa: BLE001
                 say(f"    {label}: could not run ({type(e).__name__}: {e})")
+                eta.tick(runs)
                 return {**b, "broke": True}
 
         with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("edits", at_once=at_once):
@@ -709,4 +762,4 @@ def run(
     return out
 
 
-__all__ = ["Plan", "outcomes", "run"]
+__all__ = ["Eta", "Plan", "about", "outcomes", "run"]
