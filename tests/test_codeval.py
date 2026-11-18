@@ -1572,4 +1572,8 @@ def test_each_commit_installs_its_own_dependencies_on_a_set_up_image(monkeypatch
     recipe = Recipe("npm ci", "true", "npm test", "kennet-setup:abc")
     plan = codebase_checks.Plan(logs=tmp_path)
     codebase_checks._ran_side(shell, plan, {}, 1, codebase_checks._Logs(tmp_path / "logs"), "001", print, recipe)
-    assert ran[0] == "(npm ci) && (true)" and ran[1] == "npm test"
+    assert ran[0].startswith("(npm ci) || ") and ran[0].endswith("; (true)") and ran[1] == "npm test"
+    ran.clear()
+    host = Recipe("npm ci", "true", "npm test", None)
+    codebase_checks._ran_side(shell, plan, {}, 1, codebase_checks._Logs(tmp_path / "logs"), "002", print, host)
+    assert ran[0] == "(npm ci) && (true)"
