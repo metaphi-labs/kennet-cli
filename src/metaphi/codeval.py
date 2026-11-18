@@ -16,7 +16,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import httpx
 
@@ -419,13 +419,17 @@ def _commits(
     return commits
 
 
+TRAILER_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+
+
 def _trailers(block: str) -> list[dict[str, str]]:
     out = []
-    for line in block.splitlines():
+    for line in block.split("\n"):
         key, sep, value = line.partition(":")
-        if sep and key.strip():
+        key = key.strip().lower()
+        if sep and TRAILER_KEY.fullmatch(key):
             m = EMAIL_DOMAIN.search(value)
-            out.append({"key": key.strip().lower(), "domain": m[1].lower().rstrip(".") if m else ""})
+            out.append({"key": key, "domain": m[1].lower().rstrip(".") if m else ""})
     return out
 
 
@@ -1048,6 +1052,7 @@ def checked(
                     (planned.get("edits") or [[]] * len(kept))[n],
                     local.get("paths"),
                     tip or None,
+                    stream,
                 )
             except Exception as e:  # noqa: BLE001
                 say(f"\u2717 {local['name']}: tests stopped ({type(e).__name__}: {e})")
@@ -1146,6 +1151,7 @@ def _named(e: errors.MetaphiError) -> errors.MetaphiError:
 
 
 say: Callable[[str], None] | None = None
+stream: IO[str] | None = None
 
 
 def _call(method: str, path: str, sleep: Callable[[float], None], answered: bool = True, **kw: Any) -> dict[str, Any]:

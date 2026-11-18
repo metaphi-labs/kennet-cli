@@ -256,7 +256,6 @@ def test_bad_date(repo):
 
 
 def test_blank_lines():
-    import time
 
     started = time.monotonic()
     codeval._content(b"\n" * 500_000, "go", "source", lambda a, b: False)
@@ -1254,6 +1253,9 @@ def test_the_closing_line_says_the_build_ran_when_only_the_tests_failed():
     said = cli._rerun("./core", tries)
     assert "In ./core, 0 of 10 tests passed" in said and "No build or test found" not in said
     assert "No build or test found in ./core" in cli._rerun("./core", [])
+    unread = [{"build": {"exit": 0, "seconds": 5}, "test": {"exit": 0, "seconds": 6, "report": None, "reported": None}}]
+    said = cli._rerun("./core", unread)
+    assert "the tests passed but how many ran could not be read" in said and "database" not in said
 
 
 @respx.mock
@@ -1470,13 +1472,27 @@ def test_time_left():
         "about 1 h 5 min",
         "about 2 h 30 min",
     ]
-    now = time.monotonic()
-    eta = codebase_checks.Eta(10, 2, 60.0, now + 3600)
-    assert eta.first() == "about 5 min"
-    assert codebase_checks.Eta(10, 1, None, now + 3600).first() is None
-    assert codebase_checks.Eta(1000, 1, 60.0, now + 600).first() == "about 10 min"
-    eta.began -= 100
-    assert eta.tick(5) == " \u00b7 about 2 min left" and eta.tick(5) == ""
+    now = [0.0]
+    clock = lambda: now[0]
+    assert codebase_checks.Eta(10, 2, 60.0, 3600, clock).first() == "about 2 min to 12 min"
+    assert codebase_checks.Eta(10, 1, None, 3600, clock).first() is None
+    assert codebase_checks.Eta(1000, 1, 60.0, 600, clock).first() == "about 10 min"
+
+    eta = codebase_checks.Eta(10, 2, 600.0, 10**6, clock)
+    eta.begin(1)
+    eta.begin(2)
+    now[0] = 2
+    assert eta.end(1, 2, False) == "about 18 min left"
+    eta.begin(3)
+    now[0] = 600
+    assert eta.end(2, 600, True) == "about 18 min left"
+    shown = []
+    for k in range(3, 11):
+        eta.begin(k + 1)
+        now[0] += 300
+        shown.append(eta.end(k, 300, True))
+    minutes = [int(x.split()[1]) for x in shown[:-1]]
+    assert minutes == sorted(minutes, reverse=True) and shown[-1] == "", shown
 
 
 def test_every_timed_step_is_a_known_step():
@@ -1485,3 +1501,49 @@ def test_every_timed_step_is_a_known_step():
     src = Path(codeval.__file__).parent
     timed = {m for f in src.glob("*.py") for m in re.findall(r"\.step\(\s*\"([a-z_]+)\"", f.read_text())}
     assert timed and timed <= steps.NAMES, sorted(timed - steps.NAMES)
+
+
+def test_the_board_redraws_on_a_terminal_and_prints_lines_elsewhere():
+    import io
+
+    from metaphi import live
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    now = [0.0]
+    said: list[str] = []
+    tty = Tty()
+    board = live.Board("calc", tty, said.append, clock=lambda: now[0], tick=3600)
+    board.stage("past commits", 4)
+    board.begin("001-aaaa")
+    board.begin("002-bbbb")
+    now[0] = 75
+    board.end("001-aaaa", True, "calc: 001-aaaa build ok (1/4)", "about 3 min left")
+    board.say("calc: 2 builds failed; setting up again")
+    shown = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", tty.getvalue())
+    assert "calc · past commits" in shown and "1/4 · 1 built" in shown
+    assert "002-bbbb  1m 15s" in shown and "1m 15s in · about 3 min left" in shown
+    assert said == ["calc: 2 builds failed; setting up again"]
+    board.close("✓ calc: 4 of 4 past commits run, 3 built (2m 00s)")
+    assert said[-1].startswith("✓ calc") and tty.getvalue().endswith("\x1b[J")
+
+    plain: list[str] = []
+    board = live.Board("calc", io.StringIO(), plain.append)
+    board.stage("past commits", 2)
+    board.begin("001-aaaa")
+    board.end("001-aaaa", False, "calc: 001-aaaa build failed (1/2)", "about 1 min left")
+    board.close()
+    assert plain == ["calc: 001-aaaa build failed (1/2) · about 1 min left"]
+
+
+def test_a_trailer_value_with_carriage_returns_is_one_trailer():
+    block = (
+        "Stacktrace: at A.B(String s) in c:\\Projects\\a.cs:line 1\r at C.D() in c:\\Projects\\b.cs\n"
+        "Signed-off-by: A <a@x.org>"
+    )
+    assert codeval._trailers(block) == [
+        {"key": "stacktrace", "domain": ""},
+        {"key": "signed-off-by", "domain": "x.org"},
+    ]

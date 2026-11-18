@@ -44,6 +44,14 @@ from metaphi import codebase_reading
         ),
         ("Tests:       5 failed, 5 total\n", (5, 0)),
         ("Tests:       1 failed, 2 skipped, 5 passed, 8 total\n", (6, 5)),
+        (
+            (
+                "\x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m4 passed\x1b[39m\x1b[22m\x1b[90m (4)\x1b[39m\n"
+                "\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m63752 passed\x1b[39m\x1b[22m\x1b[90m (63752)\x1b[39m\n"
+            ),
+            (63752, 63752),
+        ),
+        ("      Tests  2 failed | 1 skipped | 61 passed | 1 todo (65)\n", (63, 61)),
         ("1..3\nok 1\nok 2\nnot ok 3\n# tests 3\n# pass 2\n# fail 1\n", (3, 2)),
         ("lein test a.core\n\nRan 12 tests containing 40 assertions.\n2 failures, 1 errors.\n", (12, 9)),
         ("Test Summary: | Pass  Fail  Total  Time\nDecFP         |  300     2    302  4.1s\n", (302, 300)),

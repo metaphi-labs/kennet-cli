@@ -112,9 +112,9 @@ CACHES = {
     "npm_config_cache": f"{CACHE}/npm",
     "GOMODCACHE": f"{CACHE}/gomod",
     "GOCACHE": f"{CACHE}/gobuild",
-    "GOFLAGS": "-count=1",
+    "GOFLAGS": "-count=1 -buildvcs=false",
     "GRADLE_USER_HOME": f"{CACHE}/gradle",
-    "MAVEN_OPTS": f"-Dmaven.repo.local={CACHE}/m2",
+    "MAVEN_OPTS": f"-Dmaven.repo.local={CACHE}/m2 -Dmaven.javadoc.skip=true -Dgpg.skip=true",
     "CARGO_HOME": f"{CACHE}/cargo",
 }
 

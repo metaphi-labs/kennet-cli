@@ -348,14 +348,18 @@ def _rerun(given: str, tries: list[dict] | None = None) -> str:
     ran = [t for t in tries or [] if t.get("test")]
     if ran:
         t = max(ran, key=lambda t: t["test"].get("reported") or 0)["test"]
-        what = (
-            f"{t['passed']} of {t['reported']} tests passed"
-            if t.get("reported") is not None
-            else f"the tests exited {t.get('exit')}"
-        )
-        head = (
-            f"In {given}, {what}. If the tests need a service (a database, a cache), start it, or give your commands:\n"
-        )
+        if t.get("reported") is None and t.get("exit") == 0:
+            head = f"In {given}, the tests passed but how many ran could not be read. Give your commands:\n"
+        else:
+            what = (
+                f"{t['passed']} of {t['reported']} tests passed"
+                if t.get("reported") is not None
+                else f"the tests exited {t.get('exit')}"
+            )
+            head = (
+                f"In {given}, {what}. If the tests need a service (a database, a cache), start it, or give your "
+                "commands:\n"
+            )
     else:
         head = f"No build or test found in {given}. Give your commands:\n"
     return (
@@ -501,6 +505,7 @@ def cmd_codeval(a: argparse.Namespace) -> None:
     update.current_for(sys.argv[1:], say)
     stream = sys.stderr if a.json else sys.stdout
     say = codeval.say = _codeval_say(say, stream)
+    codeval.stream = stream
     agreed = a.yes
     if agreed:
         _codeval_key(a, say)

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from metaphi import codebase_reading as reading
+from metaphi import live
 from metaphi.codebase_setup import Recipe, Shell, allowed
 from metaphi.steps import NONE, Steps
 
@@ -544,23 +545,78 @@ def about(seconds: float) -> str:
     return f"about {hours} h" + (f" {minutes} min" if minutes else "")
 
 
-class Eta:
-    def __init__(self, units: float, at_once: int, unit_s: float | None, deadline: float):
-        self.left, self.done, self.at_once, self.unit_s, self.deadline = units, 0.0, at_once, unit_s, deadline
-        self.began, self.lock = time.monotonic(), threading.Lock()
+def between(low: float, high: float) -> str:
+    a, b = about(low), about(high)
+    return a if a == b else f"{a} to {b.removeprefix('about ')}"
 
-    def _left(self, seconds: float) -> str:
-        return about(max(0.0, min(seconds, self.deadline - time.monotonic())))
+
+class Eta:
+    """Time left, in seconds of work rather than units done: a past commit or edit costs about what the tip did,
+    one whose build fails costs next to nothing, and work under way counts for what it has run. Before any unit
+    ends, the range covers the middle 80% of recorded runs (LOW..HIGH times units x tip / workers)."""
+
+    LOW, HIGH, RISE = 0.5, 2.5, 1.25
+
+    def __init__(self, units: int, at_once: int, unit_s: float | None, deadline: float, clock=time.monotonic):
+        self.units, self.at_once, self.unit_s, self.deadline, self.clock = (
+            units,
+            max(1, at_once),
+            unit_s,
+            deadline,
+            clock,
+        )
+        self.running: dict[object, float] = {}
+        self.built: list[float] = []
+        self.failed: list[float] = []
+        self.shown: tuple[float, float] | None = None
+        self.lock = threading.Lock()
+
+    def _cap(self, seconds: float) -> float:
+        return max(0.0, min(seconds, self.deadline - self.clock()))
 
     def first(self) -> str | None:
-        return self._left(self.left * self.unit_s / self.at_once) if self.unit_s else None
+        if not self.unit_s or not self.units:
+            return None
+        base = self.units * self.unit_s / min(self.at_once, self.units)
+        return between(self._cap(self.LOW * base), self._cap(self.HIGH * base))
 
-    def tick(self, units: float) -> str:
+    def begin(self, key: object) -> None:
         with self.lock:
-            self.done, self.left = self.done + units, max(0.0, self.left - units)
-            if not self.left:
+            self.running[key] = self.clock()
+
+    def _left(self, now: float) -> float:
+        tip = self.unit_s or 0.0
+        cost = (tip + sum(self.built)) / (1 + len(self.built))
+        cheap = sorted(self.failed)[len(self.failed) // 2] if self.failed else 0.0
+        p = (1 + len(self.built)) / (2 + len(self.built) + len(self.failed))
+        each = p * cost + (1 - p) * cheap
+        left = self.units - len(self.built) - len(self.failed)
+        queued = left - len(self.running)
+        under_way = [max(cost - (now - t), 0.1 * cost) for t in self.running.values()]
+        return max((queued * each + sum(under_way)) / max(1, min(self.at_once, left)), max(under_way, default=0.0))
+
+    def end(self, key: object, seconds: float, built: bool) -> str:
+        with self.lock:
+            self.running.pop(key, None)
+            (self.built if built else self.failed).append(seconds)
+            if len(self.built) + len(self.failed) >= self.units:
                 return ""
-            return " \u00b7 " + self._left(self.left * (time.monotonic() - self.began) / self.done) + " left"
+            now = self.clock()
+            left = self._left(now)
+            if self.shown:
+                counted = self.shown[1] - (now - self.shown[0])
+                if left < counted or left > self.RISE * counted:
+                    self.shown = (now, left)
+            else:
+                self.shown = (now, left)
+            return about(self._cap(self.shown[1] - (now - self.shown[0]))) + " left"
+
+
+def _summary(name: str, what: str, rows: list[dict | None], total: int, board: live.Board) -> str:
+    ran = [r for r in rows if r is not None]
+    built = sum(1 for r in ran if not r.get("broke") and ((r.get("post") or {}).get("build") or {}).get("exit", 0) == 0)
+    took = live.clock_text(board.clock() - board.began)
+    return f"\u2713 {name}: {len(ran)} of {total} {what} run, {built} built ({took})"
 
 
 def _neither_built(row: dict) -> bool:
@@ -583,6 +639,49 @@ def run(
     edits: list[dict] | None = None,
     paths: dict[int, str] | None = None,
     tipped: dict[str, Any] | None = None,
+    stream: IO[str] | None = None,
+) -> dict[str, Any]:
+    board = live.Board(name, stream, say)
+    try:
+        return _checks(
+            repo,
+            name,
+            tip,
+            commits,
+            order,
+            targets,
+            runs,
+            plan,
+            board.say,
+            found,
+            eras,
+            repair,
+            edits,
+            paths,
+            tipped,
+            board,
+        )
+    finally:
+        board.close()
+
+
+def _checks(
+    repo: Path,
+    name: str,
+    tip: str,
+    commits: list[dict],
+    order: dict[str, int],
+    targets: list[int],
+    runs: int,
+    plan: Plan,
+    say: Callable[[str], None],
+    found: tuple[Recipe, str | None] | None,
+    eras: list[int | None] | None,
+    repair: Repair | None,
+    edits: list[dict] | None,
+    paths: dict[int, str] | None,
+    tipped: dict[str, Any] | None,
+    board: live.Board,
 ) -> dict[str, Any]:
     shas = {i: sha for sha, i in order.items()}
     by_id = {c["commit"]: c for c in commits}
@@ -650,7 +749,7 @@ def run(
         say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
 
     edits = edits or []
-    eta = Eta(len(targets) * (1 + runs) + len(edits) * runs, at_once, tip_s, deadline)
+    eta = Eta(len(targets) + len(edits), at_once, tip_s, deadline)
     if targets or edits:
         work = " and ".join(
             f"{k} {what}{'s' if k != 1 else ''}"
@@ -671,6 +770,10 @@ def run(
         if time.monotonic() > deadline:
             return None
         label = label_of(n, i) + again
+        began = time.monotonic()
+        if not again:
+            eta.begin(n)
+            board.begin(label)
         try:
             c = by_id[i]
             row = {
@@ -678,19 +781,29 @@ def run(
                 **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], lambda _s: None, with_, jobs),
             }
             b = (row["post"].get("build") or {}).get("exit", 0)
-            left = eta.tick(1 + runs) if not again else ""
-            say(f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)}){left}")
+            line = f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})"
+            if again:
+                say(line)
+            else:
+                board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
             return row
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
             if not again:
-                eta.tick(1 + runs)
+                board.end(
+                    label,
+                    False,
+                    f"{name}: {label} could not run ({n}/{len(targets)})",
+                    eta.end(n, time.monotonic() - began, False),
+                )
             return {"commit": i, "broke": True}
 
     rows: list[dict | None] = []
     if targets:
+        board.stage("past commits", len(targets))
         with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("commits", at_once=at_once):
             rows = list(pool.map(one, range(1, len(targets) + 1), targets))
+        board.close(_summary(name, "past commits", rows, len(targets), board))
     if None in rows:
         out["stopped"] = "hours"
         rows = rows[: rows.index(None)]
@@ -737,6 +850,9 @@ def run(
             if time.monotonic() > deadline:
                 return None
             label = f"{n:03d}-tip"
+            began = time.monotonic()
+            eta.begin(n)
+            board.begin(label)
             try:
                 row = {
                     **b,
@@ -745,16 +861,23 @@ def run(
                     ),
                 }
                 built = (row["post"].get("build") or {}).get("exit", 0)
-                left = eta.tick(runs)
-                say(f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)}){left}")
+                line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)})"
+                board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
                 return row
             except Exception as e:  # noqa: BLE001
                 say(f"    {label}: could not run ({type(e).__name__}: {e})")
-                eta.tick(runs)
+                board.end(
+                    label,
+                    False,
+                    f"{name}: {label} could not run ({n - len(targets)}/{len(edits)})",
+                    eta.end(n, time.monotonic() - began, False),
+                )
                 return {**b, "broke": True}
 
+        board.stage("edits", len(edits))
         with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("edits", at_once=at_once):
             done = list(pool.map(edited, range(len(targets) + 1, len(targets) + len(edits) + 1), edits))
+        board.close(_summary(name, "edits", done, len(edits), board))
         if None in done:
             out["stopped"] = "hours"
             done = done[: done.index(None)]
@@ -762,4 +885,4 @@ def run(
     return out
 
 
-__all__ = ["Eta", "Plan", "about", "outcomes", "run"]
+__all__ = ["Eta", "Plan", "about", "between", "outcomes", "run"]
