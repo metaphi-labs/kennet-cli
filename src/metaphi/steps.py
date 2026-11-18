@@ -23,6 +23,7 @@ NAMES = frozenset(
         "edits",
         "build",
         "test",
+        "offline",
         "post_checks",
         "build_remote",
         "services",

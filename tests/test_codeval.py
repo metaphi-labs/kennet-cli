@@ -1,5 +1,6 @@
 import gzip
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -1476,3 +1477,11 @@ def test_time_left():
     assert codebase_checks.Eta(1000, 1, 60.0, now + 600).first() == "about 10 min"
     eta.began -= 100
     assert eta.tick(5) == " \u00b7 about 2 min left" and eta.tick(5) == ""
+
+
+def test_every_timed_step_is_a_known_step():
+    from metaphi import steps
+
+    src = Path(codeval.__file__).parent
+    timed = {m for f in src.glob("*.py") for m in re.findall(r"\.step\(\s*\"([a-z_]+)\"", f.read_text())}
+    assert timed and timed <= steps.NAMES, sorted(timed - steps.NAMES)
