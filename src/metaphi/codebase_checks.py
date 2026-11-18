@@ -349,11 +349,7 @@ def _ran_side(
     measure: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     junit = shell.junit
-    build = (
-        (recipe.build if recipe.image else f"({recipe.setup or 'true'}) && ({recipe.build or 'true'})")
-        if recipe
-        else plan.build
-    )
+    build = f"({recipe.setup or 'true'}) && ({recipe.build or 'true'})" if recipe else plan.build
     test = recipe.test if recipe else plan.test
     tests = env.get("KENNET_TESTS", "")
     side: dict[str, Any] = {"tests": []}
