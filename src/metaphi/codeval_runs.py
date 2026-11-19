@@ -5,6 +5,7 @@ its root commits. It holds:
 
     key            the repository's HMAC key (random, mode 0600): what keys test ids, commands, subjects and blobs
     run.json       the server's run id and the tip it was measured at
+    profile.json   what the filed profile bound the run to: its tip, commit order and ids (never re-read from git)
     checks.jsonl   each finished unit (the tip, a commit, a mutant), written and synced before the next starts
     logs/          every build and test log, whole; only each log's sha256 is sent
     sent/          every body sent, exactly as sent (before gzip)
@@ -27,6 +28,7 @@ JOURNAL = "checks.jsonl"
 STATE_ENV = "KENNET_STATE_HOME"
 KEY = "key"
 RUN = "run.json"
+PROFILE = "profile.json"
 
 
 def state_home() -> Path:
@@ -87,6 +89,18 @@ def run_state(at: Path) -> dict[str, Any]:
 
 def keep_run(at: Path, **state: Any) -> None:
     _kept(at / RUN, json.dumps({**run_state(at), **state}, indent=1).encode())
+
+
+def keep_profile(at: Path, kept: dict[str, Any]) -> None:
+    _kept(at / PROFILE, json.dumps(kept, separators=(",", ":")).encode())
+
+
+def kept_profile(at: Path) -> dict[str, Any] | None:
+    try:
+        got = json.loads((at / PROFILE).read_text())
+    except (OSError, ValueError):
+        return None
+    return got if isinstance(got, dict) and isinstance(got.get("tip"), str) else None
 
 
 def sent(at: Path, name: str, body: bytes) -> Path:
@@ -160,4 +174,17 @@ def awake(pid: int) -> str | None:
     return Path(tool).name
 
 
-__all__ = ["JOURNAL", "Run", "awake", "fingerprint", "home", "keep_run", "repo_key", "run_state", "sent", "state_home"]
+__all__ = [
+    "JOURNAL",
+    "Run",
+    "awake",
+    "fingerprint",
+    "home",
+    "keep_profile",
+    "keep_run",
+    "kept_profile",
+    "repo_key",
+    "run_state",
+    "sent",
+    "state_home",
+]

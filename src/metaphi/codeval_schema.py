@@ -49,9 +49,20 @@ KNOWN = frozenset(
 class Refused(errors.MetaphiError):
     """A body that does not fit the schema; nothing was sent."""
 
-    def __init__(self, where: str, why: str):
-        super().__init__(f"kennet codeval refused to send {where}: {why}", code="schema_refused")
+    def __init__(self, where: str, why: str, done: str = "send"):
+        super().__init__(f"kennet codeval refused to {done} {where}: {why}", code="schema_refused")
         self.where, self.why = where, why
+
+
+@functools.cache
+def _pattern(pattern: str) -> re.Pattern[str]:
+    """A JSON Schema pattern as Python reads it: its `$` is the end of the value, which in Python is `\\Z` (Python's
+    `$` also matches before a final newline)."""
+    return re.compile(re.sub(r"(?<!\\)\$", r"\\Z", pattern))
+
+
+def _matches(pattern: str, value: str) -> bool:
+    return _pattern(pattern).search(value) is not None
 
 
 @functools.cache
@@ -108,7 +119,7 @@ def _check(s: dict[str, Any], v: Any, at: str) -> None:
     if isinstance(v, str):
         if not _bounded(s):
             raise Refused(at, "free text is never sent")
-        if "pattern" in s and not re.search(s["pattern"], v):
+        if "pattern" in s and not _matches(s["pattern"], v):
             raise Refused(at, "it does not match the schema's pattern")
     elif isinstance(v, (int, float)) and not isinstance(v, bool):
         if "minimum" in s and v < s["minimum"]:
@@ -210,7 +221,7 @@ def _object(s: dict[str, Any], v: dict[str, Any], at: str) -> None:
         if k in props:
             _check(props[k], x, where)
             continue
-        matched = [p for p in s.get("patternProperties", {}) if re.search(p, k)]
+        matched = [p for p in s.get("patternProperties", {}) if _matches(p, k)]
         if matched:
             for p in matched:
                 _check(s["patternProperties"][p], x, where)

@@ -1,4 +1,4 @@
-"""`kennet codeval`: measure a repository here and send Metaphi AI typed measurements, never code, logs or names.
+"""`kennet codeval`: measure a repository here and send Metaphi AI typed measurements (see `SENDS`).
 
 The client holds no judgement of its own. It reads the repository's git metadata into the closed profile
 (`codeval_schema`), sends it, and does what the server's answer says: build and test the commits it names, swap the
@@ -43,9 +43,10 @@ except ImportError:  # Python 3.10
 
 PROFILE = schema.PROFILE
 RESULTS = schema.RESULTS
-TZ_MOST = 23 * 60 + 59
-MAX_BLOB = 2_000_000
+TZ_MOST = 23 * 60 + 59  # format: the widest zone a clock can have, in minutes
+MAX_BLOB = 2_000_000  # size: a file larger than this is not read for its counts
 MAX_BLOBS = 64
+REVEAL_FLOOR = 1024  # privacy floor: a blob id is revealed only for a source file of at least 1 KiB
 
 SOURCE = frozenset(
     [
@@ -202,8 +203,8 @@ KNOWN = frozenset(
     ]
 )
 TEST = re.compile(
-    r"(^|/)(tests?|spec|specs|testdata|testutils?|__tests__|fixtures?|[\w.-]*-tests?(-[\w.-]*)?\.package)(/|$)"
-    r"|Tests?\.class(/|\.st$)|Tests?\.(java|php|cs|kt|groovy)$|_test\.|\.test\.|\.spec\.|(^|/)test_|tests?\.[a-z]+$",
+    r"(^|/)(tests?|spec|specs|testdata|testutils?|__tests__|fixtures?|[\w.-]*-tests?(-[\w.-]*)?\.package)(/|\Z)"
+    r"|Tests?\.class(/|\.st\Z)|Tests?\.(java|php|cs|kt|groovy)\Z|_test\.|\.test\.|\.spec\.|(^|/)test_|tests?\.[a-z]+\Z",
     re.IGNORECASE,
 )
 VENDORED = re.compile(r"(^|/)(vendor|node_modules|third_party|external|deps)/", re.IGNORECASE)
@@ -222,7 +223,7 @@ PREFIX = re.compile(r"^(feat|fix|refactor|perf|test|docs|build|ci|chore|style|re
 HEX_RUN = re.compile(r"\b[0-9a-fA-F]{7,}\b")
 WORD = re.compile(r"[^\W_]+")
 PATH_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
-IDENT = re.compile(rb"[A-Za-z_][A-Za-z0-9_]{2,}")
+IDENT = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*")
 TEST_FN = re.compile(
     r"(^[ \t]*func\s+(Test|Benchmark|test)\w*\(|^[ \t]*def\s+test_|@(Test|ParameterizedTest|RepeatedTest|TestFactory)\b"
     r"|function\s+test\w*\(|#\[(tokio::)?test\]|\[(Test|Fact|Theory|TestMethod|DataTestMethod|TestCase)\b"
@@ -259,7 +260,7 @@ LICENSES = (
     ("Unlicense", b"released into the public domain"),
 )
 KNOWN_EXT = SOURCE | DOC | CONFIG | DATA
-GIT_FLOOR = (2, 32)
+GIT_FLOOR = (2, 32)  # build mechanics: the oldest git whose output this reads
 _ENV = {
     **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
     "GIT_NO_LAZY_FETCH": "1",
@@ -324,7 +325,7 @@ def _zone(raw: str) -> tuple[int, bool]:
 
 def _stamp(line: str | None, who: str) -> dict[str, Any]:
     """`<who>_time`, `<who>_tz` and `<who>_tz_neg0` from a raw `author`, `committer` or `tagger` header value."""
-    m = re.search(r" (-?\d+) ([+-]\d{4}|\S+)$", line or "")
+    m = re.search(r" (-?\d+) ([+-]\d{4}|\S+)\Z", line or "")
     if not m:
         return {f"{who}_time": 0, f"{who}_tz": 0, f"{who}_tz_neg0": False}
     tz, neg0 = _zone(m[2])
@@ -350,7 +351,11 @@ def _headers(repo: Path, objects: list[str], *names: str) -> dict[str, dict[str,
     for obj in objects:
         nl = data.index(b"\n", at)
         head = data[at:nl].split()
-        size = int(head[2]) if len(head) == 3 else 0
+        if len(head) != 3:  # "<id> missing": a shallow or partial clone that does not hold the object
+            at = nl + 1
+            out[obj] = {}
+            continue
+        size = int(head[2])
         body = data[nl + 1 : nl + 1 + size]
         at = nl + 1 + size + 1
         fields: dict[str, str] = {}
@@ -419,6 +424,20 @@ def keyed(key: bytes, value: str) -> str:
     return hmac.new(key, value.encode("utf-8", "surrogateescape"), hashlib.sha256).hexdigest()[:16]
 
 
+KEY_LABEL = "kennet-codeval-key"
+
+
+def key_id(key: bytes) -> str:
+    """Which key this machine holds for the repository, without the key: the HMAC of a fixed label under it. The server
+    holds a run to the machine that started it by this."""
+    return keyed(key, KEY_LABEL)
+
+
+def _held(model: str, field: str) -> bool:
+    """Whether the vendored schema's `model` has `field`: a field is sent only once the server's schema holds it."""
+    return field in schema.defs()[model]["properties"]
+
+
 def _subject_key(subject: str, key: bytes) -> str:
     said = HEX_RUN.sub("", TICKET.sub("", subject)).lower()
     return keyed(key, " ".join(re.sub(r"\d", "0", said).split()))
@@ -460,7 +479,7 @@ def _commits(
         sha = sha.strip()
         back = REVERTS.search(msg)
         subject, *body = msg.split("\n")
-        words[order[sha]] = {w.lower() for w in WORD.findall(msg) if len(w) >= 4}
+        words[order[sha]] = {w.lower() for w in WORD.findall(msg)}
         raw_head = said.get(sha, {})
         commits.append(
             {
@@ -492,7 +511,7 @@ def _commits(
     return commits
 
 
-TRAILER_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+TRAILER_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 
 
 TRAILER_KEYS = frozenset(
@@ -724,11 +743,17 @@ def _content(body: bytes, ext: str, kind: str, resolves: Callable[[str, str], bo
 
 
 def _resolver(tip: list[str]) -> Callable[[str, str], bool]:
-    tails, leaves = set(), set()
+    """Whether an import names something at the tip: the import's whole path is the end of a tip file or folder path
+    (`com.acme.Ledger` and `src/com/acme/Ledger.java`), or a whole tip path is the end of the import's
+    (`github.com/acme/core/billing` and `billing/`). A fact about the two paths, nothing weighed."""
+    tails, wholes, leaves = set(), set(), set()
     for path in tip:
         parts = os.path.splitext(path)[0].split("/")
         leaves.add(parts[-1].upper())
-        tails.update("/".join(parts[i:]) for i in range(len(parts)))
+        for end in range(1, len(parts) + 1):
+            whole = parts[:end]
+            wholes.add("/".join(whole))
+            tails.update("/".join(whole[i:]) for i in range(len(whole)))
 
     def resolves(name: str, ext: str) -> bool:
         if ext in ("cbl", "cob", "cpy"):
@@ -743,9 +768,7 @@ def _resolver(tip: list[str]) -> Callable[[str, str], bool]:
             else os.path.splitext(q)[0]
         )
         parts = q.split("/")
-        return any(
-            "/".join(parts[i:]) in tails for i in range(len(parts)) if len(parts) - i >= (2 if len(parts) > 2 else 1)
-        )
+        return q in tails or any("/".join(parts[i:]) in wholes for i in range(len(parts)))
 
     return resolves
 
@@ -780,49 +803,7 @@ def _git_ready() -> None:
         )
 
 
-SERVICE_IMAGES = frozenset(
-    [
-        "postgres",
-        "mysql",
-        "mariadb",
-        "redis",
-        "mongo",
-        "memcached",
-        "rabbitmq",
-        "elasticsearch",
-        "cassandra",
-        "zookeeper",
-        "couchdb",
-        "neo4j",
-        "influxdb",
-        "nats",
-        "nginx",
-        "httpd",
-        "consul",
-        "vault",
-        "alpine",
-        "ubuntu",
-        "debian",
-        "busybox",
-        "python",
-        "node",
-        "golang",
-        "openjdk",
-        "eclipse-temurin",
-        "ruby",
-        "php",
-        "rust",
-        "gcc",
-        "sonarqube",
-        "registry",
-        "localstack",
-        "minio",
-        "kafka",
-        "solr",
-        "traefik",
-        "haproxy",
-    ]
-)
+SERVICE_IMAGES = frozenset(schema.defs()["Env"]["properties"]["service_images"]["items"]["enum"])
 """Official images a service may be named by; any other image is counted, never named."""
 
 
@@ -834,14 +815,14 @@ def _env(env: dict[str, Any]) -> dict[str, Any]:
 
 
 AGENT_FILES = (
-    ("agents_md", re.compile(r"(^|/)AGENTS\.md$", re.IGNORECASE)),
+    ("agents_md", re.compile(r"(^|/)AGENTS\.md\Z", re.IGNORECASE)),
     ("claude_md", re.compile(r"(^|/)CLAUDE(\.local)?\.md$|(^|/)\.claude/", re.IGNORECASE)),
     ("gemini_md", re.compile(r"(^|/)GEMINI\.md$|(^|/)\.gemini/", re.IGNORECASE)),
     ("copilot_instructions", re.compile(r"(^|/)copilot-instructions\.md$|(^|/)\.github/instructions/")),
     ("cursor_rules", re.compile(r"(^|/)\.cursorrules$|(^|/)\.cursor/rules/")),
     ("windsurf_rules", re.compile(r"(^|/)\.windsurfrules$|(^|/)\.windsurf/rules/")),
-    ("aider_conf", re.compile(r"(^|/)\.aider\.conf\.ya?ml$")),
-    ("mcp_config", re.compile(r"(^|/)\.mcp\.json$|(^|/)\.(cursor|vscode)/mcp\.json$")),
+    ("aider_conf", re.compile(r"(^|/)\.aider\.conf\.ya?ml\Z")),
+    ("mcp_config", re.compile(r"(^|/)\.mcp\.json\Z|(^|/)\.(cursor|vscode)/mcp\.json\Z")),
 )
 
 
@@ -849,7 +830,7 @@ def _agents(paths: set[str]) -> dict[str, bool]:
     return {name: any(pattern.search(p) for p in paths) for name, pattern in AGENT_FILES}
 
 
-PUBLIC_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}")
+PUBLIC_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}\Z")
 NPM_REGISTRY = "https://registry.npmjs.org/"
 CRATES = "registry+https://github.com/rust-lang/crates.io-index"
 PYPI = ("https://pypi.org/simple", "https://pypi.org/simple/")
@@ -875,7 +856,8 @@ def _npm(body: bytes) -> Iterator[tuple[str, bool]]:
             continue
         name = key.rsplit("node_modules/", 1)[1]
         resolved = pkg.get("resolved")
-        yield name.split("/", 1)[-1], isinstance(resolved, str) and resolved.startswith(NPM_REGISTRY)
+        # A scoped package (@scope/name) is counted, never named: a scope is an organization's own.
+        yield name, not name.startswith("@") and isinstance(resolved, str) and resolved.startswith(NPM_REGISTRY)
 
 
 def _cargo(body: bytes) -> Iterator[tuple[str, bool]]:
@@ -884,11 +866,48 @@ def _cargo(body: bytes) -> Iterator[tuple[str, bool]]:
             yield pkg["name"], pkg["source"] == CRATES
 
 
-def _poetry(body: bytes) -> Iterator[tuple[str, bool]]:
+def _poetry(body: bytes, own_index: bool = False) -> Iterator[tuple[str, bool]]:
+    """poetry.lock: a package with no source came from the default index, which is PyPI unless one of the
+    organization's own is configured (`own_index`); then it is counted, never named."""
     for pkg in _toml(body).get("package") or []:
         if isinstance(pkg, dict) and isinstance(pkg.get("name"), str):
             source = pkg.get("source")
-            yield pkg["name"], not source or (isinstance(source, dict) and source.get("url") in PYPI)
+            yield (
+                pkg["name"],
+                (not source and not own_index) or (isinstance(source, dict) and source.get("url") in PYPI),
+            )
+
+
+PIP_ENV = ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL")
+PIP_FILES = ("pip.conf", "pip.ini", ".pip/pip.conf", ".config/pip/pip.conf", "Library/Application Support/pip/pip.conf")
+POETRY_FILES = (".config/pypoetry/config.toml", "Library/Application Support/pypoetry/config.toml")
+
+
+def _own_index(tree: dict[str, tuple[str, str, int]], read: Callable[[str], bytes | None]) -> bool:
+    """Whether Python packages here may come from an index other than PyPI: the repository's `[[tool.poetry.source]]`,
+    `poetry.toml` repositories or pip config, the environment's pip index, or this user's pip or Poetry config."""
+    if any(os.environ.get(k) for k in PIP_ENV) or any(k.startswith("POETRY_REPOSITORIES_") for k in os.environ):
+        return True
+    pyproject = read("pyproject.toml") if "pyproject.toml" in tree else None
+    if pyproject and ((_toml(pyproject).get("tool") or {}).get("poetry") or {}).get("source"):
+        return True
+    if "poetry.toml" in tree and (body := read("poetry.toml")) and _toml(body).get("repositories"):
+        return True
+    if any(f in tree and b"index-url" in (read(f) or b"") for f in ("pip.conf", "pip.ini")):
+        return True
+    home = Path.home()
+    mine = [Path(os.environ["PIP_CONFIG_FILE"])] if os.environ.get("PIP_CONFIG_FILE") else []
+    mine += [home / f for f in PIP_FILES[2:]] + [Path("/etc/pip.conf")]
+    poetry = [Path(os.environ["POETRY_CONFIG_DIR"]) / "config.toml"] if os.environ.get("POETRY_CONFIG_DIR") else []
+    poetry += [home / f for f in POETRY_FILES]
+
+    def said(path: Path, word: bytes) -> bool:
+        try:
+            return word in path.read_bytes()
+        except OSError:
+            return False
+
+    return any(said(f, b"index-url") for f in mine) or any(said(f, b"repositories") for f in poetry)
 
 
 def _uv(body: bytes) -> Iterator[tuple[str, bool]]:
@@ -913,11 +932,11 @@ def _gems(body: bytes) -> Iterator[tuple[str, bool]]:
 
 
 LOCKFILES = (
-    ("npm", re.compile(r"(^|/)package-lock\.json$"), _npm),
-    ("cargo", re.compile(r"(^|/)Cargo\.lock$"), _cargo),
-    ("pypi", re.compile(r"(^|/)poetry\.lock$"), _poetry),
-    ("pypi", re.compile(r"(^|/)uv\.lock$"), _uv),
-    ("rubygems", re.compile(r"(^|/)Gemfile\.lock$"), _gems),
+    ("npm", re.compile(r"(^|/)package-lock\.json\Z"), _npm),
+    ("cargo", re.compile(r"(^|/)Cargo\.lock\Z"), _cargo),
+    ("pypi", re.compile(r"(^|/)poetry\.lock\Z"), _poetry),
+    ("pypi", re.compile(r"(^|/)uv\.lock\Z"), _uv),
+    ("rubygems", re.compile(r"(^|/)Gemfile\.lock\Z"), _gems),
 )
 """Lockfiles whose entries say where each dependency resolved from. A name is sent only for one resolved from the
 ecosystem's public registry; any other (a private registry, a path, a git URL) is counted, never named."""
@@ -926,12 +945,13 @@ ecosystem's public registry; any other (a private registry, a path, a git URL) i
 def _dependencies(tree: dict[str, tuple[str, str, int]], read: Callable[[str], bytes | None]) -> tuple[list, int]:
     named: set[tuple[str, str]] = set()
     private: set[tuple[str, str]] = set()
+    own_index = _own_index(tree, read)
     for path in sorted(tree):
         if VENDORED.search(path):
             continue
         for eco, pattern, parse in LOCKFILES:
             if pattern.search(path) and (body := read(path)) is not None:
-                for name, public in parse(body):
+                for name, public in parse(body, own_index) if parse is _poetry else parse(body):
                     low = name.lower()
                     if public and PUBLIC_NAME.fullmatch(low):
                         named.add((eco, low))
@@ -1028,10 +1048,16 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
             order=order,
             start=start,
             paths={row["file"]: path for path, row in rows.items() if row["at_tip"]},
+            revealable=sorted(
+                row["file"]
+                for row in rows.values()
+                if row["at_tip"] and row["kind"] == "source" and row.get("bytes", 0) >= REVEAL_FLOOR
+            ),
         )
     return {
         "schema": PROFILE,
         "cli": __version__,
+        **({"key_id": key_id(key)} if _held("Profile", "key_id") else {}),
         "tip": tip,
         "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split()[:64],
         "git": {
@@ -1063,7 +1089,7 @@ SKIPPED_FIX = {
 }
 
 
-_URL = re.compile(r"^(?:(?:https?|ssh|git|file)://\S+|[\w.-]+@[\w.-]+:\S+)$")
+_URL = re.compile(r"(?:(?:https?|ssh|git|file)://\S+|[\w.-]+@[\w.-]+:\S+)\Z")
 
 
 def is_url(given: str) -> bool:
@@ -1133,18 +1159,21 @@ def _name_of(given: str, n: int, used: set[str]) -> str:
 DOCS = "https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected"
 
 
-def disclosure(paths: list[str]) -> tuple[str, str]:
+SENDS = (
+    "typed measurements: no source code, logs, file paths, author names or commit text. Public dependency names and "
+    "standard build-file names are included."
+)
+"""What leaves the machine, said the same way everywhere the CLI says it."""
+
+
+def disclosure(paths: list[str]) -> tuple[str, ...]:
     """What every run says first, before it reads or sends anything."""
-    said = " ".join(paths)
-    return (
-        f"CodeVal measures {said} here and sends Metaphi AI typed measurements, never source code, logs or names.",
-        f"Exactly what: {DOCS}",
-    )
+    return (f"CodeVal measures {' '.join(paths)} here and sends Metaphi AI {SENDS} Exactly what: {DOCS}",)
 
 
 class Local:
     """One repository as this machine holds it: what the measurements need and what is never sent (its paths, its
-    commit ids, its key)."""
+    commit ids, its key). `kept` is bound to the profile filed for the run: its tip, commit order and ids."""
 
     def __init__(self, name: str, given: str, path: Path, roots: list[str]):
         self.name, self.given, self.path, self.roots = name, given, path, roots
@@ -1191,6 +1220,32 @@ def profile(local: Local) -> dict[str, Any]:
     return got
 
 
+def file(local: Local) -> None:
+    """Keep what the filed profile bound the run to, so every later batch measures against it."""
+    codeval_runs.keep_profile(local.home, {k: v for k, v in local.kept.items() if k != "path"})
+
+
+def resumed(local: Local) -> bool:
+    """Bind `local` to the profile its run was filed with, never a new one: the tip may have moved since, and the old
+    commits are still in git. False when nothing was filed here. Stops (exit 6) when the filed tip is gone, as after a
+    history rewrite."""
+    kept = codeval_runs.kept_profile(local.home)
+    if not kept:
+        return False
+    tip = kept["tip"]
+    if _ask(local.path, "cat-file", "-t", tip) != "commit":
+        raise errors.MetaphiError(
+            f"{local.name}: the commit this run was filed at ({tip[:12]}) is no longer in the repository, so the run "
+            "cannot go on",
+            code="profile_gone",
+            next_step=f"fetch the commit {tip[:12]} back into this clone, then run the same command again",
+        )
+    kept["order"] = {k: int(v) for k, v in kept["order"].items()}
+    kept["paths"] = {int(k): v for k, v in kept["paths"].items()}
+    local.kept = {**kept, "path": local.path}
+    return True
+
+
 def packed(doc: dict[str, Any]) -> bytes:
     return json.dumps(doc, separators=(",", ":"), sort_keys=True).encode()
 
@@ -1207,6 +1262,10 @@ def _named(e: errors.MetaphiError) -> errors.MetaphiError:
             "once your organization does"
         )
         e.next_step = "kennet login"
+    elif e.code == "key_mismatch":
+        e.message = "this run continues on the machine that started it; nothing was sent"
+    elif e.code == "profile_mismatch":
+        e.message = "the server holds this run to the profile it was filed with; nothing was sent"
     return e
 
 
@@ -1257,13 +1316,28 @@ GZIP = {"content-encoding": "gzip", "content-type": "application/json"}
 def _answer(got: dict[str, Any]) -> dict[str, Any]:
     """The server's answer, its instructions checked against the schema before any is followed."""
     if isinstance(got.get("next"), dict):
-        nxt = got["next"]
-        schema.check("Next", nxt)
-        held = schema.defs()["Results"]["properties"]
-        for k in ("commits", "mutants", "blobs"):
-            if len(nxt[k]) > held[k]["maxItems"]:
-                raise schema.Refused(f"Next.{k}", f"a batch answers at most {held[k]['maxItems']}")
+        instructed(got["next"])
     return got
+
+
+def instructed(nxt: Any) -> None:
+    """Refuse instructions the schema does not hold, before anything is run: the Next schema itself (its lists, runs
+    and run_minutes within their maxima), and no more commits, mutants, blobs or runs than a Results can answer."""
+    schema.check("Next", nxt)
+    held = schema.defs()["Results"]["properties"]
+    for k in ("commits", "mutants", "blobs"):
+        if len(nxt[k]) > held[k]["maxItems"]:
+            raise schema.Refused(f"Next.{k}", f"a batch answers at most {held[k]['maxItems']}", "follow")
+    if nxt["runs"] > (most := schema.defs()["Side"]["properties"]["tests"]["maxItems"]):
+        raise schema.Refused("Next.runs", f"a side answers at most {most} test runs", "follow")
+
+
+def revealable(local: Local, ids: list[int]) -> None:
+    """The privacy floor on blob ids, held here whatever the server asks: only a source file at the tip of at least
+    1 KiB. Any other id is refused before anything is run."""
+    allowed = set(local.kept.get("revealable") or [])
+    if bad := [i for i in ids if i not in allowed]:
+        raise schema.Refused("Next.blobs", f"file {bad[0]} is not a source file of at least 1 KiB", "follow")
 
 
 def send_profile(
@@ -1368,6 +1442,17 @@ def side(raw: dict[str, Any], key: bytes, part: str = "Side") -> dict[str, Any]:
                 out[k] = raw[k]
         if raw.get("coverage") is not None:
             out["coverage"] = raw["coverage"][: schema.defs()["Tip"]["properties"]["coverage"]["anyOf"][0]["maxItems"]]
+    return out
+
+
+def tip(raw: dict[str, Any] | None, key: bytes) -> dict[str, Any]:
+    """The tip as sent, never nothing when it was asked for: when it did not get as far as a passing build, `error`
+    says why, as the class its build ended in (`unknown` when it could not be run here)."""
+    out = side(raw, key, "Tip") if raw else {"tests": []}
+    build = out.get("build")
+    why = build["class"] if build and build["class"] != "ok" else None if out["tests"] else "unknown"
+    if why and _held("Tip", "error"):
+        out["error"] = why
     return out
 
 
@@ -1664,6 +1749,8 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
     )
     plan = dataclasses.replace(plan, logs=local.home / "logs" / f"batch-{nxt['batch']}")
     kept = local.kept
+    instructed(nxt)
+    revealable(local, nxt["blobs"])
     mutants = [{"file": m["file"], "op": m["op"], "nth": m["nth"]} for m in nxt["mutants"]]
     raw = codebase_checks.run(
         local.path,
@@ -1685,6 +1772,7 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
     out: dict[str, Any] = {
         "schema": RESULTS,
         "cli": __version__,
+        **({"key_id": key_id(local.key)} if _held("Results", "key_id") else {}),
         "rules": extract.rules_hash(),
         "batch": nxt["batch"],
         "machine": machine(bench.box, bench.found[0].image if bench.found else None),
@@ -1708,8 +1796,8 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
             **{k: v for k, v in got.items() if k in ("from", "count", "up", "refused")},
             "took": took(float(got.get("seconds") or 0)),
         }
-    if nxt["tip"] and raw.get("tip"):
-        out["tip"] = side(raw["tip"], key, "Tip")
+    if nxt["tip"]:
+        out["tip"] = tip(raw.get("tip"), key)
     out["took"] = took(time.monotonic() - began)
     return out
 
@@ -1717,8 +1805,9 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
 def blobs(local: Local, ids: list[int]) -> list[dict[str, Any]]:
     """The raw git blob ids at the tip of the files the server names."""
     tree, paths = codebase_checks._tree(local.path, local.tip), local.kept.get("paths") or {}
+    allowed = set(local.kept.get("revealable") or [])
     return [
         {"file": i, "blob": tree[paths[i]][1]}
         for i in ids
-        if paths.get(i) in tree and re.fullmatch(r"[0-9a-f]{40}", tree[paths[i]][1])
-    ][:256]
+        if i in allowed and paths.get(i) in tree and re.fullmatch(r"[0-9a-f]{40}", tree[paths[i]][1])
+    ][:MAX_BLOBS]

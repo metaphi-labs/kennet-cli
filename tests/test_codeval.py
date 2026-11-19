@@ -72,6 +72,7 @@ def repo(tmp_path):
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("METAPHI_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("KENNET_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("METAPHI_API_KEY", "mai_sk_" + "a" * 43)
     for var in ("METAPHI_ACCOUNTS", "METAPHI_API", "METAPHI_ALLOW_CUSTOM_HOST"):
         monkeypatch.delenv(var, raising=False)
@@ -106,6 +107,7 @@ def tested(tmp_path):
     (r / "tests").mkdir(parents=True)
     git(r, "init", "-q", "-b", "main")
     (r / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    (r / "money.py").write_text("".join(f"RATE_{n} = {n}\n" for n in range(120)))
     (r / "tests/test_calc.py").write_text("from calc import *\ndef test_add():\n    assert add(1, 2) == 3\n")
     git(r, "add", ".")
     git(r, "commit", "-qm", "add")
@@ -859,12 +861,13 @@ def _signed_in():
 
 def _next(local_paths: dict, **more) -> dict:
     calc = next(i for i, p in local_paths.items() if p == "calc.py")
+    money = next(i for i, p in local_paths.items() if p == "money.py")
     return {
         "batch": 1,
         "tip": True,
         "commits": [2],
         "mutants": [{"file": calc, "op": "arith", "nth": 0}],
-        "blobs": [calc],
+        "blobs": [money],
         "runs": 2,
         "run_minutes": 5,
         "hours_left": 1.5,
@@ -922,7 +925,7 @@ def test_a_signed_in_run_with_no_terminal_goes_end_to_end(tested, tmp_path, caps
     assert mutant["post"]["tests"][0]["step"] == "test" and sent["rules"] == extract.rules_hash()
     assert all(isinstance(t["took"], int) for t in commit["post"]["tests"]) and isinstance(sent["took"], int)
     assert sent["blobs"] == [
-        {"file": asked["blobs"][0], "blob": codebase_checks._tree(tested, local.tip)["calc.py"][1]}
+        {"file": asked["blobs"][0], "blob": codebase_checks._tree(tested, local.tip)["money.py"][1]}
     ]
     assert sent["tip"]["tests"][0]["passed"] == 2
     wire = gzip.decompress(results.calls[0].request.content).decode()
@@ -963,7 +966,8 @@ def test_a_full_stubbed_run_validates_part_by_part(tested, tmp_path, capsys, mon
     _, local = _profile(tested)
     calc = next(i for i, p in local.kept["paths"].items() if p == "calc.py")
     mutant = {"file": calc, "op": "arith", "nth": 0}
-    asked = _next(local.kept["paths"], commits=[1, 2, 3, 4, 5], mutants=[mutant] * 5, blobs=[calc] * 64)
+    money = next(i for i, p in local.kept["paths"].items() if p == "money.py")
+    asked = _next(local.kept["paths"], commits=[1, 2, 3, 4, 5], mutants=[mutant] * 5, blobs=[money] * 64)
     posted = respx.post(f"{API}/codeval").respond(json={"run": "cv_1", "object": "codeval", "next": asked})
     results = respx.post(f"{API}/codeval/cv_1/results").respond(json={"done": True})
     assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 0
@@ -1178,3 +1182,189 @@ def test_the_client_holds_no_selection_or_scoring():
         r"f\"/codeval/\{\w+\}/(picks|plan|checks|logs|setup|progress)\"",
     ):
         assert not re.search(pattern, code), pattern
+
+
+# -- the review of #13 ------------------------------------------------------------------------------------------------
+
+
+def _holding(monkeypatch, **fields):
+    """The vendored schema with fields the server's next re-export adds: {model: {field: schema}}."""
+    defs = json.loads(json.dumps(schema.defs()))
+    for model, more in fields.items():
+        defs[model]["properties"].update(more)
+    monkeypatch.setattr(schema, "defs", lambda: defs)
+
+
+@respx.mock
+def test_a_run_goes_on_against_its_filed_profile_when_the_tip_moves(tested, tmp_path, capsys, monkeypatch):
+    _signed_in()
+    _, local = _profile(tested)
+    filed_tip, money = local.tip, next(i for i, p in local.kept["paths"].items() if p == "money.py")
+    asked = _next(local.kept["paths"], commits=[], mutants=[])
+    posted = respx.post(f"{API}/codeval").respond(json={"run": "cv_4", "object": "codeval", "next": asked})
+    respx.get(f"{API}/codeval/cv_4").respond(json={"state": "measuring", "next": asked})
+    results = respx.post(f"{API}/codeval/cv_4/results").respond(json={"done": True})
+    command = _command(tmp_path)
+    with monkeypatch.context() as m:
+        m.setattr(codeval, "send_results", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt))
+        assert cli.main(["codeval", str(tested), "--json", "--", command]) == 130
+    (tested / "money.py").write_text("RATE = 0\n" * 200)
+    git(tested, "commit", "-qam", "moved on")
+    capsys.readouterr()
+    assert cli.main(["codeval", str(tested), "--json", "--", command]) == 0
+    assert posted.call_count == 1, "the tip moved: the run goes on, no new profile is filed"
+    (sent,) = _bodies(results)
+    assert sent["blobs"] == [{"file": money, "blob": codebase_checks._tree(tested, filed_tip)["money.py"][1]}]
+    assert "measured against the profile it was filed with" in capsys.readouterr().err
+
+
+@respx.mock
+def test_a_run_whose_filed_tip_was_rewritten_away_stops_for_the_person(tested, tmp_path, capsys, monkeypatch):
+    _signed_in()
+    _, local = _profile(tested)
+    asked = _next(local.kept["paths"], commits=[], mutants=[])
+    respx.post(f"{API}/codeval").respond(json={"run": "cv_5", "object": "codeval", "next": asked})
+    with monkeypatch.context() as m:
+        m.setattr(codeval, "measured", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt))
+        assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 130
+    git(tested, "reset", "-q", "--hard", "HEAD~1")
+    git(tested, "reflog", "expire", "--expire=now", "--all")
+    git(tested, "gc", "-q", "--prune=now")
+    capsys.readouterr()
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 6
+    said = json.loads(capsys.readouterr().out)["error"]
+    assert said["code"] == "profile_gone" and "no longer in the repository" in said["message"]
+
+
+@respx.mock
+def test_blob_ids_are_revealed_only_for_source_files_of_at_least_1_kib(tested, tmp_path, monkeypatch):
+    _signed_in()
+    _, local = _profile(tested)
+    calc = next(i for i, p in local.kept["paths"].items() if p == "calc.py")
+    test = next(i for i, p in local.kept["paths"].items() if p == "tests/test_calc.py")
+    ran = []
+    monkeypatch.setattr(codebase_checks, "run", lambda *a, **k: ran.append(a) or {})
+    for small in (calc, test):
+        respx.post(f"{API}/codeval").respond(
+            json={"run": "cv_6", "object": "codeval", "next": _next(local.kept["paths"], blobs=[small])}
+        )
+        results = respx.post(f"{API}/codeval/cv_6/results").respond(json={"done": True})
+        codeval_runs.keep_run(local.home, run=None)
+        assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 1
+        assert not ran and not results.called
+    assert codeval.blobs(local, [calc, test]) == []
+
+
+def test_the_tip_says_why_it_failed_rather_than_nothing(monkeypatch):
+    _holding(monkeypatch, Tip={"error": {"anyOf": [{"$ref": "#/$defs/Step/properties/class"}, {"type": "null"}]}})
+    monkeypatch.setitem(
+        schema.defs()["Tip"]["properties"],
+        "error",
+        {"anyOf": [schema.defs()["Step"]["properties"]["class"], {"type": "null"}]},
+    )
+    key = b"k" * 32
+    assert codeval.tip(None, key) == {"tests": [], "error": "unknown"}
+    broke = {"build": {"exit": 1, "seconds": 3, "step": "dep_resolve", "class": "dep_unresolved"}, "tests": []}
+    assert codeval.tip(broke, key)["error"] == "dep_unresolved"
+    ran = {"tests": [{"exit": 0, "seconds": 1, "class": "ok"}]}
+    assert "error" not in codeval.tip(ran, key)
+    for got in (codeval.tip(None, key), codeval.tip(broke, key)):
+        schema.check("Tip", got)
+
+
+@pytest.mark.parametrize(
+    "more, why",
+    [({"runs": 4}, "test runs"), ({"run_minutes": 0}, "below 1"), ({"blobs": list(range(65))}, "at most 64")],
+)
+def test_instructions_beyond_the_schema_are_refused_before_anything_runs(tested, more, why):
+    _, local = _profile(tested)
+    with pytest.raises(schema.Refused, match=why):
+        codeval.instructed(_next(local.kept["paths"], **more))
+
+
+def test_scoped_npm_packages_and_poetry_behind_an_own_index_are_counted_not_named(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for k in ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_CONFIG_FILE", "POETRY_CONFIG_DIR"):
+        monkeypatch.delenv(k, raising=False)
+    lock = {"packages": {"node_modules/@acme/ledger": {"resolved": "https://registry.npmjs.org/@acme/ledger.tgz"}}}
+    poetry = b'[[package]]\nname = "billing-core"\nversion = "1"\n'
+    files = {"package-lock.json": json.dumps(lock).encode(), "poetry.lock": poetry}
+    tree = {p: ("100644", "0" * 40, 1) for p in files}
+    assert codeval._dependencies(tree, files.get) == ([{"eco": "pypi", "name": "billing-core"}], 1)
+    files["pyproject.toml"] = b'[[tool.poetry.source]]\nname = "acme"\nurl = "https://pypi.acme.test/simple"\n'
+    tree["pyproject.toml"] = ("100644", "0" * 40, 1)
+    assert codeval._dependencies(tree, files.get) == ([], 2)
+    del files["pyproject.toml"], tree["pyproject.toml"]
+    monkeypatch.setenv("PIP_INDEX_URL", "https://pypi.acme.test/simple")
+    assert codeval._dependencies(tree, files.get) == ([], 2)
+
+
+def test_the_disclosure_is_one_literal_line():
+    (line,) = codeval.disclosure(["./core", "./ledger"])
+    assert line == (
+        "CodeVal measures ./core ./ledger here and sends Metaphi AI typed measurements: no source code, logs, file "
+        "paths, author names or commit text. Public dependency names and standard build-file names are included. "
+        f"Exactly what: {codeval.DOCS}"
+    )
+
+
+@respx.mock
+def test_the_key_id_names_the_key_without_it_and_a_mismatch_says_where_the_run_goes_on(
+    tested, tmp_path, capsys, monkeypatch
+):
+    held = {"key_id": {"pattern": "^[0-9a-f]{16}$", "type": "string"}}
+    _holding(monkeypatch, Profile=held, Results=held)
+    doc, local = _profile(tested)
+    want = hmac_hex(local.key, "kennet-codeval-key")
+    assert doc["key_id"] == want and local.key.hex() not in json.dumps(doc)
+    schema.check("Profile", doc)
+    _signed_in()
+    asked = _next(local.kept["paths"], commits=[], mutants=[])
+    respx.post(f"{API}/codeval").respond(json={"run": "cv_7", "object": "codeval", "next": asked})
+    results = respx.post(f"{API}/codeval/cv_7/results").respond(
+        409, json={"error": {"type": "invalid_request_error", "code": "key_mismatch", "message": "x"}}
+    )
+    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 1
+    assert _bodies(results)[0]["key_id"] == want
+    assert "this run continues on the machine that started it" in capsys.readouterr().err
+
+
+def hmac_hex(key: bytes, label: str) -> str:
+    import hashlib
+    import hmac
+
+    return hmac.new(key, label.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def test_mssql_is_named_by_the_schemas_word():
+    from metaphi import codebase_env
+
+    assert codebase_env.public("mcr.microsoft.com/mssql/server:2022-latest") == "mcr-mssql"
+    assert codeval._env({"service_images": ["mcr-mssql", "acme-db"], "other_images": 0})["service_images"] == [
+        "mcr-mssql"
+    ]
+
+
+@pytest.mark.parametrize(
+    "name, body",
+    [
+        ("Step", {**STEP, "log": "0" * 64 + "\n"}),
+        ("Step", {**STEP, "codes": ["E0308\n"]}),
+        ("Toolchain", {"tool": "python", "version": "3.12.1\n"}),
+    ],
+)
+def test_a_value_with_a_trailing_newline_is_refused(name, body):
+    with pytest.raises(schema.Refused):
+        schema.check(name, body)
+
+
+def test_value_patterns_end_at_the_end_of_the_value():
+    assert not codeval.is_url("https://git.acme.test/x.git\n") or Path("https://git.acme.test/x.git\n").exists()
+    assert not codeval.TRAILER_KEY.match("signed-off-by\n")
+    assert not codeval.PUBLIC_NAME.match("left-pad\n")
+
+
+def test_headers_pass_over_objects_a_partial_clone_does_not_hold(repo):
+    tip = codeval._text(repo, "rev-parse", "HEAD")
+    got = codeval._headers(repo, ["0" * 40, tip, "f" * 40], "author")
+    assert got["0" * 40] == {} and got["f" * 40] == {} and got[tip]["author"].startswith("Sam Seller")

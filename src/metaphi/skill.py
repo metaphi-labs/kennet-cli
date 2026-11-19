@@ -212,9 +212,12 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `sign_in_required` | `kennet codeval` needs the user's sign-in (exit 3): give them `sign_in.verification_uri` and `sign_in.user_code` word for word, then run `next_step`. `kennet skill show partner` is the CodeVal guide. |
 | `sign_in_pending` | `kennet login --wait` is still waiting for the approval (exit 4): run `next_step` again. |
 | `toolchain_missing`, `test_command_missing` | `kennet codeval` needs the user (exit 6): tell them the message; on their answer run `next_step`. |
+| `profile_gone` | `kennet codeval` needs the user (exit 6): the commit the run was filed at is no longer in the clone, as after a history rewrite. Tell them the message; once that commit is fetched back, run the same command. |
+| `key_mismatch` | `kennet codeval`: this run continues on the machine that started it. Tell the user; nothing was sent. |
+| `profile_mismatch` | `kennet codeval`: the server holds the run to the profile it was filed with; nothing was sent. Tell the user the message with the `request_id`. |
 | `unreadable` | `kennet codeval`: git could not read a repository given. Tell the user; nothing was sent for it. |
 | `bad_wait` | `--wait` takes seconds, 0 or more. |
-| `schema_refused` | `kennet codeval` refused to send a value outside its schema; nothing was sent. Tell the user the message. |
+| `schema_refused` | `kennet codeval` refused to send a value outside its schema, or to follow an instruction outside it (more than a batch can answer, or a blob id below the privacy floor); nothing was sent or run. Tell the user the message. |
 | `confirmation_required` | Nothing was sent. Ask the user; on yes, run `next_step`, the same command with `--yes`. |
 | `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
 | `rate_limited_concurrent`, `rate_limited_daily` | Too many runs at once, or today. Wait for a run to end, or tell the user. |
@@ -403,7 +406,7 @@ PARTNER_NAME = "kennet-partner"
 
 PARTNER_STUB = f"""---
 name: {PARTNER_NAME}
-description: Running CodeVal with the `kennet` CLI, which measures git repositories on this machine and sends Metaphi AI typed measurements, never source code, logs or names; and a mutual NDA with Metaphi AI. Use when the user asks to run CodeVal, mentions `kennet codeval`, `kennet mnda` or metaphi.ai/partners.
+description: Running CodeVal with the `kennet` CLI, which measures git repositories on this machine and sends Metaphi AI typed measurements (no source code, logs, file paths, author names or commit text; public dependency names and standard build-file names are included); and a mutual NDA with Metaphi AI. Use when the user asks to run CodeVal, mentions `kennet codeval`, `kennet mnda` or metaphi.ai/partners.
 ---
 {MARK}
 
@@ -424,8 +427,9 @@ pip install kennet                       # or anywhere with Python 3.10+
 PARTNER_GUIDE = f"""# Kennet CodeVal (kennet {__version__})
 
 Run `kennet codeval <paths> --json` (paths are full git clones or git URLs; add `-- '<command>'` when the user gives
-the command that builds and tests). It measures the repositories here and sends Metaphi AI typed measurements, never
-source code, logs or names; exactly what: https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected. The
+the command that builds and tests). It measures the repositories here and sends Metaphi AI typed measurements: no
+source code, logs, file paths, author names or commit text. Public dependency names and standard build-file names are
+included. Exactly what: https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected. The
 browser sign-in is the user's one step: on exit 3 (`sign_in_required`) give them `sign_in.verification_uri` and
 `sign_in.user_code` word for word, never asking them to paste anything back, then run `next_step`
 (`kennet login --wait 300 --json`; exit 4 means still waiting, run it again) and then the `next_step` it prints. A

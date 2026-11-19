@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any
 
 PATH = Path(__file__).parent / "data" / "codeval_rules.json"
-TAIL = 512_000
+TAIL = 512_000  # size: how much of a log end is read
+TEMPLATE_LINES = 4000  # size: how many last lines of a log templates are tried on
 
 
 @functools.cache
@@ -143,6 +144,12 @@ def _lines(text: str, start: str) -> list[dict]:
 def coded(table: str, code: str | None) -> str:
     """The kind a diagnostic code stands for in the shipped table, else `other`."""
     return pack()["codes"].get(table, {}).get(code or "", "other")
+
+
+def codes() -> list[str]:
+    """Every diagnostic code a body may carry: those the shipped tables hold, and `other`. The server's `Code` enum is
+    made from this list."""
+    return sorted({c for table in pack()["codes"].values() for c in table} | {"other"})
 
 
 def code_word(table: str, code: str | None) -> str:
@@ -382,7 +389,7 @@ def matched(text: str) -> tuple[dict | None, str | None]:
     patterns, templates, _ = _compiled()
     rule = next((r for r, p in patterns if p.search(text)), None)
     if rule is None:
-        lines = text.splitlines()[-4000:]
+        lines = text.splitlines()[-TEMPLATE_LINES:]
         rule = next((t for t, tokens in templates for line in lines if _template(line, tokens)), None)
     kind = None
     if rule and rule["class"] == "compile":
@@ -454,12 +461,14 @@ def _row(
 
 
 def flaky(rows: list[dict[str, Any]]) -> None:
-    """Mark the failed runs of one side `test_flaky` when another run of the same side passed: the same code, the
-    same image, and a different end."""
-    passed = any(r.get("class") == "ok" for r in rows)
+    """Mark a side's failed runs `test_flaky` when another run of the same side passed: the same code, the same image,
+    and a different end. Passed is exit 0 and failed is any other exit; a run stopped at run_minutes has no exit and
+    keeps its class. Nothing else makes a run flaky."""
+    if not any(r.get("exit") == 0 for r in rows):
+        return
     for r in rows:
-        if passed and r.get("exit") is not None and str(r.get("class", "")).startswith("test_"):
-            r["class"] = "test_flaky"
+        if r.get("exit") not in (0, None):
+            r.update({"class": "test_flaky", "compile_kind": None})
 
 
 __all__ = [
@@ -471,6 +480,7 @@ __all__ = [
     "classify",
     "code_word",
     "coded",
+    "codes",
     "codes_in",
     "environmental",
     "flaky",

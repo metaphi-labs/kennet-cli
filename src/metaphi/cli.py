@@ -24,7 +24,9 @@ import httpx
 from metaphi import __version__, accounts, agents, config, errors, palette, skill, update
 
 FAILED, AUTH, LATER, UPGRADE, NEEDS_PERSON = 1, 3, 4, 5, 6
-PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing"])  # kennet codeval: install, or give a command
+PERSON_MUST_ACT = frozenset(
+    ["toolchain_missing", "test_command_missing", "profile_gone"]
+)  # kennet codeval: install, or give a command
 
 
 def status(error: errors.MetaphiError) -> int:
@@ -515,10 +517,9 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
     awake = False
     with tempfile.TemporaryDirectory(prefix="kennet-clone-") as scratch:
         for local in codeval.opened(paths, Path(scratch), say):
-            say(f"Reading {local.name}\u2026")
-            doc = codeval.profile(local)
             kept = codeval_runs.run_state(local.home)
-            if kept.get("run") and kept.get("tip") == local.tip:
+            if kept.get("run") and codeval.resumed(local):
+                say(f"{local.name}: going on with {kept['run']}, measured against the profile it was filed with")
                 got = codeval.get_run(kept["run"])
                 got = (
                     {"run": kept["run"], "decision": "decline"}
@@ -529,7 +530,10 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                     }
                 )
             else:
+                say(f"Reading {local.name}\u2026")
+                doc = codeval.profile(local)
                 got, _path = codeval.send_profile(local, doc)
+                codeval.file(local)
                 codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip)
             run = got["run"]
             row = {"name": local.name, "run": run, "sent": str(local.home / "sent")}
@@ -1460,7 +1464,7 @@ examples:
   kennet twin trace.json --out twins/    write the twin into a directory
   kennet twins list                  your organization's twins, newest first
   kennet twins wait twin_...         come back for a twin: wait until it ends, write its file
-  kennet codeval ./core <git-url>    measure git repositories here; send Metaphi AI typed measurements, never code
+  kennet codeval ./core <git-url>    measure git repositories here; send Metaphi AI typed measurements
   kennet delivery list               the task sets your organization holds
   kennet pull <name>@<version>       fetch one into ./<name>-<version>; again, only what differs
   kennet verify ./<name>-<version>   check it against its lock, offline
@@ -1846,7 +1850,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser(
         "codeval",
         usage="kennet codeval [<path-or-url> ...] [--json] [--no-browser] [-- <build-and-test command>]",
-        help="measure git repositories here and send Metaphi AI typed measurements, never source code, logs or names",
+        help="measure git repositories here and send Metaphi AI "
+        "typed measurements: no source code, logs, file paths, author names or commit text",
         epilog=CODEVAL_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

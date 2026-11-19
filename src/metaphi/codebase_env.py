@@ -14,23 +14,23 @@ from typing import Any
 import yaml
 
 CI = (
-    ("github", re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")),
-    ("gitlab", re.compile(r"^\.gitlab-ci\.ya?ml$")),
-    ("circleci", re.compile(r"^\.circleci/config\.ya?ml$")),
-    ("jenkins", re.compile(r"(^|/)Jenkinsfile$")),
-    ("azure", re.compile(r"^(azure-pipelines|\.azure-pipelines/[^/]+)\.ya?ml$")),
-    ("bitbucket", re.compile(r"^bitbucket-pipelines\.ya?ml$")),
-    ("travis", re.compile(r"^\.travis\.ya?ml$")),
-    ("buildkite", re.compile(r"^\.buildkite/[^/]+\.ya?ml$")),
-    ("drone", re.compile(r"^\.drone\.ya?ml$")),
-    ("woodpecker", re.compile(r"^\.woodpecker(\.ya?ml|/[^/]+\.ya?ml)$")),
+    ("github", re.compile(r"^\.github/workflows/[^/]+\.ya?ml\Z")),
+    ("gitlab", re.compile(r"^\.gitlab-ci\.ya?ml\Z")),
+    ("circleci", re.compile(r"^\.circleci/config\.ya?ml\Z")),
+    ("jenkins", re.compile(r"(^|/)Jenkinsfile\Z")),
+    ("azure", re.compile(r"^(azure-pipelines|\.azure-pipelines/[^/]+)\.ya?ml\Z")),
+    ("bitbucket", re.compile(r"^bitbucket-pipelines\.ya?ml\Z")),
+    ("travis", re.compile(r"^\.travis\.ya?ml\Z")),
+    ("buildkite", re.compile(r"^\.buildkite/[^/]+\.ya?ml\Z")),
+    ("drone", re.compile(r"^\.drone\.ya?ml\Z")),
+    ("woodpecker", re.compile(r"^\.woodpecker(\.ya?ml|/[^/]+\.ya?ml)\Z")),
     ("teamcity", re.compile(r"^\.teamcity/")),
     ("bamboo", re.compile(r"^bamboo-specs/")),
-    ("cloudbuild", re.compile(r"^cloudbuild\.ya?ml$")),
+    ("cloudbuild", re.compile(r"^cloudbuild\.ya?ml\Z")),
 )
-COMPOSE = re.compile(r"(^|/)(docker-)?compose[\w.-]*\.ya?ml$", re.IGNORECASE)
-DOCKERFILE = re.compile(r"(^|/)(Dockerfile|Containerfile)([.\w-]*)$|\.dockerfile$", re.IGNORECASE)
-DEVCONTAINER = re.compile(r"^\.devcontainer(\.json$|/)")
+COMPOSE = re.compile(r"(^|/)(docker-)?compose[\w.-]*\.ya?ml\Z", re.IGNORECASE)
+DOCKERFILE = re.compile(r"(^|/)(Dockerfile|Containerfile)([.\w-]*)\Z|\.dockerfile\Z", re.IGNORECASE)
+DEVCONTAINER = re.compile(r"^\.devcontainer(\.json\Z|/)")
 VENDORED = re.compile(r"(^|/)(vendor|node_modules|third_party|external|deps|testdata)/", re.IGNORECASE)
 WAIT_SECONDS = 240
 
@@ -42,10 +42,16 @@ def _yaml(body: bytes | None) -> Any:
         return None
 
 
+REGISTRY_IMAGES = {"mcr.microsoft.com/mssql/server": "mcr-mssql"}
+"""Official images outside Docker Hub, by the word the schema names them with."""
+
+
 def public(image: Any) -> str | None:
     if not isinstance(image, str) or "$" in image or not image.strip():
         return None
     name = image.strip().split("@")[0].rsplit(":", 1)[0] if ":" in image.split("/")[-1] else image.strip().split("@")[0]
+    if name.lower() in REGISTRY_IMAGES:
+        return REGISTRY_IMAGES[name.lower()]
     for prefix in ("docker.io/library/", "library/", "docker.io/"):
         name = name.removeprefix(prefix)
     return name.lower() if re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", name) else None

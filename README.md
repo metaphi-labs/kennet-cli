@@ -376,8 +376,7 @@ done. It finds the build and test from the repository's CI configuration and bui
 test command after `--`, as one shell line. Every run starts by saying:
 
 ```
-CodeVal measures ./core here and sends Metaphi AI typed measurements, never source code, logs or names.
-Exactly what: https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected
+CodeVal measures ./core here and sends Metaphi AI typed measurements: no source code, logs, file paths, author names or commit text. Public dependency names and standard build-file names are included. Exactly what: https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected
 ```
 
 ### What is sent
@@ -398,7 +397,7 @@ The profile, sent once per repository:
 | `licenses` | the licence families found, from a fixed list |
 | `env` | which CI systems, Docker Compose, devcontainer and Dockerfiles are present, as counts and words from a fixed list of public service images |
 | `agents` | which coding-agent files are present (`AGENTS.md`, `CLAUDE.md`, `.cursorrules` and the like), yes or no |
-| `deps`, `private_deps` | dependencies a lockfile resolved from a public registry, by ecosystem and name; a count of the rest |
+| `deps`, `private_deps` | dependencies a lockfile resolved from a public registry, by ecosystem and name; a count of the rest, which takes every scoped npm package and, when an index of your own is configured (`[[tool.poetry.source]]`, Poetry or pip config, `PIP_INDEX_URL`), every Python package with no source of its own |
 | `authors` | per author a number, whether it is a bot, and a number standing for its email domain |
 | `dirs` | per folder a number and its parent's number |
 | `files` | per file a number, its folder's number, its extension and well-known name from fixed lists, its size, line, comment, indent and token counts, whether it is a CI file, counts of tests, mocks, imports and operators by class, and an HMAC of its content |
@@ -413,7 +412,7 @@ The results, one per batch:
 | `commands` | whether the build and test came from CI, build files or you, each as an HMAC |
 | `services` | how many Compose services were asked for, how many started, how long they took (as a bucket), how many were refused |
 | `tip`, `commits`, `mutants` | per build and test run: the step it reached and the class it ended in from fixed lists, the kind of compile error and the compiler codes the shipped tables name (any other as `other`), the exit code, how long it took as a bucket, the sha256 of its log (the log stays here); per test run also counts of tests reported and passed and each test's outcome under the HMAC of its id; for the tip only, coverage per file number, peak memory and the bytes installed |
-| `blobs` | the git ids of the files Metaphi AI named by number |
+| `blobs` | the git ids of the files Metaphi AI named by number: only source files of at least 1 KiB; an instruction naming any other is refused before anything runs |
 | `rules` | the sha256 of the rule pack that read the logs |
 | `took` | how long the batch took, as a bucket |
 
@@ -421,6 +420,11 @@ A duration is sent as the index of the last bound at or below it in the schema's
 growing by 10% a step), never the duration itself.
 
 Everything sent is kept, byte for byte, in the repository's state directory under `sent/`; the done line names it.
+
+A run is bound to the profile it was filed with. Run again after the tip has moved and it goes on measuring the filed
+tip, commits and file numbers, never a new profile; if that tip is no longer in the clone (a history rewrite), it stops
+with exit 6 (`profile_gone`). The profile and every Results body carry `key_id`, a keyed hash of a fixed label under the
+repository's key, so a run goes on only on the machine that started it.
 
 Why a build or test failed is read here, by rules shipped with this release. CodeVal turns on the toolchain's
 structured output where the command names the tool (`go test -json`, cargo `--message-format=json`, pytest JUnit XML,

@@ -105,7 +105,7 @@ def test_environmental_ends_come_from_how_the_process_ended_not_its_text(code, s
 def test_a_run_that_passes_once_and_fails_once_is_flaky():
     rows = [{"class": "test_assertion", "exit": 1}, {"class": "ok", "exit": 0}]
     extract.flaky(rows)
-    assert rows == [{"class": "test_flaky", "exit": 1}, {"class": "ok", "exit": 0}]
+    assert rows == [{"class": "test_flaky", "exit": 1, "compile_kind": None}, {"class": "ok", "exit": 0}]
     rows = [{"class": "test_timeout", "exit": None}, {"class": "ok", "exit": 0}]
     extract.flaky(rows)
     assert rows[0]["class"] == "test_timeout", "a run stopped at run_minutes stays a timeout"
@@ -203,3 +203,60 @@ def test_a_duration_is_sent_as_its_bucket(seconds, want):
     bounds = schema.defs()["Step"]["properties"]["took"]["x-bounds-ms"]
     assert bounds[:4] == [0, 100, 110, 121] and len(bounds) == 166
     assert codeval.took(seconds) == want
+
+
+def test_flaky_is_a_pass_and_a_fail_of_the_same_side_and_nothing_else():
+    rows = [{"class": "compile_test", "compile_kind": "syntax", "exit": 2}, {"class": "ok", "exit": 0}]
+    extract.flaky(rows)
+    assert rows[0] == {"class": "test_flaky", "compile_kind": None, "exit": 2}
+    rows = [{"class": "test_assertion", "exit": 1}, {"class": "test_error", "exit": 1}]
+    extract.flaky(rows)
+    assert [r["class"] for r in rows] == ["test_assertion", "test_error"], "a test_ class alone is never flaky"
+
+
+_CODES = schema.defs().get("Code") or schema.defs()["Step"]["properties"]["codes"]["items"]
+
+
+@pytest.mark.xfail("enum" not in _CODES, reason="kennet#1350: Code becomes an enum at the next re-export", strict=True)
+def test_the_schemas_code_enum_is_the_packs_codes_and_other():
+    assert sorted(_CODES["enum"]) == extract.codes()
+
+
+def test_codeval_holds_no_numeric_thresholds_but_documented_mechanics():
+    """No-intelligence: an ordering comparison in codeval*.py compares against 0, 1, a value it was handed, or a
+    named build-mechanics constant that says what it is on its own line. No weights, scores or thresholds."""
+    import ast
+    import re
+
+    mechanics = {"GIT_FLOOR", "TZ_MOST", "MAX_BLOB", "REVEAL_FLOOR", "TAIL", "TEMPLATE_LINES"}
+    src = Path(codeval.__file__).parent
+    for path in sorted(src.glob("codeval*.py")):
+        text = path.read_text()
+        assert not re.search(r"(?i)\b\w*(weight|score|threshold|confidence)\w*\s*=", text), path.name
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.Compare) or not any(
+                isinstance(o, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for o in node.ops
+            ):
+                continue
+
+            def operands(n):  # the values compared, through arithmetic, not into calls or subscripts
+                yield n
+                if isinstance(n, ast.BinOp):
+                    yield from (*operands(n.left), *operands(n.right))
+                elif isinstance(n, ast.UnaryOp):
+                    yield from operands(n.operand)
+
+            for side in (node.left, *node.comparators):
+                for leaf in operands(side):
+                    if isinstance(leaf, ast.Constant) and isinstance(leaf.value, (int, float)):
+                        assert leaf.value in (0, 1), f"{path.name}:{node.lineno}: {ast.unparse(node)}"
+                    if isinstance(leaf, ast.Name) and leaf.id.isupper():
+                        assert leaf.id in mechanics, f"{path.name}:{node.lineno}: {leaf.id}"
+    for name in mechanics:
+        line = next(
+            line
+            for path in sorted(src.glob("codeval*.py"))
+            for line in path.read_text().splitlines()
+            if line.startswith(f"{name} = ")
+        )
+        assert re.search(r"#\s*(size|format|build mechanics|privacy floor):", line), line
