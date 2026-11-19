@@ -6,7 +6,8 @@ Three passes, each replacing what it finds with a typed placeholder, then a chec
    joins to the profile), their email domains, the user, home folder, machine name, repository paths, remotes and
    their organizations.
 2. Patterns: secrets (provider token shapes, keyword assignments, high-entropy strings), emails, IP and MAC
-   addresses, and hosts and URLs off a list of public registries and documentation sites.
+   addresses, hosts and URLs off a list of public registries and documentation sites, phone numbers and street
+   addresses.
 3. A local model for names and other personal data the first two miss (`metaphi.deid_model`), when it is installed.
 
 Before anything is sent, the packed bytes are searched for every known identifier; if one is left, nothing is sent.
@@ -22,6 +23,7 @@ import os
 import re
 import socket
 import tempfile
+import unicodedata
 import urllib.parse
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -406,6 +408,43 @@ def _remote_parts(url: str) -> tuple[str | None, str | None]:
     return m[1], (parts[-2] if len(parts) >= 2 else None)
 
 
+PARTICLES = frozenset(
+    ["van", "von", "der", "den", "de", "del", "della", "dei", "di", "da", "das", "dos", "du", "des", "la", "le"]
+    + ["ter", "ten", "bin", "ibn", "al", "el", "y", "zu", "af", "av"]
+)
+"""Lower-case words that open a surname (`van der Merwe`, `de la Cruz`, `bin Salem`): they go with it."""
+
+APOSTROPHES = ("'", "’", "&#39;", "&apos;", "&#x27;", "")
+FOLDED = str.maketrans({"ß": "ss", "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ł": "l", "Ł": "L", "æ": "ae", "œ": "oe"})
+
+
+def _folded(text: str) -> str:
+    """Without diacritics: `Nguyễn Thị` as `Nguyen Thi`, `Ekström` as `Ekstrom`."""
+    decomposed = unicodedata.normalize("NFKD", text.translate(FOLDED))
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def name_forms(name: str) -> set[str]:
+    """The ways a person's name is written in output: as given, surname first, `Surname, Given`, dotted, with
+    diacritics folded, and with its apostrophes typed, curled, HTML-escaped or dropped. Matching ignores case, so
+    `WATANABE Kenji` is `Watanabe Kenji`."""
+    words = name.split()
+    forms = {name}
+    if len(words) >= 2:
+        at = next((n for n, w in enumerate(words[1:], 1) if w.lower() in PARTICLES), len(words) - 1)
+        given, surname = " ".join(words[:at]), " ".join(words[at:])
+        forms |= {f"{surname} {given}", f"{surname}, {given}", ".".join(words)}
+        if words[at].lower() in PARTICLES:
+            bare = " ".join(w for w in words[at:] if w.lower() not in PARTICLES)
+            forms |= {f"{bare}, {given}"}
+    forms |= {_folded(f) for f in forms}
+    for f in list(forms):
+        for mark in ("'", "’"):
+            if mark in f:
+                forms |= {f.replace(mark, other) for other in APOSTROPHES}
+    return {" ".join(f.split()) for f in forms if f.strip()}
+
+
 def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
     """The known identifiers for each repository read by `codeval.profiled`, in its order. Each repository's
     authors become `[author:<id>]` with the profile's ids for that repository; what belongs to the machine is shared."""
@@ -444,9 +483,8 @@ def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
         for name, email in repo.get("people") or []:
             i = authors.get(email.lower())
             if i is not None and "@" not in name:
-                k.add(name, f"[author:{i}]", word=" " not in name)
-                if " " in name:
-                    k.add(name.replace(" ", "."), f"[author:{i}]")
+                for form in name_forms(name):
+                    k.add(form, f"[author:{i}]", word=" " not in form)
         urls = set(repo.get("remotes") or [])
         given = repo.get("given") or ""
         if re.match(r"^(?:[\w.+-]+://|[\w.-]+@[\w.-]+:)", given):
@@ -576,7 +614,82 @@ def _patterns(data: bytes, counts: collections.Counter) -> bytes:
     data = MAC.sub(counted("mac", b"[mac]"), data)
     data = IPV6.sub(ipv6, data)
     data = IPV4.sub(ipv4, data)
-    return HOST.sub(host, data)
+    data = HOST.sub(host, data)
+    data = _addresses(data, counts)
+    return _phones(data, counts)
+
+
+_UP = r"[^\W\d_a-z]"
+"""An upper-case letter, or any letter outside ASCII: `re` has no Unicode case classes, and a lower-case accented
+letter opening a word is rare enough in output."""
+_CAP = rf"{_UP}[^\W\d_]*(?:['\u2019.-][^\W\d_]+)*\.?"
+_JOINS = r"(?:de|del|della|di|da|das|dos|do|du|des|la|le|les|el|al|ibn|bin|van|von|der|den|ter|of|y)"
+_TYPES = (
+    r"Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl|Terrace|Ter|Parkway|Pkwy"
+    r"|Highway|Hwy|Square|Sq|Crescent|Cres|Close|Circle|Cir|Trail|Row|Alley|Grove|Gardens|Mews"
+)
+_LEADS = (
+    r"(?i:rue|avenue|av\.|boulevard|bd|chemin|impasse|all[ée]e|quai|place|via|viale|piazza|corso|calle|carrer"
+    r"|avenida|rua|travessa|plaza|paseo|ulica|ul\.)"
+)
+_UNIT = r"(?:Apt|Apartment|Suite|Ste|Unit|Flat|Floor|Fl|Bldg|Building|Room|Rm)\.?[ \t]*#?[\w-]+|#[\w-]+"
+_PART = (
+    rf"{_UNIT}"
+    rf"|\d{{4,6}}(?:-\d{{3,4}})?(?:[ \t]+{_CAP}){{1,3}}"
+    rf"|{_CAP}(?:[ \t]+{_CAP}){{0,2}}(?:[ \t]+[A-Z]{{2}})?(?:[ \t]+\d{{3,6}}(?:-\d{{3,4}})?)?"
+    rf"|[A-Z]{{2}}[ \t]+\d{{5}}(?:-\d{{4}})?"
+)
+ADDRESS = re.compile(
+    r"(?<![\w.:/#-])(?:"
+    rf"\d{{1,6}}[A-Za-z]?(?:[ \t]+{_CAP}){{1,4}}[ \t]+(?:{_TYPES})\b\.?"
+    rf"|\d{{1,5}}[A-Za-z]?,?[ \t]+{_LEADS}(?:[ \t]+(?:{_JOINS}[ \t]+)*{_CAP}){{1,4}}"
+    rf"|{_UP}[^\W\d_]*(?:stra(?:ss|ß)e|str\.|weg|gasse|platz|allee|straat|gracht|laan|kade|vej|gatan|gata|veien)"
+    r"[ \t]+\d{1,4}[a-z]?\b"
+    rf"|\d{{1,2}}-\d{{1,2}}(?:-\d{{1,3}})?[ \t]+{_CAP}(?=,)"
+    rf")(?:,?[ \t]+(?:{_UNIT}))?(?:,[ \t]*(?:{_PART})){{0,3}}"
+)
+"""A street address: a number and a street with its type (`1428 Willow Creek Rd`), a number and a leading type
+(`17 rue de la Paix`), a street with its type joined and a number (`Hauptstraße 5`), or a block number
+(`3-7-1 Nishi-Shinjuku,`), then its unit, city, region and postal code. Build output almost never has one."""
+
+PHONES = (
+    re.compile(rb"(?<![\w+/.=-])\+[1-9]\d{0,2}(?:[ .-]?\(?\d{1,5}\)?){1,6}(?![\w.:/-]|\.\d)"),
+    re.compile(rb"(?<![\w./:-])\(\d{3}\)[ ]?\d{3}[-.]\d{4}(?![\w.:/-])"),
+    re.compile(rb"(?<![\w./:-])(?:\d{3}-\d{3}-\d{4}|0\d{1,4}-\d{6,8}|0\d{1,4} \d{3,4} \d{3,4})(?![\w.:/-])"),
+    re.compile(rb"(?i)(\b(?:phone|tel|telephone|mobile|cell|fax)[ \t]?[:=#][ \t]?)(\(?\d[\d ().-]{5,}\d)"),
+)
+"""Phone numbers: international (`+44 20 7946 0958`, 8 to 15 digits), North American (`(208) 555-0143`,
+`208-555-0143`), trunk-prefixed national (`020-79460958`, `020 7946 0958`), and digits after `phone:` or `tel=`."""
+
+
+def _phones(data: bytes, counts: collections.Counter) -> bytes:
+    def sub(m: re.Match[bytes]) -> bytes:
+        head = m.group(1) if m.re.groups else b""
+        number = m.group(m.re.groups)
+        digits = sum(c in b"0123456789" for c in number)
+        plus = m.re is PHONES[0]
+        if not 7 <= digits <= 15 or (plus and digits < (8 if re.search(rb"[ .()-]", number) else 10)):
+            return m.group(0)
+        if VERSION_BEFORE.search(m.string[max(0, m.start() - 12) : m.start()]):
+            return m.group(0)
+        counts["phone"] += 1
+        return head + b"[phone]"
+
+    for pattern in PHONES:
+        data = pattern.sub(sub, data)
+    return data
+
+
+def _addresses(data: bytes, counts: collections.Counter) -> bytes:
+    if not re.search(rb"\d[ \t,]+[^\W\d_]|[a-z\xc3\x9f][ \t]+\d", data):
+        return data
+    text = data.decode("utf-8", "surrogateescape")
+
+    def sub(m: re.Match[str]) -> str:
+        counts["address"] += 1
+        return "[address]"
+
+    return ADDRESS.sub(sub, text).encode("utf-8", "surrogateescape")
 
 
 def _is_ip_literal(host: str) -> bool:
@@ -586,9 +699,34 @@ def _is_ip_literal(host: str) -> bool:
 Model = Callable[[list[str]], list[list[tuple[int, int, str]]]]
 """A model takes lines of text and gives, for each, the (start, end, kind) of the personal data it holds."""
 
-CANDIDATE = re.compile(r"\b[A-Z][a-z'À-ɏ-]+(?:\s+[A-Z][a-z'À-ɏ-]*\.?)*\s+[A-Z][a-z'À-ɏ-]+\b")
-"""Lines the model reads: those with two capitalized words in a row, where a person's name could stand. Build output
-is mostly paths, numbers and lowercase identifiers; reading only these lines keeps the model's time small."""
+_NAME_WORD = r"(?:Ma?c|[DO]['’]?)?[^\W\d_a-z](?:[^\W\d_A-Z]*|[^\W\d_a-z]*)(?:['’-][^\W\d_a-z]?[^\W\d_A-Z]+)*\.?"
+"""A word that can be part of a name: capitalized (`Kenji`, `McAllister`, `O'Malley-Brennan`, `Ekström`) or all
+upper-case (`WATANABE`); never CamelCase (`TestLedgerTotals`)."""
+CANDIDATE = re.compile(
+    rf"(?<![\w./\\-]){_NAME_WORD}(?:,? (?:(?:{'|'.join(sorted(PARTICLES))}) )*{_NAME_WORD})+(?![\w/\\])"
+)
+"""Lines the model reads: those with two capitalized words in a row, where a person's name could stand, also with a
+comma between (`Natarajan, Priya`), particles (`van der Merwe`), an upper-case surname (`WATANABE Kenji`) or letters
+outside ASCII (`Nguyễn Thị Lan`). Build output is mostly paths, numbers and lowercase identifiers; reading only these
+lines keeps the model's time small."""
+
+ESCAPED_APOSTROPHE = re.compile(r"&#0*39;|&#[xX]0*27;|&apos;|&#8217;|&rsquo;")
+
+
+def _unescaped(line: str) -> tuple[str, list[int]]:
+    """`line` with HTML-escaped apostrophes as `'`, which the model reads as part of a name, and for each of its
+    characters (and its end) where it starts in `line`."""
+    out, where, at = [], [], 0
+    for m in ESCAPED_APOSTROPHE.finditer(line):
+        out.append(line[at : m.start()])
+        where += range(at, m.start())
+        out.append("'")
+        where.append(m.start())
+        at = m.end()
+    out.append(line[at:])
+    where += range(at, len(line) + 1)
+    return "".join(out), where
+
 
 PLACEHOLDER = re.compile(r"\[[a-z_]+(?::[A-Za-z0-9_]+)?\]")
 
@@ -598,14 +736,15 @@ def _modelled(data: bytes, model: Model, counts: collections.Counter) -> bytes:
     lines = text.split("\n")
     wanted: dict[str, list[int]] = {}
     for i, line in enumerate(lines):
-        if CANDIDATE.search(PLACEHOLDER.sub(" ", line)) and len(line) <= 2000:
+        if len(line) <= 2000 and CANDIDATE.search(PLACEHOLDER.sub(" ", line)):
             wanted.setdefault(line, []).append(i)
     if not wanted:
         return data
     unique = list(wanted)
-    for line, spans in zip(unique, model(unique), strict=True):
+    shown = [_unescaped(line) for line in unique]
+    for line, (_read, where), spans in zip(unique, shown, model([r for r, _w in shown]), strict=True):
         out, at = [], 0
-        for start, end, kind in sorted(spans):
+        for start, end, kind in sorted((where[a], where[b], k) for a, b, k in spans):
             if start < at or PLACEHOLDER.fullmatch(line[start:end]) or PLACEHOLDER.search(line[start:end]):
                 continue
             out += [line[at:start], f"[{kind}]"]
@@ -661,11 +800,8 @@ def check(found: collections.Counter, what: str, where: Path | None = None) -> N
     raise Unsafe(
         f"{what} still holds known identifiers after de-identification ({kinds}); nothing was sent",
         code="deid_incomplete",
-        next_step=(
-            "nothing has left this machine. Run the same command with --dry-run to write the payload to "
-            + (str(where) if where else "the run's sent/ folder")
-            + ", then report the kinds above (never the values) at https://github.com/metaphi-labs/kennet-cli/issues"
-        ),
+        next_step="nothing has left this machine; report the kinds above (never the values) at "
+        "https://github.com/metaphi-labs/kennet-cli/issues",
     )
 
 

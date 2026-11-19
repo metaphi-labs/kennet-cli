@@ -15,7 +15,10 @@ from metaphi import codeval, deid, deid_model
 
 FIXTURES = Path(__file__).parent / "deid"
 LABEL = re.compile(r"\{\{(\w+):(.*?)\}\}")
-KINDS = "author|domain|org|host|hostname|user|home|repo|remote|tmp|url|email|ipv4|ipv6|mac|name|redacted:[a-z_]+"
+KINDS = (
+    "author|domain|org|host|hostname|user|home|repo|remote|tmp|url|email|ipv4|ipv6|mac|name|phone|address"
+    "|redacted:[a-z_]+"
+)
 PLACEHOLDER = re.compile(rf"\[(?:{KINDS})(?::\d+)?\]")
 SELLER = {
     "name": "falcon_core",
@@ -230,3 +233,107 @@ def test_the_model_pass_replaces_what_it_finds(seller):
         "owner [name]\nby [author:1]\n[name] again"
     )
     assert scrub.counts == {"author": 1, "name": 2}
+
+
+@pytest.mark.parametrize(
+    "line, said",
+    [
+        ("contact +44 20 7946 0958 now", "contact [phone] now"),
+        ("owner phone: (208) 555-0143", "owner phone: [phone]"),
+        ("fax=208-555-0143;", "fax=[phone];"),
+        ("+     020-79460958", "+     [phone]"),
+        ("dial 020 7946 0958 today", "dial [phone] today"),
+        ("e164 +14155550143", "e164 [phone]"),
+        ("tel: 555 0143 1234", "tel: [phone]"),
+    ],
+)
+def test_phone_numbers(line, said):
+    scrub = deid.Scrubber(deid.Known())
+    assert scrub.text(line) == said and scrub.counts == {"phone": 1}
+
+
+@pytest.mark.parametrize(
+    "line, said",
+    [
+        ("ship to 1428 Elm Street, Apt 2C, Springfield, IL 62704 ok", "ship to [address] ok"),
+        ("  77 Harbour View Rd, Dunedin 9016", "  [address]"),
+        ("{'address': '9 rue des Lilas, 69003 Lyon'}", "{'address': '[address]'}"),
+        ("at 21 Calle del Sol, Sevilla", "at [address]"),
+        ("Hauptstraße 5, 10115 Berlin", "[address]"),
+        ("query: 2-4-8 Minami-Aoyama, Minato-ku, Tokyo 107-0062", "query: [address]"),
+    ],
+)
+def test_street_addresses(line, said):
+    scrub = deid.Scrubber(deid.Known())
+    assert scrub.text(line) == said and scrub.counts == {"address": 1}
+
+
+def test_numbers_in_build_output_are_not_phones_or_addresses():
+    scrub = deid.Scrubber(deid.Known())
+    kept = [
+        "Tests run: 48, Failures: 2, Errors: 0, Skipped: 1, Time elapsed: 12.503 s",
+        "version 1.2.3 took 12.5s at 2026-11-19T09:14:22+05:30 on port 8080",
+        "Date: Thu Nov 19 09:14:22 2026 +0000",
+        " 12 files changed, 340 insertions(+), 12 deletions(-) +12 -3",
+        "Ran 1428 tests in 3.200s; lines 120-130; build 20261119-0914",
+        "Account 0042-7781 balance 1180.00 sha 3f2a9c1e +1234",
+        "[xUnit.net 00:00:00.74] 3 Passed, 1 Failed, 0 Skipped",
+        "=== RUN   TestLedgerTotals",
+        "Name    Stmts   Miss  Cover",
+    ]
+    for line in kept:
+        assert scrub.text(line) == line
+    assert not scrub.counts
+
+
+def test_an_authors_name_is_found_however_it_is_written(seller):
+    people = [
+        ["Kenji Watanabe", "kenji@acme-corp.com"],
+        ["Liesl van der Merwe", "liesl@acme-corp.com"],
+        ["Siobhan O'Connor", "siobhan@acme-corp.com"],
+        ["Björn Ekström", "bjorn@acme-corp.com"],
+        ["Nguyễn Thị Lan", "lan@acme-corp.com"],
+    ]
+    repo = {**SELLER, "authors": {e: n for n, (_name, e) in enumerate(people, 1)}, "people": people}
+    (k,) = deid.known([repo])
+    scrub = deid.Scrubber(k)
+    for line, said in [
+        ("WATANABE Kenji", "[author:1]"),
+        ("Watanabe, Kenji", "[author:1]"),
+        ("Kenji.Watanabe", "[author:1]"),
+        ("van der Merwe, Liesl", "[author:2]"),
+        ("Merwe, Liesl", "[author:2]"),
+        ("Siobhan O&#39;Connor", "[author:3]"),
+        ("Siobhan O’Connor", "[author:3]"),
+        ("Siobhan OConnor", "[author:3]"),
+        ("O'Connor, Siobhan", "[author:3]"),
+        ("Bjorn Ekstrom", "[author:4]"),
+        ("Nguyen Thi Lan", "[author:5]"),
+    ]:
+        assert scrub.text(f"by {line}.") == f"by {said}.", line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'expected "WATANABE Kenji"',
+        "-     Natarajan, Priya",
+        "holder Liesl van der Merwe",
+        "{'name': 'Nguyễn Thị Lan'}",
+        "for D’Arcy McAllister",
+        "Grace OMalley-Brennan",
+    ],
+)
+def test_lines_that_could_hold_a_name_reach_the_model(line):
+    seen = []
+    deid.Scrubber(deid.Known(), lambda lines: seen.extend(lines) or [[] for _ in lines]).text(line)
+    assert seen == [line]
+
+
+def test_the_model_reads_escaped_apostrophes_and_its_spans_map_back():
+    def model(lines):
+        return [[(m.start(), m.end(), "name") for m in re.finditer(r"Siobhan O'Connor", line)] for line in lines]
+
+    scrub = deid.Scrubber(deid.Known(), model)
+    assert scrub.text("for Siobhan O&#39;Connor> but was Ann Lee") == "for [name]> but was Ann Lee"
+    assert scrub.text("for Siobhan O&apos;Connor and Siobhan O'Connor") == "for [name] and [name]"
