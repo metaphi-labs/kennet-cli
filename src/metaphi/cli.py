@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import contextlib
 import datetime
 import getpass
-import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -461,6 +462,55 @@ def _receipt(home: Path, manifest: dict) -> dict:
     return got
 
 
+UPLOADS_AT_ONCE = 4
+
+
+def _send_parts(got: dict, logs: Path, size: int, keep: Callable[[], None], say: Callable[[str], None]) -> None:
+    """The logs in parts of LOGS_PART bytes, UPLOADS_AT_ONCE of them at a time, each retried with backoff as every
+    request is; then joined. Parts the service names as not received are sent again, and only they."""
+    from metaphi import codeval
+
+    count = -(-size // codeval.LOGS_PART)
+    lock = threading.Lock()
+
+    def part(n: int) -> bytes:
+        with logs.open("rb") as f:
+            f.seek(n * codeval.LOGS_PART)
+            return f.read(codeval.LOGS_PART)
+
+    shas = [codeval.sha256_of_range(logs, n * codeval.LOGS_PART, codeval.LOGS_PART) for n in range(count)]
+    sent = set(got.get("parts_sent") or [])
+    done = [sum(min(codeval.LOGS_PART, size - n * codeval.LOGS_PART) for n in sent)]
+
+    def one(n: int) -> None:
+        body = part(n)
+        codeval.post_logs_part(got["id"], n, body)
+        with lock:
+            sent.add(n)
+            got["parts_sent"] = sorted(sent)
+            keep()
+            done[0] += len(body)
+            say(f"Sending the logs: {_size(done[0])} of {_size(size)}")
+
+    missing: list[int] = []
+    for _ in range(3):
+        left = [n for n in range(count) if n not in sent]
+        with concurrent.futures.ThreadPoolExecutor(min(UPLOADS_AT_ONCE, max(1, len(left)))) as pool:
+            for f in [pool.submit(one, n) for n in left]:
+                f.result()
+        missing = codeval.complete_logs(got["id"], shas)
+        if not missing:
+            return
+        sent -= set(missing)
+        done[0] -= sum(min(codeval.LOGS_PART, size - n * codeval.LOGS_PART) for n in missing)
+    raise errors.MetaphiError(
+        f"the service still has not received logs parts {', '.join(map(str, missing))}",
+        code="unavailable",
+        retryable=True,
+        next_step="run `kennet codeval` again in a terminal: the send goes on where it stopped",
+    )
+
+
 def _upload(home: Path, manifest: dict, say: Callable[[str], None]) -> str:
     """The three files, in order, as the bytes shown; a send cut short goes on where it stopped. Logs past
     LOGS_PART go in parts, then are joined; a part the service names as not received is sent again."""
@@ -485,34 +535,7 @@ def _upload(home: Path, manifest: dict, say: Callable[[str], None]) -> str:
     if codeval.LOGS not in got["files"] and size <= codeval.LOGS_PART:
         codeval.post_logs(got["id"], logs.read_bytes())
     elif codeval.LOGS not in got["files"]:
-        count = -(-size // codeval.LOGS_PART)
-        with logs.open("rb") as f:
-
-            def part(n: int) -> bytes:
-                f.seek(n * codeval.LOGS_PART)
-                return f.read(codeval.LOGS_PART)
-
-            shas = [hashlib.sha256(part(n)).hexdigest() for n in range(count)]
-            sent = set(got.get("parts_sent") or [])
-            for _ in range(3):
-                for n in range(count):
-                    if n not in sent:
-                        say(f"Sending the logs, part {n + 1} of {count}")
-                        codeval.post_logs_part(got["id"], n, part(n))
-                        sent.add(n)
-                        got["parts_sent"] = sorted(sent)
-                        keep()
-                missing = codeval.complete_logs(got["id"], shas)
-                if not missing:
-                    break
-                sent -= set(missing)
-            else:
-                raise errors.MetaphiError(
-                    f"the service still has not received logs parts {', '.join(map(str, missing))}",
-                    code="unavailable",
-                    retryable=True,
-                    next_step="run `kennet codeval` again in a terminal: the send goes on where it stopped",
-                )
+        _send_parts(got, logs, size, keep, say)
     if codeval.LOGS not in got["files"]:
         got.pop("parts_sent", None)
         got["files"].append(codeval.LOGS)

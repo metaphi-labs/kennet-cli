@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import tarfile
+import threading
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ import respx
 from test_codeval import _home, git
 
 from metaphi import cli, codebase_checks, codebase_setup, codeval, codeval_runs, config
+from metaphi.cli import _size
 
 API = config.DEFAULT_API
 REF = "cv_" + "5" * 16
@@ -227,6 +229,22 @@ def test_logs_past_one_part_go_in_parts_then_are_joined(made, capsys, tmp_path, 
 
 
 @respx.mock
+def test_parts_go_several_at_once_and_the_terminal_shows_bytes_sent(made, capsys, tmp_path, monkeypatch):
+    got = _server()
+    _measured(made, tmp_path, monkeypatch, capsys, parts=3)
+    together = threading.Barrier(3, timeout=10)
+
+    def part(request):
+        together.wait()
+        return httpx.Response(200, json={"object": "codeval_logs_part"})
+
+    got["part"].side_effect = part
+    assert cli.main(["codeval", str(made)]) == 0, "the three parts were in flight at once"
+    size = _size((_home(tmp_path) / codeval.PAYLOAD / codeval.LOGS).stat().st_size)
+    assert f"Sending the logs: {size} of {size}" in capsys.readouterr().out
+
+
+@respx.mock
 def test_a_part_the_service_did_not_receive_is_sent_again_and_only_it(made, capsys, tmp_path, monkeypatch):
     got = _server()
     _measured(made, tmp_path, monkeypatch, capsys, parts=3)
@@ -244,7 +262,7 @@ def test_a_part_the_service_did_not_receive_is_sent_again_and_only_it(made, caps
     ]
     assert cli.main(["codeval", str(made)]) == 0
     sent = [int(c.request.url.path.rsplit("/", 1)[1]) for c in got["part"].calls]
-    assert sent == [0, 1, 2, 1] and got["complete"].call_count == 2
+    assert sorted(sent[:3]) == [0, 1, 2] and sent[3:] == [1] and got["complete"].call_count == 2
 
 
 @respx.mock

@@ -1308,10 +1308,18 @@ def bundle_sha256(checks: str, logs: str) -> str:
 
 
 def sha256_of(f: Path) -> str:
-    h = hashlib.sha256()
+    return sha256_of_range(f, 0, None)
+
+
+def sha256_of_range(f: Path, start: int, length: int | None) -> str:
+    """The sha256 of `length` bytes of f from `start` (to its end when None), read a chunk at a time."""
+    h, left = hashlib.sha256(), length
     with f.open("rb") as r:
-        while chunk := r.read(LOG_CHUNK):
+        r.seek(start)
+        while chunk := r.read(LOG_CHUNK if left is None else min(LOG_CHUNK, left)):
             h.update(chunk)
+            if left is not None:
+                left -= len(chunk)
     return h.hexdigest()
 
 
