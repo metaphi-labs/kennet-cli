@@ -832,11 +832,7 @@ def profiled(paths: list[str], say: Callable[[str], None] = print) -> Iterator[t
         for n, given in enumerate(paths, 1):
             url = is_url(given)
             path = None if url else Path(given).expanduser().resolve()
-            base = _url_name(given) if url else path.name
-            name = (re.sub(r"[^\w .@+-]", "-", base, flags=re.ASCII).strip() or f"repo-{n}")[:100]
-            while name in used:
-                name = f"{name[:120]}-{n}"
-            used.add(name)
+            name = _name_of(given, n, used)
             if url:
                 say(f"Cloning {name}\u2026")
                 path = Path(scratch) / f"{n}.git"
@@ -877,9 +873,57 @@ def _reader(repo: Path, tree: dict[str, tuple[str, str]]) -> Callable[[str], byt
     return read
 
 
+def _name_of(given: str, n: int, used: set[str]) -> str:
+    base = _url_name(given) if is_url(given) else Path(given).expanduser().resolve().name
+    name = (re.sub(r"[^\w .@+-]", "-", base, flags=re.ASCII).strip() or f"repo-{n}")[:100]
+    while name in used:
+        name = f"{name[:120]}-{n}"
+    used.add(name)
+    return name
+
+
+def _key(pairs: list[list[str]]) -> str:
+    return "run_" + hashlib.sha256(json.dumps(pairs).encode()).hexdigest()[:16]
+
+
 def run_id(doc: dict[str, Any]) -> str:
-    said = json.dumps([[r["name"], r["tip"]] for r in doc["repos"]]).encode()
-    return "run_" + hashlib.sha256(said).hexdigest()[:16]
+    return _key([[r["name"], r["tip"]] for r in doc["repos"]])
+
+
+def _remote_tip(url: str) -> str | None:
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        got = subprocess.run(
+            ["git", "-c", "protocol.ext.allow=never", "ls-remote", "--", url, "HEAD"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    sha = got.stdout.split()[0] if got.returncode == 0 and got.stdout.split() else ""
+    return sha if re.fullmatch(r"[0-9a-f]{40,64}", sha) else None
+
+
+def run_key(paths: list[str]) -> str | None:
+    """The run id `profiled` would give these repositories, read from each one's latest commit alone: a detached
+    run is named before its history is read. None when no repository can be read."""
+    pairs: list[list[str]] = []
+    used: set[str] = set()
+    for n, given in enumerate(paths, 1):
+        name = _name_of(given, n, used)
+        if is_url(given):
+            tip = _remote_tip(given)
+        else:
+            path = Path(given).expanduser().resolve()
+            ok = path.is_dir() and why_not(path) is None
+            tip = _ask(path, "rev-parse", "HEAD") if ok else None
+        if tip:
+            pairs.append([name, tip])
+    return _key(pairs) if pairs else None
 
 
 def checked(
@@ -942,6 +986,10 @@ def checked(
             done.callback(codebase_setup.NETWORK.clear)
         for n, (local, targets) in enumerate(zip(kept, planned["repos"], strict=True)):
             targets = targets[:first] if first is not None else targets
+            if plan.ledger and (finished := plan.ledger.get(local["name"], "repo")) is not None:
+                say(f"{local['name']}: checked before; using that result")
+                out.append(finished)
+                continue
             repo, logs = local["path"], (plan.logs or Path.cwd() / "kennet-codeval") / local["name"]
             mine = dataclasses.replace(
                 plan, cache=Path(caches) / str(n) if box else None, steps=Steps(logs / "steps.jsonl")
@@ -1023,6 +1071,8 @@ def checked(
                 else None
             )
             try:
+                if plan.ledger:
+                    plan.ledger.phase("setup")
                 if plan.test is None:
                     say(f"Setting up {local['name']}\u2026")
                     recipe = setup_at(local["tip"], logs / "setup", None, None)
@@ -1031,6 +1081,8 @@ def checked(
                     if recipe:
                         found = (recipe, box)
                 era_of = (planned.get("eras") or [[]] * len(kept))[n][: len(targets)] or None
+                if plan.ledger:
+                    plan.ledger.phase("checks")
 
                 def repair(era: int, sha: str, tail: str, logs=logs, found=found, setup_at=setup_at):
                     recipe = setup_at(sha, logs / f"setup-era{era}", era, (found[0], tail))
@@ -1077,6 +1129,8 @@ def checked(
                 got["build_remote"] = built
             got["seconds"] = mine.steps.seconds()
             out.append(got)
+            if plan.ledger and got.get("stopped") != "error":
+                plan.ledger.put(local["name"], "repo", "", got)
             if box and mine.cache:
                 try:
                     subprocess.run(

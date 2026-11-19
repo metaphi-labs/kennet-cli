@@ -212,6 +212,7 @@ The exit status says what kind of end it was:
 | 3 | A sign-in or a key is needed (`auth_error`). |
 | 4 | The same call may work later: the service is unavailable, a limit is reached, or a wait ran out. |
 | 5 | This version is too old for the service (`upgrade_required`); `next_step` upgrades it. |
+| 6 | `kennet codeval` needs a person to decide: `needs` says what to ask them and the commands each answer runs. |
 
 A request that fails in transit or with a retryable error is sent again at most twice, within 5 seconds in all;
 a longer `Retry-After` is handed back as `retry_after_s`, not waited out.
@@ -254,8 +255,11 @@ but for the last:
 | `not_signed_in` | no sign-in on this machine, or the server has ended it | `kennet login` |
 | `no_api_key` | signed in, but the sign-in was handed no key; the message says why, and `reason` which it is (below). Keys come with a sign-in, so `kennet login` saves them once the organization has access | `kennet org join <org>` when an organization has invited you (`invitation_pending`); `kennet org create <name>` when you are in no organization and none has; `null` when you were taken out of yours (`removed`: an owner of it adds you back), while yours waits for approval, and from `login` itself; else `kennet login` |
 | `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
-| `confirmation_required` | `kennet keys revoke` or `kennet codeval` away from a terminal, or under `--json`, without `--yes` | the same command with `--yes` (a revoke by id) |
-| `container_required` | `kennet codeval --deep` with no Docker or Podman running | `null` |
+| `confirmation_required` | `kennet keys revoke` or `kennet codeval` away from a terminal, or under `--json`, without `--yes`; `kennet codeval --detach` without `--yes` | the same command with `--yes` (a revoke by id) |
+| `container_required` | `kennet codeval --deep` with no Docker or Podman running (exit 6, with `needs`) | the same command |
+| `test_command_missing` | `kennet codeval` found no build or test for a repository (exit 6, with `needs`) | `null`; the same command |
+| `run_not_found` | `kennet codeval status` names a run this machine does not hold | `kennet codeval <path> --dry-run --json` |
+| `run_in_progress` | `kennet codeval` for a run another process is running here | `kennet codeval status <run> --json --wait 600` |
 | `no_key`, `ambiguous_key` | `kennet keys revoke` names no live key, or a name several live keys share | `kennet keys list`; the revoke of one by id |
 | `secret_destination_required` | `kennet keys create --json` without `--show-secret`: nothing is made | the pipe form |
 | `name_taken`, `scope_not_held`, `too_many_keys` | `kennet keys create` with a name a live key holds, a scope the organization does not hold, or at its cap of live keys | `null`; `null`; `kennet keys list` |
@@ -361,6 +365,8 @@ total      7:43                                             5:44
 kennet codeval ./core ./billing
 kennet codeval https://github.com/acme/core.git
 kennet codeval ./core --dry-run
+kennet codeval ./core --yes --detach
+kennet codeval status --wait 600
 ```
 
 `kennet codeval` profiles a git repository's history and tests: it reads the history, then builds and tests the
@@ -384,6 +390,43 @@ Everything is kept in `./kennet-codeval/<run>/`. What was sent, byte for byte, i
 file with its sha256, the sha256 Metaphi AI received, and how many secrets of each kind were replaced in the logs.
 If a send fails, run the same command again: it sends what was kept and runs nothing twice.
 
+### Runs that take hours
+
+Each commit, edit and repository is kept in `checks.jsonl` as it finishes. If a run stops (the machine slept or
+restarted, the process was stopped), run the same command again from the same directory: it goes on from the last
+finished commit, with the same plan, and sends nothing twice. Asking for other checks (another `--test`, `--deep`)
+starts them afresh.
+
+`--detach` (with `--yes`) starts the run in a session of its own and returns at once with its run id. It keeps the
+machine awake while it runs (`caffeinate` on macOS, `systemd-inhibit` on Linux when there) and writes its output
+to `run.log` in the run's directory. While it runs, it sends Metaphi AI how far it is: the phase (`profile`,
+`plan`, `setup`, `checks`, `logs`, `done`), counts of past commits and edits done, and, when it waits on a person,
+which code it waits on.
+
+`kennet codeval status [<run>]` reads a run on this machine, from any directory; with no run id, the one updated
+last. `--wait <seconds>` waits up to that long and returns as soon as the run moves on, ends or needs a person.
+Under `--json` it prints:
+
+```json
+{
+  "run": "run_...", "state": "running", "phase": "checks", "done": 12, "total": 40,
+  "reference": "cv_...", "results": "<directory>", "needs": null, "error": null,
+  "next_step": "kennet codeval status run_... --json --wait 600"
+}
+```
+
+| `state` | Exit | What it means |
+| --- | --- | --- |
+| `running` | 4 | Still going; `next_step` comes back for it. |
+| `done` | 0 | Sent; `reference` names it. |
+| `needs_person` | 6 | Waiting on a person: `needs.ask` is the question to put to them, `needs.options` the commands (`{"label", "run"}`) their answer runs, `needs.action_url` a page when there is one. `needs.code` is `test_command_missing` or `container_required`. |
+| `failed`, `stopped` | 1 (3 for a sign-in) | It ended early; `next_step` is the command that goes on from where it stopped. |
+
+A coding agent runs it the same way, with the person's yes at each step: `--dry-run --json` to show what would be
+sent; on their yes, `--yes --detach --json`; then `kennet codeval status <run> --json --wait 600`, in that session or
+a later one, until it ends or needs them. Consent stays with the person: an agent never adds `--yes` or `--deep` on
+its own.
+
 When it cannot find how a repository builds and tests, it says so. Run it again with your commands, or with
 `--deep`:
 
@@ -397,7 +440,8 @@ kennet codeval ./core --deep
 | `--test`, `--build` | The commands to test, and to build when that is separate. |
 | `--deep` | Lets a model set up the build when no recipe fits, inside containers; needs Docker or Podman (`container_required` otherwise). Sends the contents of the files it reads. |
 | `--yes` | Send without asking. |
-| `--dry-run` | Send nothing; write what would be sent to `sent/`. Not with `--deep` or `--yes`. |
+| `--detach` | Run in the background and return the run id at once. Needs `--yes`. |
+| `--dry-run` | Send nothing; write what would be sent to `sent/`. Not with `--deep`, `--yes` or `--detach`. |
 
 Builds and tests run with a fixed set of environment variables (`PATH`, `HOME`, locale and the like), never your
 keys or cloud credentials. Containers run with all but a few file-ownership capabilities dropped, no new privileges,

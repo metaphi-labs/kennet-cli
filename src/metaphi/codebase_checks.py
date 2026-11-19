@@ -37,6 +37,7 @@ class Plan:
     cache: Path | None = None
     steps: Steps = NONE
     deep: bool = False
+    ledger: Any = None
 
 
 class Tree(dict):
@@ -707,53 +708,71 @@ def _checks(
         out["edits"] = [{**b, "broke": True} for b in edits or []]
         return out
     tip_s: float | None = None
-    try:
-        began = time.monotonic()
-        with (
-            tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch,
-            plan.steps.step("tip"),
-        ):
-            measured = _side(
-                repo,
-                _tree(repo, tip),
-                Path(scratch) / "tip",
-                plan,
-                {**os.environ, "KENNET_TESTS": ""},
-                1,
-                logs,
-                "000-tip",
-                say,
-                found,
-                jobs,
-                measure=paths or {},
+    ledger = plan.ledger
+    kept_tip = ledger.get(name, "tip") if ledger else None
+    if kept_tip:
+        out["tip"], tip_s = kept_tip["tip"], kept_tip["seconds"]
+        say(f"{name}: the latest commit was run before; using that result")
+    else:
+        try:
+            began = time.monotonic()
+            with (
+                tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch,
+                plan.steps.step("tip"),
+            ):
+                measured = _side(
+                    repo,
+                    _tree(repo, tip),
+                    Path(scratch) / "tip",
+                    plan,
+                    {**os.environ, "KENNET_TESTS": ""},
+                    1,
+                    logs,
+                    "000-tip",
+                    say,
+                    found,
+                    jobs,
+                    measure=paths or {},
+                )
+            tip_s = time.monotonic() - began
+            out["tip"] = (
+                {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
             )
-        tip_s = time.monotonic() - began
-        out["tip"] = {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
-        said = out["tip"]
-        built = "build" not in said or said["build"]["exit"] == 0
-        t = said["tests"][0] if said["tests"] else None
-        tested = (
-            ""
-            if not t
-            else (
-                f" \u00b7 {t['passed']} of {t['reported']} tests pass"
-                if t.get("reported")
-                else " \u00b7 tests pass"
-                if t["exit"] == 0
-                else " \u00b7 tests fail"
+            if ledger:
+                ledger.put(name, "tip", "", {"tip": out["tip"], "seconds": tip_s})
+            said = out["tip"]
+            built = "build" not in said or said["build"]["exit"] == 0
+            t = said["tests"][0] if said["tests"] else None
+            tested = (
+                ""
+                if not t
+                else (
+                    f" \u00b7 {t['passed']} of {t['reported']} tests pass"
+                    if t.get("reported")
+                    else " \u00b7 tests pass"
+                    if t["exit"] == 0
+                    else " \u00b7 tests fail"
+                )
             )
-        )
-        say(
-            ("\u2713 " if built and t and t["exit"] == 0 else "\u2717 ")
-            + name
-            + (" builds" if built else " does not build")
-            + tested
-        )
-    except Exception as e:  # noqa: BLE001
-        say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
+            say(
+                ("\u2713 " if built and t and t["exit"] == 0 else "\u2717 ")
+                + name
+                + (" builds" if built else " does not build")
+                + tested
+            )
+        except Exception as e:  # noqa: BLE001
+            say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
 
     edits = edits or []
-    eta = Eta(len(targets) + len(edits), at_once, tip_s, deadline)
+    before = (
+        sum(ledger.get(name, "commit", i) is not None for i in targets)
+        + sum(ledger.get(name, "edit", [b.get("file"), b.get("op"), b.get("nth")]) is not None for b in edits)
+        if ledger
+        else 0
+    )
+    if before:
+        say(f"{name}: {before} of {len(targets) + len(edits)} past commits and edits were run before; running the rest")
+    eta = Eta(len(targets) + len(edits) - before, at_once, tip_s, deadline)
     if targets or edits:
         work = " and ".join(
             f"{k} {what}{'s' if k != 1 else ''}"
@@ -771,6 +790,8 @@ def _checks(
         return f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
 
     def one(n: int, i: int, with_: tuple[Recipe, str | None] | None = found, again: str = "") -> dict | None:
+        if not again and ledger and (kept := ledger.get(name, "commit", i)) is not None:
+            return kept
         if time.monotonic() > deadline:
             return None
         label = label_of(n, i) + again
@@ -790,6 +811,8 @@ def _checks(
                 say(line)
             else:
                 board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
+                if ledger:
+                    ledger.put(name, "commit", i, row)
             return row
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
@@ -846,11 +869,16 @@ def _checks(
             for k, row in zip(ran, again, strict=True):
                 if row is not None and not _neither_built(row):
                     rows[k] = row
+                    if ledger and not row.get("broke"):
+                        ledger.put(name, "commit", targets[k], row)
     out["commits"] = rows
     if edits:
         tip_tree, paths = _tree(repo, tip), paths or {}
 
         def edited(n: int, b: dict) -> dict | None:
+            key = [b.get("file"), b.get("op"), b.get("nth")]
+            if ledger and (kept := ledger.get(name, "edit", key)) is not None:
+                return kept
             if time.monotonic() > deadline:
                 return None
             label = f"{n:03d}-tip"
@@ -867,6 +895,8 @@ def _checks(
                 built = (row["post"].get("build") or {}).get("exit", 0)
                 line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)})"
                 board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
+                if ledger:
+                    ledger.put(name, "edit", key, row)
                 return row
             except Exception as e:  # noqa: BLE001
                 say(f"    {label}: could not run ({type(e).__name__}: {e})")
