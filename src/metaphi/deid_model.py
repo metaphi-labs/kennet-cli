@@ -257,10 +257,21 @@ class Gliner:
         return sorted(kept)
 
 
+_loaded: tuple[Gliner | None, str] | None = None
+
+
 def load(say: Callable[[str], None] | None = None) -> tuple[Gliner | None, str]:
-    """The model, or None with why it does not run. Never raises: the model pass is one layer of several."""
+    """The model, or None with why it does not run, loaded once per process. Never raises: the model pass is one
+    layer of several."""
+    global _loaded
     if os.environ.get("KENNET_DEID_MODEL", "").lower() in ("0", "off", "no", "false"):
         return None, "not run (KENNET_DEID_MODEL=off)"
+    if _loaded is None:
+        _loaded = _load(say)
+    return _loaded
+
+
+def _load(say: Callable[[str], None] | None) -> tuple[Gliner | None, str]:
     try:
         runtime = _runtime(say)
         files = cache() / NAME

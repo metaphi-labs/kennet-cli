@@ -48,7 +48,7 @@ SECRETS = (
     (
         "assignment",
         re.compile(
-            rb"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH)[\"']?\s*[=:]\s*"
+            rb"(?i)((?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH)[\"']?\s*[=:]\s*"
             rb"[\"']?)(?!\[[a-z_]+(?::[A-Za-z0-9_]+)?\])[^\s\"',;]{4,}"
         ),
     ),
@@ -85,16 +85,63 @@ MAC = re.compile(rb"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}([:-]))(?:[0-9A-Fa-f]{2}\
 URL = re.compile(rb"(?i)\b[a-z][a-z0-9+.-]{1,15}://[^\s\"'<>()\[\]{}`]+")
 SCP_REMOTE = re.compile(rb"(?<![A-Za-z0-9._-])[A-Za-z0-9._-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+):[A-Za-z0-9._~/-]+")
 INTERNAL_TLDS = ("local", "internal", "corp", "lan", "intranet", "localdomain", "home", "priv", "private")
-PUBLIC_TLDS = (
-    "com|net|org|io|dev|ai|co|app|cloud|biz|info|me|us|uk|de|fr|nl|jp|cn|ca|au|eu|ch|se|no|fi|dk|es|it|ru|kr|"
-    "tech|site|xyz|systems|services|tools|team|company|works|online|example|test"
+PUBLIC_TLD_SET = frozenset(
+    [
+        "com",
+        "net",
+        "org",
+        "io",
+        "dev",
+        "ai",
+        "co",
+        "app",
+        "cloud",
+        "biz",
+        "info",
+        "me",
+        "us",
+        "uk",
+        "de",
+        "fr",
+        "nl",
+        "jp",
+        "cn",
+        "ca",
+        "au",
+        "eu",
+        "ch",
+        "se",
+        "no",
+        "fi",
+        "dk",
+        "es",
+        "it",
+        "ru",
+        "kr",
+        "tech",
+        "site",
+        "xyz",
+        "systems",
+        "services",
+        "tools",
+        "team",
+        "company",
+        "works",
+        "online",
+        "example",
+        "test",
+    ]
 )
-HOST = re.compile(
-    rb"(?i)(?<![A-Za-z0-9_.@-])(?:"
-    rb"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + "|".join(INTERNAL_TLDS).encode() + rb")"
-    rb"|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}(?:" + PUBLIC_TLDS.encode() + rb")"
-    rb")(?![A-Za-z0-9_-]|\.[A-Za-z0-9])"
-)
+HOST = re.compile(rb"(?<![A-Za-z0-9_.@-])[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9_-]|\.[A-Za-z0-9])")
+"""A dotted name; it is a host when it ends in an internal top-level domain, or has three or more labels and ends in
+a public one. File names (`ledger.py`) and Java packages (`com.acme.Ledger`) are not."""
+
+
+def _is_host(name: bytes) -> bool:
+    labels = name.lower().split(b".")
+    tld = labels[-1].decode()
+    return (tld in INTERNAL_TLDS and len(labels) >= 2) or (tld in PUBLIC_TLD_SET and len(labels) >= 3)
+
 
 PUBLIC_HOSTS = frozenset(
     [
@@ -499,7 +546,7 @@ def _patterns(data: bytes, counts: collections.Counter) -> bytes:
         return b"[url]"
 
     def host(m: re.Match[bytes]) -> bytes:
-        if _public(m.group(0).decode()):
+        if not _is_host(m.group(0)) or _public(m.group(0).decode()):
             return m.group(0)
         counts["host"] += 1
         return b"[host]"
