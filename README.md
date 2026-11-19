@@ -424,16 +424,18 @@ name (`profile-1.json`, `results-1.json`, `results-2.json`, ...), never overwrit
 
 A run is bound to the profile it was filed with. Run again after the tip has moved and it goes on measuring the filed
 tip, commits and file numbers, never a new profile. The profile and every Results body carry `key_id`, a keyed hash
-of a fixed label under the repository's key. If the filed tip is rewritten away in this clone, CodeVal sends a
-profile of the current tip with `restart` set and says in one line that it replaces the earlier measurements of the
+of a fixed label under the repository's key. If the filed tip is rewritten away in this clone while the live
+measurement is still this clone's, CodeVal sends a profile of the current tip with `restart` set and says in one line that it replaces the earlier measurements of the
 repository. If another machine or clone is measuring the repository, it stops with exit 6 (`in_use`) and never
-replaces that on its own: continue there, or run the same command with `--restart`. Each clone keeps its own run
+replaces that on its own: continue there, or run the same command with `--restart`. A restart replaces this clone's
+record only once Metaphi AI takes it; refused (as past the most restarts a run takes), the clone stays as it was. Each clone keeps its own run
 record; the key is one per repository on this machine. Only the tip's own history is sent, the tip last; other
 branches are not.
 
 A tip whose build or any test run ends in this machine's environment (the network, memory or disk, time, permissions)
 is sent once, as that class, and CodeVal then stops with exit 6 (`environment`) naming what to fix; such an end is
-never kept, so the next run measures the tip again.
+never kept, so the next run measures the tip again. A tip whose build and tests take longer than the batch's minutes ends the run, and
+CodeVal says so and finishes.
 
 Why a build or test failed is read here, by rules shipped with this release. CodeVal turns on the toolchain's
 structured output where the command names the tool (`go test -json`, cargo `--message-format=json`, pytest JUnit XML,

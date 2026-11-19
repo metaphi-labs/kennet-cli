@@ -7,6 +7,7 @@ absolute path, or its URL, hashed), so two clones never share a run:
 
     run.json       the server's run id and the tip it was measured at
     profile.json   what the filed profile bound the run to: its tip, commit order and ids (never re-read from git)
+    profile.pending.json   a restart's profile while the server has not answered it; refused, it is dropped
     checks.jsonl   each finished unit (the tip, a commit, a mutant), written and synced before the next starts
     logs/          every build and test log, whole; only each log's sha256 is sent
     replaced/      the finished units of a measure a restart replaced, set aside and never read again
@@ -31,6 +32,7 @@ STATE_ENV = "KENNET_STATE_HOME"
 KEY = "key"
 RUN = "run.json"
 PROFILE = "profile.json"
+PENDING = "profile.pending.json"
 
 
 def state_home() -> Path:
@@ -104,9 +106,24 @@ def keep_profile(at: Path, kept: dict[str, Any]) -> None:
     _kept(at / PROFILE, json.dumps(kept, separators=(",", ":")).encode())
 
 
-def kept_profile(at: Path) -> dict[str, Any] | None:
+def stage_profile(at: Path, kept: dict[str, Any]) -> None:
+    """A restart's profile, kept beside the bound one until the server answers (`settle`)."""
+    _kept(at / PENDING, json.dumps(kept, separators=(",", ":")).encode())
+
+
+def settle(at: Path, took: bool) -> None:
+    """End a staged restart: taken, its profile becomes the bound one and the finished units are set aside; refused,
+    it is dropped and the clone stays as it was."""
+    if took:
+        replaced(at)
+        os.replace(at / PENDING, at / PROFILE)
+    else:
+        (at / PENDING).unlink(missing_ok=True)
+
+
+def kept_profile(at: Path, name: str = PROFILE) -> dict[str, Any] | None:
     try:
-        got = json.loads((at / PROFILE).read_text())
+        got = json.loads((at / name).read_text())
     except (OSError, ValueError):
         return None
     return got if isinstance(got, dict) and isinstance(got.get("tip"), str) else None
@@ -223,5 +240,7 @@ __all__ = [
     "repo_key",
     "run_state",
     "sent",
+    "settle",
+    "stage_profile",
     "state_home",
 ]

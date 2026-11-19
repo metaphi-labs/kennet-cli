@@ -1305,24 +1305,46 @@ RESTART_WHY = {
 }
 
 
-def restart(local: Local, why: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Measure the repository afresh: a profile of the current tip sent with `restart`, which the server files in
-    place of the open run's measure. The new profile is kept and the run marked pending before it is sent, so a run
-    killed before the answer restarts again rather than binding the old profile to the new measure; what this clone
-    finished for the old one is set aside (`replaced`)."""
+def restart(local: Local, why: str, sleep: Callable[[float], None] = time.sleep, at: str = "HEAD") -> dict[str, Any]:
+    """Measure the repository afresh: a profile of the tip (`at`) sent with `restart`, which the server files in place
+    of the open run's measure. It is staged first (`profile.pending.json`, the run marked pending), so a run killed
+    before the answer sends it again; only once the server takes it does it replace the bound profile and set aside
+    what this clone finished for the old measure. A refusal drops it, and the clone stays as it was."""
     if say:
         say(
             f"{local.name}: measuring the latest commit afresh ({RESTART_WHY.get(why, why)}); this replaces the "
             "earlier measurements of this repository"
         )
-    local.kept = {}
-    doc = {**profile(local), "restart": True}
-    codeval_runs.replaced(local.home)
-    file(local)
-    codeval_runs.keep_run(local.home, tip=local.tip, restart="pending", measure=None)
-    got, _path = send_profile(local, doc, sleep)
+    bound, local.kept = local.kept, {}
+    doc = {**profile(local, at), "restart": True}
+    codeval_runs.stage_profile(local.home, {k: v for k, v in local.kept.items() if k != "path"})
+    codeval_runs.keep_run(local.home, restart="pending")
+    try:
+        got, _path = send_profile(local, doc, sleep)
+    except errors.MetaphiError as e:
+        if not e.retryable:
+            codeval_runs.settle(local.home, took=False)
+            codeval_runs.keep_run(local.home, restart=None)
+            local.kept = bound
+        raise
+    codeval_runs.settle(local.home, took=True)
     codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip, restart=None, measure=got.get("measure"))
     return got
+
+
+def pending_restart(local: Local) -> str | None:
+    """The tip of a restart sent and not answered, when its staged profile is still here."""
+    if codeval_runs.run_state(local.home).get("restart") != "pending":
+        return None
+    staged = codeval_runs.kept_profile(local.home, codeval_runs.PENDING)
+    return staged["tip"] if staged and _held(local, staged["tip"]) else None
+
+
+def too_slow(results: dict[str, Any]) -> bool:
+    """Whether the tip sent ran out of the batch's minutes: its error, build or a test run ended in a timeout."""
+    sent = results.get("tip") or {}
+    classes = [sent.get("error"), *(r.get("class") for r in (sent.get("build"), *sent.get("tests", [])) if r)]
+    return any(c in ("env_timeout", "test_timeout") for c in classes)
 
 
 say: Callable[[str], None] | None = None
@@ -1543,7 +1565,7 @@ def _unit(raw: dict[str, Any] | None, key: bytes, sides: tuple[str, ...], runs: 
 ENVIRONMENT = {
     "env_network": ("the network failed", "check this machine reaches the internet and the services the build needs"),
     "env_resource": ("this machine ran out of memory or disk", "free memory and disk, or use a larger machine"),
-    "env_timeout": ("it ran out of time", "give it a machine that runs the tests faster, or more time"),
+    "env_timeout": ("it ran out of time", "give it a machine that builds and runs the tests faster"),
     "env_permission": ("it was refused permission", "let this user read and write the clone and run the tools"),
 }
 

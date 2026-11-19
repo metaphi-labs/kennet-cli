@@ -502,6 +502,12 @@ def codebase_hours(h: float) -> str:
 IN_USE = frozenset(["key_mismatch", "profile_mismatch", "superseded"])
 
 
+def _held_elsewhere(e: errors.MetaphiError) -> bool:
+    """The service's answer that another machine or clone holds the run: another key, tip or measure, or a batch it
+    already holds other results for (a 400 with no code of its own)."""
+    return e.code in IN_USE or (e.code == "parameter_invalid" and "already answered with other results" in e.message)
+
+
 def _in_use(a: argparse.Namespace, org: str) -> errors.MetaphiError:
     """Another machine or clone holds this repository's run (another key, another tip, or a newer measure): stop,
     never restart on its own; the person chooses where it goes on."""
@@ -542,14 +548,20 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
         for local in codeval.opened(paths, Path(scratch), say):
             kept = codeval_runs.run_state(local.home)
             got = None
-            if a.restart or kept.get("restart") == "pending":
-                got = codeval.restart(local, "asked" if a.restart else "pending")
+            staged = codeval.pending_restart(local)
+            if kept.get("restart") == "pending" and staged is None:
+                codeval_runs.keep_run(local.home, restart=None)
+            if a.restart or staged:
+                got = codeval.restart(local, "asked" if a.restart else "pending", at="HEAD" if a.restart else staged)
             elif kept.get("run"):
                 try:
                     goes_on = codeval.resumed(local)
                 except errors.MetaphiError as e:
                     if e.code != "profile_gone":
                         raise
+                    # rewritten away in this clone: restart on its own only while the live measure is this clone's
+                    if codeval.get_run(kept["run"]).get("measure") != kept.get("measure"):
+                        raise _in_use(a, org) from None
                     got = codeval.restart(local, e.code)
                 else:
                     if goes_on:
@@ -592,11 +604,16 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                     try:
                         got, _path = codeval.send_results(local, run, results)
                     except errors.MetaphiError as e:
-                        if e.code in IN_USE:
+                        if _held_elsewhere(e):
                             raise _in_use(a, org) from None
                         raise
                     got.setdefault("run", run)
-                    if stop := codeval.environment(local, results):
+                    if got.get("done") and codeval.too_slow(results):
+                        say(
+                            f"{local.name}: the latest commit's build and tests took longer than the "
+                            f"{float(nxt['run_minutes']):g}-minute limit, so Metaphi AI ended the run"
+                        )
+                    elif stop := codeval.environment(local, results):
                         raise stop
             except codebase_checks.Stuck as e:
                 e.next_step = e.next_step or _codeval_line(a)
