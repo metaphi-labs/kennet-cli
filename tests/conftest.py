@@ -7,6 +7,11 @@ def _no_release_look(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_model_download(monkeypatch):
+    monkeypatch.setenv("KENNET_DEID_MODEL", "off")
+
+
+@pytest.fixture(autouse=True)
 def _with_display(monkeypatch):
     from metaphi import accounts
 

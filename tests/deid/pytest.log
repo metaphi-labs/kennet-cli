@@ -1,0 +1,50 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.7, pytest-8.3.4, pluggy-1.5.0 -- {{home:/Users/sseller}}/.venvs/falcon/bin/python3.12
+cachedir: .pytest_cache
+rootdir: {{repo:/Users/sseller/work/falcon_core}}
+configfile: pyproject.toml
+plugins: cov-6.0.0, xdist-3.6.1, anyio-4.7.0
+collecting ... collected 48 items
+
+tests/test_ledger.py::test_totals PASSED                                 [  2%]
+tests/test_ledger.py::test_rounding PASSED                               [  4%]
+tests/test_ledger.py::test_currency_from_locale FAILED                   [  6%]
+tests/test_notify.py::test_sends_mail PASSED                             [  8%]
+tests/test_notify.py::test_owner_lookup FAILED                           [ 10%]
+
+=================================== FAILURES ===================================
+__________________________ test_currency_from_locale ___________________________
+
+    def test_currency_from_locale():
+        ledger = Ledger(owner="{{email:sam.seller@acme-corp.com}}")
+>       assert ledger.currency == "EUR"
+E       AssertionError: assert 'USD' == 'EUR'
+E         - EUR
+E         + USD
+
+{{repo:/Users/sseller/work/falcon_core}}/tests/test_ledger.py:41: AssertionError
+______________________________ test_owner_lookup _______________________________
+
+    def test_owner_lookup():
+>       owner = directory.find("{{name:Maria Gonzalez}}")
+E       LookupError: no account for '{{name:Maria Gonzalez}}' at https://{{host:ldap.corp.acme-corp.com}}/people
+E       (connected to {{ip:10.42.7.19}}:636 as {{email:svc-falcon@acme-corp.com}})
+
+{{home:/Users/sseller}}/.venvs/falcon/lib/python3.12/site-packages/falcon_dir/client.py:88: LookupError
+----------------------------- Captured log call ------------------------------
+INFO     falcon.notify:notify.py:52 sending digest to {{email:priya@acme-corp.com}} via {{host:smtp.internal}}:25
+WARNING  falcon.notify:notify.py:61 retrying with token {{secret:ghp_9fQ2xL7mN4pR8sT1vW3yZ5aB6cD0eF2gH4jK}}
+DEBUG    urllib3.connectionpool:connectionpool.py:1049 Starting new HTTPS connection (1): pypi.org:443
+DEBUG    urllib3.connectionpool:connectionpool.py:546 https://pypi.org:443 "GET /simple/requests/ HTTP/1.1" 200 None
+INFO     falcon.ledger:ledger.py:17 reviewer: {{name:Priya Raman}}, approved 2024-11-03T10:22:31Z
+---------- coverage: platform darwin, python 3.12.7-final-0 ----------
+Name                                   Stmts   Miss  Cover
+----------------------------------------------------------
+internal_payments/billing/ledger.py      120     14    88%
+internal_payments/billing/notify.py       64     30    53%
+----------------------------------------------------------
+TOTAL                                    184     44    76%
+=========================== short test summary info ============================
+FAILED tests/test_ledger.py::test_currency_from_locale - AssertionError: assert 'USD' == 'EUR'
+FAILED tests/test_notify.py::test_owner_lookup - LookupError: no account for '{{name:Maria Gonzalez}}'
+========================= 2 failed, 46 passed in 3.41s =========================

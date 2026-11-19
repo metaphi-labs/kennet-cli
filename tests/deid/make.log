@@ -1,0 +1,21 @@
+make -C native all
+make[1]: Entering directory '{{repo:/Users/sseller/work/falcon_core}}/native'
+cc -O2 -Wall -I{{home:/Users/sseller}}/.local/include -c ledger.c -o build/ledger.o
+ledger.c: In function 'ledger_open':
+ledger.c:42:17: warning: format '%d' expects argument of type 'int', but argument 3 has type 'long' [-Wformat=]
+   42 |     fprintf(log, "opened by %d\n", owner_id);
+      |                 ^~~~~~~~~~~~~~~~
+cc -shared -o build/libledger.so build/ledger.o -L/usr/local/lib -lpq
+make[1]: Leaving directory '{{repo:/Users/sseller/work/falcon_core}}/native'
+./scripts/check-env.sh
+host: {{hostname:sams-mbp}}.local ({{ip:10.0.12.44}})  user: {{user:sseller}}  shell: /bin/zsh
+git: {{name:Sam Seller}} <{{email:sam.seller@acme-corp.com}}> on branch main, remote origin https://github.com/{{org:acme-corp}}/falcon_core.git
+ssh-rsa key comment: {{email:sseller@sams-mbp.local}}
+running integration suite against {{url:http://jenkins.acme.corp/job/falcon/1432/}}
+export DATABASE_PASSWORD={{secret:s3cr3t-Falcon!}}
+Downloading https://github.com/libuv/libuv/archive/refs/tags/v1.48.0.tar.gz
+sha256 8c253adb0f800926a6cbd1c6576abae0bc8eb86a4f891049b72f9e5b7dc58f33  v1.48.0.tar.gz
+test/run.sh: line 12: {{home:/Users/sseller}}/bin/fixture-gen: No such file or directory
+Contact {{name:Liam O'Brien}} or {{name:Aisha Mohammed}} for access to the fixtures bucket.
+Signed-off-by: {{name:Daniel Okafor}} <{{email:daniel.okafor@acme-corp.com}}>
+make: *** [Makefile:31: test] Error 127

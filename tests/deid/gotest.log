@@ -1,0 +1,29 @@
+go: downloading github.com/stretchr/testify v1.9.0
+go: downloading golang.org/x/sync v0.8.0
+go: downloading {{host:git.acme-corp.com}}/platform/authz v0.4.2
+go: {{host:git.acme-corp.com}}/platform/authz@v0.4.2: verifying go.mod: h1:Zx8sQ9bWvR3mT6kY2pL5nA7cE1dF4gH0jK2lM3nO5pQ= mismatch
+=== RUN   TestLedgerTotals
+--- PASS: TestLedgerTotals (0.00s)
+=== RUN   TestSettle
+    settle_test.go:44: dialing {{ip:192.168.1.23}}:5432 (host {{hostname:sams-mbp}})
+    settle_test.go:51: settled batch 7f3c2a9e1b4d8f6a0c5e3b7d9a1f2c4e6b8d0a2c for {{name:Sam Seller}}
+--- FAIL: TestSettle (0.02s)
+=== RUN   TestBridge
+    bridge_test.go:19: interface en0 ether {{mac:a4:83:e7:1c:2b:9f}} inet6 {{ip:fe80::1c8a:3bff:fe4d:9a21}}%en0
+    bridge_test.go:20: GOPATH={{home:/Users/sseller}}/go GOCACHE={{home:/Users/sseller}}/Library/Caches/go-build
+--- PASS: TestBridge (0.01s)
+=== RUN   TestAuthz
+    authz_test.go:77: AUTHZ_TOKEN={{secret:Qm9wLz2xR8vT4nK7cY1aD5fH3jL6pS9wB0eG}}
+    authz_test.go:78: calling https://{{host:authz.staging.acme-corp.com}}/v1/check?user={{user:sseller}}
+--- PASS: TestAuthz (0.12s)
+FAIL
+exit status 1
+FAIL	{{host:git.acme-corp.com}}/{{org:acme-corp}}/falcon/settle	0.214s
+ok  	{{host:git.acme-corp.com}}/{{org:acme-corp}}/falcon/ledger	0.031s
+panic: runtime error: invalid memory address or nil pointer dereference [recovered]
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x104b2c3e8]
+goroutine 7 [running]:
+{{host:git.acme-corp.com}}/{{org:acme-corp}}/falcon/settle.(*Batch).Close(0x0)
+	{{repo:/Users/sseller/work/falcon_core}}/settle/batch.go:118 +0x28
+testing.tRunner(0x14000182680, 0x104c1e2a0)
+	/opt/homebrew/Cellar/go/1.23.2/libexec/src/testing/testing.go:1690 +0xe4

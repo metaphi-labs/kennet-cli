@@ -213,6 +213,7 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `container_required`, `test_command_missing` | `kennet codeval` needs the user (exit 6): put `needs.ask` to them, word for word, and on their answer run the `needs.options` command it picks, or `next_step`. `kennet skill show partner` is the CodeVal guide. |
 | `run_not_found`, `bad_wait` | `kennet codeval status` found no such run on this machine, or `--wait` was negative. `kennet codeval status --json` names the run updated last. |
 | `run_in_progress` | That `kennet codeval` run is already going in another process. Run `next_step` to follow it. |
+| `deid_incomplete` | `kennet codeval` found a known identifier (an author, the user, a path or a host) left in the logs after de-identification, and sent nothing. Tell the user the message; it names kinds, never values. |
 | `confirmation_required` | Nothing was sent. Ask the user; on yes, run `next_step`, the same command with `--yes`. |
 | `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
 | `rate_limited_concurrent`, `rate_limited_daily` | Too many runs at once, or today. Wait for a run to end, or tell the user. |
@@ -467,7 +468,11 @@ single-line edits Metaphi AI names; only results leave the machine. What is sent
 
 - counts and ids for files, folders, commits and authors;
 - the shape of commit messages, never their text;
-- build and test output and logs, with common secret and token patterns replaced;
+- build and test output and logs, de-identified on this machine first: authors become the profile's author ids;
+  the user, home folder, machine name, paths, remotes, emails, addresses, internal hosts and secrets become typed
+  placeholders; a small local model, downloaded once and checked by sha256, finds names the rest miss. Before
+  anything is sent the packed bytes are searched for every known identifier, and if one is left nothing is sent.
+  `sent/sent.json` counts what was replaced by kind, never the values, and says whether the model ran;
 - the git ids of files Metaphi AI names;
 - while it runs, how far it is (a phase and counts) and which of the codes below it waits on.
 
@@ -526,6 +531,7 @@ It answers `pending` with its `url`: give the user the link to sign in the brows
 | `container_required`, `test_command_missing` | Exit 6: put `needs.ask` to the user and run the option they choose (step 2). |
 | `run_not_found` | `kennet codeval status` knows no such run on this machine: `kennet codeval status --json` names the last one. |
 | `run_in_progress` | The run is already going in another process: run `next_step` to follow it. |
+| `deid_incomplete` | An identifier survived de-identification, so nothing was sent: tell the user the message and `next_step`. |
 | `git_too_old` | Ask the user to update git; nothing was sent. |
 | `no_repository` | No full git clone at a path given; each path's reason is in the output. Ask the user to clone it in full, then run the same command. |
 | `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes`, `dry_run_with_detach`, `bad_wait` | The flags do not go together: fix them. |

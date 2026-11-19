@@ -1,0 +1,36 @@
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn config //{{host:npm.pkg.acme-corp.com}}/:_authToken={{secret:npm_Xk4Lm9Pq2Rs7Tv1Wy6Za3Bc8De5Fg0Hi2Jk4}}
+added 812 packages, and audited 813 packages in 14s
+> falcon-web@3.2.0 test
+> vitest run --reporter=verbose
+
+ RUN  v2.1.5 {{repo:/Users/sseller/work/falcon_core}}/web
+
+ ✓ src/ledger.test.ts > totals > sums lines 3ms
+ ✓ src/ledger.test.ts > totals > rounds half up 1ms
+ × src/profile.test.ts > profile > shows the owner 12ms
+   → expected 'Signed in as {{name:Sam Seller}}' to be 'Signed in as {{name:Priya Raman}}'
+ × src/api.test.ts > api > posts to the gateway 31ms
+   → request to https://{{host:api.dev.acme-corp.com}}/v2/ledger failed, reason: getaddrinfo ENOTFOUND {{host:api.dev.acme-corp.com}}
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/profile.test.ts > profile > shows the owner
+AssertionError: expected 'Signed in as {{name:Sam Seller}}' to be 'Signed in as {{name:Priya Raman}}' // Object.is equality
+ ❯ src/profile.test.ts:22:31
+     20|   it('shows the owner', () => {
+     21|     render(<Profile user={{ name: '{{name:Sam Seller}}', email: '{{email:sam.seller@acme-corp.com}}' }} />)
+     22|     expect(screen.getByRole('banner').textContent).toBe('Signed in as {{name:Priya Raman}}')
+       |                               ^
+ ❯ {{home:/Users/sseller}}/.npm/_npx/3f2a/node_modules/vitest/dist/chunk.js:120:9
+
+ Test Files  2 failed | 1 passed (3)
+      Tests  2 failed | 2 passed (4)
+   Start at  10:22:31
+   Duration  1.84s (transform 88ms, setup 0ms, collect 210ms, tests 46ms, environment 402ms, prepare 61ms)
+
+npm error code ELIFECYCLE
+npm error path {{repo:/Users/sseller/work/falcon_core}}/web
+npm error A complete log of this run can be found in: {{home:/Users/sseller}}/.npm/_logs/2024-11-03T10_22_33_120Z-debug-0.log
+npm http fetch GET 200 https://registry.npmjs.org/vitest 41ms (cache revalidated)
+"integrity": "sha512-Ek2Zy5w1vS4mQ0Tn7pK3jR9xH2bC6dF8gL1aW4eY7uI0oP3sD5fG8hJ2kL4zX6cV9bN1mQ3wE5rT7yU9iO0pA2s=="

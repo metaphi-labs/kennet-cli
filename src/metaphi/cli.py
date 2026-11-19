@@ -816,9 +816,11 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
             for line in codeval.sent_lines(a.deep):
                 say(line)
             _sent(home, "codeval.json.gz", "/codeval", codeval.packed(doc), None, say)
-            _sent(home, "checks.json.gz", "/codeval/<reference>/checks", codeval.packed(report), None, say)
-            logs, redactions = codeval.logs_packed(home / "logs", "", [k["name"] for k in kept])
-            _sent(home, "logs.tar.gz", "/codeval/<reference>/logs", logs, None, say, redacted=redactions)
+            checks, cleared = codeval.checks_packed(report, kept)
+            _sent(home, "checks.json.gz", "/codeval/<reference>/checks", checks, None, say, deidentified=cleared)
+            logs, cleared = codeval.logs_packed(home / "logs", "", kept)
+            _sent(home, "logs.tar.gz", "/codeval/<reference>/logs", logs, None, say, deidentified=cleared)
+            say(codeval.deid_line(cleared))
             run.finished()
             if a.json:
                 print(json.dumps({"reference": None, "sent": False, "results": str(home), "run": name}, indent=2))
@@ -831,13 +833,14 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
         run.phase("logs")
         try:
             if not (home / "checks.sent").is_file():
-                body = codeval.packed(report)
+                body, cleared = codeval.checks_packed(report, kept)
                 with steps.step("post_checks"):
                     answered = codeval.post_checks(ref, body)
-                _sent(home, "checks.json.gz", f"/codeval/{ref}/checks", body, answered, say)
+                _sent(home, "checks.json.gz", f"/codeval/{ref}/checks", body, answered, say, deidentified=cleared)
                 (home / "checks.sent").touch()
             if not (home / "logs.sent").is_file():
-                logs, redactions = codeval.logs_packed(home / "logs", ref, [k["name"] for k in kept])
+                logs, cleared = codeval.logs_packed(home / "logs", ref, kept)
+                say(codeval.deid_line(cleared))
                 _sent(
                     home,
                     "logs.tar.gz",
@@ -845,7 +848,7 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
                     logs,
                     codeval.post_logs(ref, logs),
                     say,
-                    redacted=redactions,
+                    deidentified=cleared,
                 )
                 (home / "logs.sent").touch()
         except errors.MetaphiError as e:

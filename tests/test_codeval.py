@@ -539,9 +539,10 @@ def test_logs_packed(tmp_path):
     (root / "other").mkdir()
     (root / "other" / "x.log").write_text("not this run's")
     (root / "secret-name" / "setup" / "turns.jsonl").write_text('{"token": "ghp_' + "a" * 36 + '"}')
-    body, redactions = codeval.logs_packed(root, "cv_" + "5" * 16, ["secret-name"])
+    body, cleared = codeval.logs_packed(root, "cv_" + "5" * 16, [{"name": "secret-name"}])
     names, said = _unpacked(body)
-    assert redactions == {"github_token": 1} and b"ghp_" not in said["0/setup/turns.jsonl"]
+    assert cleared == {"replaced": {"github_token": 1}, "model": "not run (KENNET_DEID_MODEL=off)"}
+    assert b"ghp_" not in said["0/setup/turns.jsonl"]
     assert sorted(names) == ["0/big.log", "0/setup/turns.jsonl", "0/steps.jsonl", "kennet-logs.json"]
     big = said["0/big.log"]
     assert len(big) < codeval.LOG_FILE_MOST + 100 and big.startswith(b"A") and big.endswith(b"BZ")
@@ -1381,7 +1382,10 @@ def test_dry_run_writes_what_would_be_sent(made, capsys, tmp_path, monkeypatch):
     assert got["sent"] is False and got["reference"] is None
     rows = json.loads((_home(tmp_path) / "sent" / "sent.json").read_text())
     assert sorted(r["file"] for r in rows) == ["checks.json.gz", "codeval.json.gz", "logs.tar.gz"]
-    assert all(r["sent"] is False for r in rows) and "redacted" in next(r for r in rows if r["file"] == "logs.tar.gz")
+    assert all(r["sent"] is False for r in rows)
+    for name in ("logs.tar.gz", "checks.json.gz"):
+        cleared = next(r for r in rows if r["file"] == name)["deidentified"]
+        assert set(cleared) == {"replaced", "model"} and cleared["model"].startswith("not run")
 
 
 def test_deep_needs_a_container_engine(tested, capsys, monkeypatch):

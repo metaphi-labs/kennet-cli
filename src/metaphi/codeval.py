@@ -20,7 +20,7 @@ from typing import IO, Any
 
 import httpx
 
-from metaphi import __version__, api, codebase_checks, codebase_env, codebase_sites, config, errors
+from metaphi import __version__, api, codebase_checks, codebase_env, codebase_sites, config, deid, deid_model, errors
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 
@@ -750,6 +750,10 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
             order=order,
             start=start,
             paths={row["file"]: path for path, row in rows.items() if row["at_tip"]},
+            authors=dict(authors),
+            domains=dict(domains),
+            people=_people(repo),
+            remotes=sorted(set(_text(repo, "remote", "-v").split()[1::3])),
         )
     return {
         "name": name,
@@ -769,6 +773,14 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
         "commits": commits,
         "files": sorted(rows.values(), key=lambda r: r["file"]),
     }
+
+
+def _people(repo: Path) -> list[list[str]]:
+    """Each author's and committer's name with the address it came with: kept on this machine, where
+    de-identification replaces the names in logs with the profile's author ids."""
+    said = _out(repo, "log", "HEAD", "--format=%aN%x00%aE%x00%cN%x00%cE%x00").decode("utf-8", "replace")
+    fields = [f.strip() for f in said.split("\0")]
+    return sorted({(n, e.lower()) for n, e in zip(fields[0::2], fields[1::2], strict=False) if n and e})
 
 
 SKIPPED_FIX = {
@@ -1174,11 +1186,18 @@ SENT = (
     "What is sent to Metaphi AI:",
     "  \u00b7 counts and ids for files, folders, commits and authors",
     "  \u00b7 the shape of commit messages, never their text",
-    "  \u00b7 build and test output and logs",
+    "  \u00b7 build and test output and logs, de-identified on this machine first",
     "  \u00b7 the git ids of files Metaphi AI names",
 )
 DEEP_SENT = "  \u00b7 with --deep: the contents of files read to set up the build"
 TAKES = "Then it builds and tests past commits here, which can take hours; the time left shows as it runs."
+
+
+def deid_line(summary: dict[str, Any]) -> str:
+    """One line for the preview: what de-identification replaced, by kind, and whether the model pass ran."""
+    got = summary.get("replaced") or {}
+    said = ", ".join(f"{n} {k}" for k, n in sorted(got.items(), key=lambda x: (-x[1], x[0]))) or "nothing found"
+    return f"De-identified here: {said}. Model pass: {summary.get('model')}"
 
 
 def sent_lines(deep: bool = False) -> tuple[str, ...]:
@@ -1283,39 +1302,26 @@ def post_checks(ref: str, body: bytes, sleep: Callable[[float], None] = time.sle
     )
 
 
-REDACT = (
-    ("private_key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)),
-    ("metaphi_key", re.compile(rb"mai_sk_[A-Za-z0-9_-]{20,}")),
-    ("aws_access_key", re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("github_token", re.compile(rb"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})")),
-    ("slack_token", re.compile(rb"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("google_api_key", re.compile(rb"\bAIza[0-9A-Za-z_-]{35}")),
-    ("api_key", re.compile(rb"\bsk-[A-Za-z0-9_-]{20,}")),
-    ("jwt", re.compile(rb"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
-    ("url_credentials", re.compile(rb"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)")),
-    (
-        "assignment",
-        re.compile(
-            rb"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[\"']?\s*[=:]\s*[\"']?)"
-            rb"(?!\[redacted)[^\s\"']{4,}"
-        ),
-    ),
-)
+def _cut(data: bytes) -> bytes:
+    """A log over LOG_FILE_MOST keeps its head and tail, cut at line ends so no identifier is split."""
+    if len(data) <= LOG_FILE_MOST:
+        return data
+    head = data[: 512 << 10]
+    tail = data[-(LOG_FILE_MOST - (512 << 10)) :]
+    head = head[: head.rfind(b"\n") + 1] or head
+    tail = tail[tail.find(b"\n") + 1 :] if b"\n" in tail else tail
+    return head + b"[... cut by kennet codeval ...]\n" + tail
 
 
-def redacted(data: bytes, counts: collections.Counter) -> bytes:
-    for kind, pattern in REDACT:
-        tag = b"[redacted:" + kind.encode() + b"]"
-
-        def sub(m: re.Match, tag: bytes = tag, kind: str = kind) -> bytes:
-            counts[kind] += 1
-            return (m.group(1) if m.re.groups else b"") + tag
-
-        data = pattern.sub(sub, data)
-    return data
+def _scrubbers(kept: list[dict]) -> tuple[list[deid.Scrubber], str]:
+    model, said = deid_model.load(say)
+    return [deid.Scrubber(k, model) for k in deid.known(kept)], said
 
 
-def logs_packed(root: Path, ref: str, names: list[str]) -> tuple[bytes, dict[str, int]]:
+def logs_packed(root: Path, ref: str, kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
+    """The run's logs as a tar.gz, de-identified here, with what was replaced by kind. Raises `deid.Unsafe`, and
+    nothing is sent, when a known identifier is still in the packed bytes."""
+    scrubbers, said = _scrubbers(kept)
     buf, counts = io.BytesIO(), collections.Counter()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
 
@@ -1325,7 +1331,8 @@ def logs_packed(root: Path, ref: str, names: list[str]) -> tuple[bytes, dict[str
             tar.addfile(info, io.BytesIO(data))
 
         add("kennet-logs.json", json.dumps({"schema": LOGS_SCHEMA, "ref": ref, "tool_version": __version__}).encode())
-        for n, repo in enumerate(names):
+        for n, (local, scrub) in enumerate(zip(kept, scrubbers, strict=True)):
+            repo = local["name"]
             for f in sorted((root / repo).rglob("*")) if (root / repo).is_dir() else []:
                 name = f"{n}/{f.relative_to(root / repo).as_posix()}"
                 if f.is_symlink() or not f.is_file() or NOT_PACKED.search(name):
@@ -1334,14 +1341,33 @@ def logs_packed(root: Path, ref: str, names: list[str]) -> tuple[bytes, dict[str
                     data = f.read_bytes()
                 except OSError:
                     continue
-                if len(data) > LOG_FILE_MOST:
-                    data = (
-                        data[: 512 << 10]
-                        + b"\n[... cut by kennet codeval ...]\n"
-                        + data[-(LOG_FILE_MOST - (512 << 10)) :]
-                    )
-                add(name, redacted(data, counts))
-    return buf.getvalue(), dict(sorted(counts.items()))
+                add(scrub.text(name), scrub.bytes(_cut(data)))
+    for scrub in scrubbers:
+        counts.update(scrub.counts)
+    body = buf.getvalue()
+    _unsafe(gzip.decompress(body), scrubbers, "the logs")
+    return body, deid.summary(counts, said)
+
+
+def checks_packed(report: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
+    """The checks report, its text de-identified here as the logs are; `deid.Unsafe` when an identifier is left."""
+    scrubbers, said = _scrubbers(kept)
+    repos = report.get("repos") or []
+    scrubbed = {k: v for k, v in report.items() if k != "repos"}
+    scrubbed["repos"] = [s.doc(r) for s, r in zip(scrubbers, repos, strict=False)] + repos[len(scrubbers) :]
+    body = packed(scrubbed)
+    _unsafe(gzip.decompress(body), scrubbers, "the checks report")
+    counts: collections.Counter = collections.Counter()
+    for scrub in scrubbers:
+        counts.update(scrub.counts)
+    return body, deid.summary(counts, said)
+
+
+def _unsafe(data: bytes, scrubbers: list[deid.Scrubber], what: str) -> None:
+    left: collections.Counter = collections.Counter()
+    for scrub in scrubbers:
+        left |= scrub.known.left(data)
+    deid.check(left, what)
 
 
 __all__ = [
@@ -1353,7 +1379,9 @@ __all__ = [
     "TAKES",
     "add_blobs",
     "checked",
+    "checks_packed",
     "compute",
+    "deid_line",
     "key_ready",
     "logs_packed",
     "packed",
@@ -1362,7 +1390,6 @@ __all__ = [
     "post_checks",
     "post_logs",
     "profiled",
-    "redacted",
     "setup_reach",
     "why_not",
 ]

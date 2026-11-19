@@ -1,0 +1,44 @@
+    Updating crates.io index
+  Downloaded serde v1.0.215
+  Downloaded tokio v1.41.1
+   Compiling proc-macro2 v1.0.92
+   Compiling falcon-ledger v0.3.0 ({{repo:/Users/sseller/work/falcon_core}}/ledger)
+warning: unused variable: `owner`
+  --> ledger/src/lib.rs:88:9
+   |
+88 |     let owner = "{{name:Sam Seller}} <{{email:sam.seller@acme-corp.com}}>";
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_owner`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.07s
+     Running unittests src/lib.rs ({{repo:/Users/sseller/work/falcon_core}}/target/debug/deps/falcon_ledger-3f1e9c2a7b5d4e6f)
+
+running 6 tests
+test totals::sums ... ok
+test totals::rounds ... ok
+test fx::fetches ... FAILED
+test fx::caches ... ok
+test sync::pushes ... FAILED
+test sync::retries ... ok
+
+failures:
+
+---- fx::fetches stdout ----
+thread 'fx::fetches' panicked at ledger/src/fx.rs:52:14:
+called `Result::unwrap()` on an `Err` value: reqwest::Error { kind: Connect, url: "http://{{host:fx-rates.acme.internal}}:8080/latest", source: hyper_util::client::legacy::Error(Connect, ConnectError("tcp connect error", Os { code: 61, kind: ConnectionRefused, message: "Connection refused" })) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- sync::pushes stdout ----
+pushing to {{url:git@git.acme-corp.com:acme-corp/falcon-ledger.git}} as {{user:sseller}}@{{hostname:sams-mbp}}
+error: remote rejected: AWS_SECRET_ACCESS_KEY={{secret:wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY}} is not allowed in commit 9b2e4f7
+thread 'sync::pushes' panicked at ledger/src/sync.rs:30:5:
+assertion failed: pushed
+
+failures:
+    fx::fetches
+    sync::pushes
+
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+error: test failed, to rerun pass `-p falcon-ledger --lib`

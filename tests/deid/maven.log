@@ -1,0 +1,39 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] ----------------------< com.acmecorp.falcon:ledger >----------------------
+[INFO] Building ledger 2.4.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/junit/jupiter/junit-jupiter/5.11.3/junit-jupiter-5.11.3.pom
+[INFO] Downloading from acme-nexus: https://{{host:nexus.build.acme-corp.com}}/repository/maven-releases/com/acmecorp/platform/authz/1.7.0/authz-1.7.0.pom
+[WARNING] Could not transfer metadata com.acmecorp:parent:4.0.0.0/maven-metadata.xml from/to acme-nexus (https://{{host:nexus.build.acme-corp.com}}/repository/maven-releases/): Authorization failed for user {{user:sseller}}
+[INFO] --- surefire:3.5.2:test (default-test) @ ledger ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.acmecorp.falcon.ledger.LedgerTest
+[ERROR] Tests run: 9, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.412 s <<< FAILURE! -- in com.acmecorp.falcon.ledger.LedgerTest
+[ERROR] com.acmecorp.falcon.ledger.LedgerTest.settlesForOwner -- Time elapsed: 0.031 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: expected: <{{name:Priya Raman}}> but was: <{{name:Daniel Okafor}}>
+	at org.junit.jupiter.api.AssertionFailureBuilder.build(AssertionFailureBuilder.java:151)
+	at com.acmecorp.falcon.ledger.LedgerTest.settlesForOwner(LedgerTest.java:73)
+[INFO] Running com.acmecorp.falcon.ledger.JdbcTest
+2024-11-03 10:22:31.442 INFO  [main] c.z.h.HikariDataSource - HikariPool-1 - Starting... jdbc:postgresql://{{host:db01.prod.acme.internal}}:5432/ledger?user=falcon_app&password={{secret:Tr0ub4dor&3xK9}}
+2024-11-03 10:22:31.871 INFO  [main] c.z.h.HikariDataSource - HikariPool-1 - Start completed. Local address {{ip:172.16.4.21}}
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.208 s -- in com.acmecorp.falcon.ledger.JdbcTest
+[INFO] 
+[INFO] Results:
+[INFO] 
+[ERROR] Failures: 
+[ERROR]   LedgerTest.settlesForOwner:73 expected: <{{name:Priya Raman}}> but was: <{{name:Daniel Okafor}}>
+[INFO] 
+[ERROR] Tests run: 13, Failures: 1, Errors: 0, Skipped: 0
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  6.214 s
+[INFO] Finished at: 2024-11-03T10:22:33Z
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.2:test (default-test) on project ledger: There are test failures.
+[ERROR] Please refer to {{repo:/Users/sseller/work/falcon_core}}/ledger/target/surefire-reports for the individual test results.
