@@ -1486,7 +1486,7 @@
   },
   "Profile": {
    "additionalProperties": false,
-   "description": "Stage 1: one repository as the CLI measures it, sent once, after the owner's consent.",
+   "description": "Stage 1: one repository as the CLI measures it, sent once, after the owner signs in.",
    "properties": {
     "agents": {
      "$ref": "#/$defs/Agents"
