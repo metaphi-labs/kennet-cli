@@ -392,7 +392,7 @@ def _result_line(name: str, got: dict) -> str:
         built = sum((r["post"].get("build") or {}).get("exit", 0) == 0 for r in rows)
         parts.append(f"{len(got['commits'])} past commits, {built} built")
     if got.get("edits"):
-        parts.append(f"{len(got['edits'])} edits")
+        parts.append(f"{len(got['edits'])} edit{'s' if len(got['edits']) != 1 else ''}")
     return f"  {name}: " + " · ".join(parts)
 
 
@@ -531,7 +531,8 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
             "",
             *screen,
             "",
-            "Nothing has left this machine. To send, the owner runs in a terminal: " + _codeval_line(a),
+            "Only commit ids and times have left this machine. To send, the owner runs in a terminal: "
+            + _codeval_line(a),
         )
         return NEEDS_PERSON
     print("\n".join(["", *screen, ""]))
