@@ -433,11 +433,6 @@ def key_id(key: bytes) -> str:
     return keyed(key, KEY_LABEL)
 
 
-def _held(model: str, field: str) -> bool:
-    """Whether the vendored schema's `model` has `field`: a field is sent only once the server's schema holds it."""
-    return field in schema.defs()[model]["properties"]
-
-
 def _subject_key(subject: str, key: bytes) -> str:
     said = HEX_RUN.sub("", TICKET.sub("", subject)).lower()
     return keyed(key, " ".join(re.sub(r"\d", "0", said).split()))
@@ -455,9 +450,10 @@ def _commits(
     order: dict[str, int],
     words: dict[int, set[str]],
     key: bytes,
+    at: str = "HEAD",
 ) -> list[dict]:
     fields = "%H%x00%P%x00%aE%x00%cE%x00%B%x00%(trailers:only,unfold)%x00"
-    raw = _out(repo, "log", "HEAD", "--topo-order", "--reverse", f"--format={fields}").split(b"\0")
+    raw = _out(repo, "log", at, "--topo-order", "--reverse", f"--format={fields}").split(b"\0")
 
     def person(address: str) -> int:
         low = address.lower()
@@ -571,11 +567,11 @@ def _trailers(block: str) -> list[dict[str, Any]]:
     return out
 
 
-def _changes(repo: Path, by_sha: dict[str, dict], paths: _Ids, order: dict[str, int]) -> None:
+def _changes(repo: Path, by_sha: dict[str, dict], paths: _Ids, order: dict[str, int], at: str = "HEAD") -> None:
     tokens = iter(
-        _out(
-            repo, "log", "HEAD", "-M", "--diff-merges=first-parent", "--raw", "--numstat", "-z", "--format=%x01%H"
-        ).split(b"\0")
+        _out(repo, "log", at, "-M", "--diff-merges=first-parent", "--raw", "--numstat", "-z", "--format=%x01%H").split(
+            b"\0"
+        )
     )
     row: dict | None = None
     status: dict[str, str] = {}
@@ -624,12 +620,12 @@ def _unquote(raw: bytes) -> str:
     return raw.decode("utf-8", "surrogateescape")
 
 
-def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
+def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids, at: str = "HEAD") -> None:
     p = subprocess.Popen(
         _git(
             repo,
             "log",
-            "HEAD",
+            at,
             "-M",
             "--diff-merges=first-parent",
             "-p",
@@ -961,23 +957,23 @@ def _dependencies(tree: dict[str, tuple[str, str, int]], read: Callable[[str], b
     return [{"eco": e, "name": n} for e, n in sorted(named)][:20_000], len(private)
 
 
-def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
-    """One repository's profile (`kennet.codeval.profile.v1`): its git metadata and per-file counts, as ids, counts,
-    enums and keyed hashes. `key` is the repository's own HMAC key, kept on this machine."""
+def compute(repo: Path, key: bytes, keep: dict | None = None, at: str = "HEAD") -> dict[str, Any]:
+    """One repository's profile (`kennet.codeval.profile.v1`) at commit `at`: its git metadata and per-file counts, as
+    ids, counts, enums and keyed hashes. `key` is the repository's own HMAC key, kept on this machine."""
     authors, domains, paths, dirs = _Ids(), _Ids(), _Ids(), _Ids()
     people: list[dict] = []
     order: dict[str, int] = {}
     words: dict[int, set[str]] = {}
-    commits = _commits(repo, authors, domains, people, order, words, key)
+    commits = _commits(repo, authors, domains, people, order, words, key, at)
     by_sha = {sha: commits[i - 1] for sha, i in order.items()}
-    _changes(repo, by_sha, paths, order)
+    _changes(repo, by_sha, paths, order, at)
     named = {i: _path_words(path) for path, i in paths.items()}
     for c in commits:
         changed = {i for x in c["files"] for i in (x["file"], x.get("old_file")) if i is not None}
         c["path_terms"] = len(words[c["commit"]] & set().union(*(named[i] for i in changed)))
-    _hunks(repo, by_sha, paths)
+    _hunks(repo, by_sha, paths, at)
     tree: dict[str, tuple[str, str, int]] = {}
-    for entry in _out(repo, "ls-tree", "-r", "-l", "-z", "HEAD").split(b"\0"):
+    for entry in _out(repo, "ls-tree", "-r", "-l", "-z", at).split(b"\0"):
         if b"\t" in entry:
             meta, _, path = entry.partition(b"\t")
             mode, _type, sha, size = meta.split()
@@ -1034,7 +1030,7 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
     def read(p: str) -> bytes | None:
         return next((b for _s, b in _blobs(repo, [tree[p][1]])), None) if p in tree else None
 
-    tip = _text(repo, "rev-parse", "HEAD")
+    tip = _text(repo, "rev-parse", f"{at}^{{commit}}")
     blobs = {p for p, (mode, _s, _z) in tree.items() if mode != "160000"}
     env, start = codebase_env.needs(blobs, read)
     deps, private = _dependencies(tree, read)
@@ -1048,6 +1044,7 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
             order=order,
             start=start,
             paths={row["file"]: path for path, row in rows.items() if row["at_tip"]},
+            source=sorted(row["file"] for row in rows.values() if row["at_tip"] and row["kind"] == "source"),
             revealable=sorted(
                 row["file"]
                 for row in rows.values()
@@ -1057,9 +1054,9 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
     return {
         "schema": PROFILE,
         "cli": __version__,
-        **({"key_id": key_id(key)} if _held("Profile", "key_id") else {}),
+        "key_id": key_id(key),
         "tip": tip,
-        "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split()[:64],
+        "roots": _text(repo, "rev-list", "--max-parents=0", at).split()[:64],
         "git": {
             "branches": len(_text(repo, "for-each-ref", "--format=x", "refs/heads", "refs/remotes").split()),
             "tags": tags,
@@ -1207,11 +1204,11 @@ def opened(paths: list[str], scratch: Path, say: Callable[[str], None]) -> Itera
         yield Local(name, given, path, roots)
 
 
-def profile(local: Local) -> dict[str, Any]:
-    """The repository's profile, checked against the schema; what it needs to run the server's instructions stays in
-    `local.kept`."""
+def profile(local: Local, at: str = "HEAD") -> dict[str, Any]:
+    """The repository's profile at `at`, checked against the schema; what it needs to run the server's instructions
+    stays in `local.kept`."""
     try:
-        got = compute(local.path, local.key, local.kept)
+        got = compute(local.path, local.key, local.kept, at)
     except (Unreadable, ValueError, OSError) as e:
         raise errors.MetaphiError(
             f"git could not read {local.name}", code="unreadable", next_step=SKIPPED_FIX["unreadable"]
@@ -1264,9 +1261,34 @@ def _named(e: errors.MetaphiError) -> errors.MetaphiError:
         e.next_step = "kennet login"
     elif e.code == "key_mismatch":
         e.message = "this run continues on the machine that started it; nothing was sent"
-    elif e.code == "profile_mismatch":
-        e.message = "the server holds this run to the profile it was filed with; nothing was sent"
+        e.next_step = "run `kennet codeval` again on the machine that started this run"
     return e
+
+
+FILED_TIP = re.compile(r"\btip ([0-9a-f]{40}(?:[0-9a-f]{24})?)\b")
+
+
+def filed_tip(e: errors.MetaphiError) -> str | None:
+    """The tip a `profile_mismatch` names: the one the open run was filed at, to profile and file again."""
+    m = FILED_TIP.search(e.message or "")
+    return m[1] if m else None
+
+
+def send_filed(local: Local, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    """Profile and file the repository. When the server already holds an open run for it at another tip
+    (`profile_mismatch`), profile that tip instead, if this clone holds it, and file again: the run goes on where it
+    stopped."""
+    doc = profile(local)
+    try:
+        got, _path = send_profile(local, doc, sleep)
+    except errors.MetaphiError as e:
+        tip = filed_tip(e) if e.code == "profile_mismatch" else None
+        if tip is None or _ask(local.path, "cat-file", "-t", tip) != "commit":
+            raise
+        local.kept = {}
+        got, _path = send_profile(local, profile(local, tip), sleep)
+    file(local)
+    return got
 
 
 say: Callable[[str], None] | None = None
@@ -1323,7 +1345,10 @@ def _answer(got: dict[str, Any]) -> dict[str, Any]:
 def instructed(nxt: Any) -> None:
     """Refuse instructions the schema does not hold, before anything is run: the Next schema itself (its lists, runs
     and run_minutes within their maxima), and no more commits, mutants, blobs or runs than a Results can answer."""
-    schema.check("Next", nxt)
+    try:
+        schema.check("Next", nxt)
+    except schema.Refused as e:
+        raise schema.Refused(e.where, e.why, "follow") from None
     held = schema.defs()["Results"]["properties"]
     for k in ("commits", "mutants", "blobs"):
         if len(nxt[k]) > held[k]["maxItems"]:
@@ -1445,25 +1470,38 @@ def side(raw: dict[str, Any], key: bytes, part: str = "Side") -> dict[str, Any]:
     return out
 
 
-def tip(raw: dict[str, Any] | None, key: bytes) -> dict[str, Any]:
-    """The tip as sent, never nothing when it was asked for: when it did not get as far as a passing build, `error`
-    says why, as the class its build ended in (`unknown` when it could not be run here)."""
+def tip(raw: dict[str, Any] | None, key: bytes, source: set[int] | None = None) -> dict[str, Any]:
+    """The tip as sent, never nothing when it was asked for. When it did not get as far as a passing build and a test
+    run, `error` alone says why: the class its build ended in, or `unknown` when it could not be run here. Coverage is
+    sent for the tip's source files (`source`) only."""
     out = side(raw, key, "Tip") if raw else {"tests": []}
     build = out.get("build")
     why = build["class"] if build and build["class"] != "ok" else None if out["tests"] else "unknown"
-    if why and _held("Tip", "error"):
-        out["error"] = why
+    if why:
+        return {"tests": [], "error": why}
+    if out.get("coverage") is not None:
+        out["coverage"] = [c for c in out["coverage"] if source is None or c["file"] in source]
     return out
 
 
-def _unit(raw: dict[str, Any] | None, key: bytes, sides: tuple[str, ...]) -> dict[str, Any]:
+def _complete(post: dict[str, Any], runs: int) -> bool:
+    """A post side runs its tests exactly `runs` times, unless its build failed or a run ended in the environment,
+    was cancelled or timed out, which stops the rest."""
+    stopped = (post.get("build") or {}).get("class", "ok") != "ok" or any(
+        t["class"].startswith("env_") or t["class"] in ("cancelled", "test_timeout") for t in post["tests"]
+    )
+    return stopped or len(post["tests"]) == runs
+
+
+def _unit(raw: dict[str, Any] | None, key: bytes, sides: tuple[str, ...], runs: int) -> dict[str, Any]:
     """A commit (both sides) or a mutant (its post side) as sent, or why it did not run: `cancelled` when the time
-    Metaphi AI set ran out first, `unknown` when it could not be run here."""
+    Metaphi AI set ran out first, `unknown` when it could not be run here, or ran short of `runs` test runs."""
     if raw is None:
         return {"error": "cancelled"}
     if raw.get("broke") or any(not raw.get(k) for k in sides):
         return {"error": "unknown"}
-    return {k: side(raw[k], key, "Pre" if k == "pre" else "Side") for k in sides}
+    out = {k: side(raw[k], key, "Pre" if k == "pre" else "Side") for k in sides}
+    return out if _complete(out["post"], runs) else {"error": "unknown"}
 
 
 OS = {"linux": "linux", "darwin": "darwin", "windows": "windows"}
@@ -1752,42 +1790,55 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
     instructed(nxt)
     revealable(local, nxt["blobs"])
     mutants = [{"file": m["file"], "op": m["op"], "nth": m["nth"]} for m in nxt["mutants"]]
-    raw = codebase_checks.run(
-        local.path,
-        local.name,
-        local.tip,
-        kept["commits"],
-        kept["order"],
-        list(nxt["commits"]),
-        int(nxt["runs"]),
-        plan,
-        say,
-        bench.found,
-        kept["paths"],
-        bench.tip or None,
-        stream,
-        mutants,
-    )
-    key = local.key
+    key, source = local.key, set(kept.get("source") or [])
+
+    def ran(targets: list[int], edits: list[dict]) -> dict[str, Any]:
+        return codebase_checks.run(
+            local.path,
+            local.name,
+            local.tip,
+            kept["commits"],
+            kept["order"],
+            targets,
+            int(nxt["runs"]),
+            plan,
+            say,
+            bench.found,
+            kept["paths"],
+            bench.tip or None,
+            stream,
+            edits,
+        )
+
     out: dict[str, Any] = {
         "schema": RESULTS,
         "cli": __version__,
-        **({"key_id": key_id(local.key)} if _held("Results", "key_id") else {}),
+        "key_id": key_id(local.key),
         "rules": extract.rules_hash(),
         "batch": nxt["batch"],
         "machine": machine(bench.box, bench.found[0].image if bench.found else None),
         "toolchain": bench.toolchain(),
-        "commits": [
-            {"commit": i, **_unit(r, key, ("pre", "post"))}
-            for i, r in zip(nxt["commits"], raw["commits"], strict=False)
-        ],
-        "mutants": [{**m, **_unit(r, key, ("post",))} for m, r in zip(mutants, raw["mutants"], strict=False)],
-        "blobs": blobs(local, nxt["blobs"]),
+        "commits": [],
+        "mutants": [],
+        "blobs": [],
     }
-    answered = {c["commit"] for c in out["commits"]}
-    out["commits"] += [{"commit": i, "error": "cancelled"} for i in nxt["commits"] if i not in answered]
-    done = len(out["mutants"])
-    out["mutants"] += [{**m, "error": "cancelled"} for m in mutants[done:]]
+    # The tip first: a tip that fails answers the batch alone, and nothing else is run.
+    raw = ran([], []) if nxt["tip"] and (nxt["commits"] or mutants) else None
+    failed = raw is not None and "error" in tip(raw.get("tip"), key, source)
+    if not failed:
+        raw = ran(list(nxt["commits"]), mutants)
+        runs = int(nxt["runs"])
+        out["commits"] = [
+            {"commit": i, **_unit(r, key, ("pre", "post"), runs)}
+            for i, r in zip(nxt["commits"], raw["commits"], strict=False)
+        ]
+        out["mutants"] = [
+            {**m, **_unit(r, key, ("post",), runs)} for m, r in zip(mutants, raw["mutants"], strict=False)
+        ]
+        answered = {c["commit"] for c in out["commits"]}
+        out["commits"] += [{"commit": i, "error": "cancelled"} for i in nxt["commits"] if i not in answered]
+        out["mutants"] += [{**m, "error": "cancelled"} for m in mutants[len(out["mutants"]) :]]
+        out["blobs"] = blobs(local, nxt["blobs"])
     if (commands := bench.commands()) is not None:
         out["commands"] = commands
     if bench.services is not None:
@@ -1797,7 +1848,9 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
             "took": took(float(got.get("seconds") or 0)),
         }
     if nxt["tip"]:
-        out["tip"] = tip(raw.get("tip"), key)
+        out["tip"] = tip(raw.get("tip") if raw else None, key, source)
+        if "error" in out["tip"]:
+            out.update(commits=[], mutants=[], blobs=[])
     out["took"] = took(time.monotonic() - began)
     return out
 

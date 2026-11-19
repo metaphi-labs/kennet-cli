@@ -213,8 +213,8 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `sign_in_pending` | `kennet login --wait` is still waiting for the approval (exit 4): run `next_step` again. |
 | `toolchain_missing`, `test_command_missing` | `kennet codeval` needs the user (exit 6): tell them the message; on their answer run `next_step`. |
 | `profile_gone` | `kennet codeval` needs the user (exit 6): the commit the run was filed at is no longer in the clone, as after a history rewrite. Tell them the message; once that commit is fetched back, run the same command. |
-| `key_mismatch` | `kennet codeval`: this run continues on the machine that started it. Tell the user; nothing was sent. |
-| `profile_mismatch` | `kennet codeval`: the server holds the run to the profile it was filed with; nothing was sent. Tell the user the message with the `request_id`. |
+| `key_mismatch` | `kennet codeval` needs the user (exit 6): this run continues on the machine that started it. Tell the user; nothing was sent. |
+| `profile_mismatch` | `kennet codeval`: the server holds the run to the tip it was filed at, and this clone does not hold that commit (the CLI files that tip itself when it can). Tell the user the message; once the commit is fetched, run the same command. |
 | `unreadable` | `kennet codeval`: git could not read a repository given. Tell the user; nothing was sent for it. |
 | `bad_wait` | `--wait` takes seconds, 0 or more. |
 | `schema_refused` | `kennet codeval` refused to send a value outside its schema, or to follow an instruction outside it (more than a batch can answer, or a blob id below the privacy floor); nothing was sent or run. Tell the user the message. |

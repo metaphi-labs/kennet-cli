@@ -214,12 +214,10 @@ def test_flaky_is_a_pass_and_a_fail_of_the_same_side_and_nothing_else():
     assert [r["class"] for r in rows] == ["test_assertion", "test_error"], "a test_ class alone is never flaky"
 
 
-_CODES = schema.defs().get("Code") or schema.defs()["Step"]["properties"]["codes"]["items"]
-
-
-@pytest.mark.xfail("enum" not in _CODES, reason="kennet#1350: Code becomes an enum at the next re-export", strict=True)
 def test_the_schemas_code_enum_is_the_packs_codes_and_other():
-    assert sorted(_CODES["enum"]) == extract.codes()
+    items = schema.defs()["Step"]["properties"]["codes"]["items"]
+    held = schema.defs()[items["$ref"].rsplit("/", 1)[1]] if "$ref" in items else items
+    assert sorted(held["enum"]) == extract.codes() and len(extract.codes()) == 54
 
 
 def test_codeval_holds_no_numeric_thresholds_but_documented_mechanics():

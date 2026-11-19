@@ -411,7 +411,7 @@ The results, one per batch:
 | `toolchain` | each tool used, from a fixed list, with its version number |
 | `commands` | whether the build and test came from CI, build files or you, each as an HMAC |
 | `services` | how many Compose services were asked for, how many started, how long they took (as a bucket), how many were refused |
-| `tip`, `commits`, `mutants` | per build and test run: the step it reached and the class it ended in from fixed lists, the kind of compile error and the compiler codes the shipped tables name (any other as `other`), the exit code, how long it took as a bucket, the sha256 of its log (the log stays here); per test run also counts of tests reported and passed and each test's outcome under the HMAC of its id; for the tip only, coverage per file number, peak memory and the bytes installed |
+| `tip`, `commits`, `mutants` | per build and test run: the step it reached and the class it ended in from fixed lists, the kind of compile error and the compiler codes the shipped tables name (any other as `other`), the exit code, how long it took as a bucket, the sha256 of its log (the log stays here); per test run also counts of tests reported and passed and each test's outcome under the HMAC of its id; for the tip only, coverage per source file number, peak memory and the bytes installed. A tip that did not build or test sends only why, and the batch then runs and sends nothing else; a commit or mutant sends its runs or why it has none, never both |
 | `blobs` | the git ids of the files Metaphi AI named by number: only source files of at least 1 KiB; an instruction naming any other is refused before anything runs |
 | `rules` | the sha256 of the rule pack that read the logs |
 | `took` | how long the batch took, as a bucket |

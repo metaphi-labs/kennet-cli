@@ -166,11 +166,21 @@ def _side(v: dict[str, Any]) -> str | None:
 
 def _ran(*sides: str) -> Any:
     def rule(v: dict[str, Any]) -> str | None:
-        if v.get("error") == "ok" or (v.get("error") is None and any(v.get(k) is None for k in sides)):
-            return "a unit that ran has its sides, and one that did not says why"
+        error, held = v.get("error"), [v.get(k) is not None for k in sides]
+        if error == "ok" or (error is None and not all(held)) or (error is not None and any(held)):
+            return "a unit that ran has its sides, and one that did not says why, never both"
         return None
 
     return rule
+
+
+def _tip(v: dict[str, Any]) -> str | None:
+    if why := _side(v):
+        return why
+    ran = v.get("build") is not None or v["tests"] or v.get("offline") is not None or v.get("coverage") is not None
+    if v.get("error") == "ok" or (v.get("error") is not None and ran):
+        return "a tip that ran sends its runs, and one that did not says why, never both"
+    return None
 
 
 def _tag(v: dict[str, Any]) -> str | None:
@@ -189,6 +199,15 @@ def _profile(v: dict[str, Any]) -> str | None:
     held = {c["commit"] for c in v["commits"]} | {0}
     if any(t["commit"] not in held for t in v["git"]["tags"]):
         return "a tag names a commit the document does not hold"
+    seen: set[int] = set()
+    for c in v["commits"]:
+        if c["commit"] == 0 or c["commit"] in seen:
+            return "each commit has its own id, from 1"
+        if any(p != 0 and p not in seen for p in c["parents"]):
+            return "a commit's parents come before it, or are 0 where the history sent stops"
+        seen.add(c["commit"])
+    if any(c.get("reverts") is not None and c["reverts"] not in seen for c in v["commits"]):
+        return "a revert names a commit the document holds"
     return None
 
 
@@ -197,7 +216,7 @@ RULES = {
     "TestRun": _step,
     "Side": _side,
     "Pre": _side,
-    "Tip": _side,
+    "Tip": _tip,
     "CommitResult": _ran("pre", "post"),
     "MutantResult": _ran("post"),
     "Tag": _tag,

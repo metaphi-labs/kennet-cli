@@ -967,7 +967,9 @@ def test_a_full_stubbed_run_validates_part_by_part(tested, tmp_path, capsys, mon
     calc = next(i for i, p in local.kept["paths"].items() if p == "calc.py")
     mutant = {"file": calc, "op": "arith", "nth": 0}
     money = next(i for i, p in local.kept["paths"].items() if p == "money.py")
-    asked = _next(local.kept["paths"], commits=[1, 2, 3, 4, 5], mutants=[mutant] * 5, blobs=[money] * 64)
+    test = next(i for i, p in local.kept["paths"].items() if p == "tests/test_calc.py")
+    raw["tip"]["coverage"] = [{"file": f, "unit": "line", "total": 9, "covered": 4} for f in (money, test)]
+    asked = _next(local.kept["paths"], commits=[1, 2, 3, 4, 5], mutants=[mutant] * 5, blobs=[money] * 64, runs=3)
     posted = respx.post(f"{API}/codeval").respond(json={"run": "cv_1", "object": "codeval", "next": asked})
     results = respx.post(f"{API}/codeval/cv_1/results").respond(json={"done": True})
     assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 0
@@ -984,6 +986,7 @@ def test_a_full_stubbed_run_validates_part_by_part(tested, tmp_path, capsys, mon
     assert {"offline", "installed_bytes", "memory_peak_bytes", "coverage"} <= set(tip) and len(tip["tests"]) == 3
     run = tip["tests"][0]
     assert run["codes"] == ["E0308"] and run["took"] == codeval.took(2.5) and tip["build"]["took"] == codeval.took(61)
+    assert [c["file"] for c in tip["coverage"]] == [money], "coverage is the tip's source files only"
 
 
 @respx.mock
@@ -1187,14 +1190,6 @@ def test_the_client_holds_no_selection_or_scoring():
 # -- the review of #13 ------------------------------------------------------------------------------------------------
 
 
-def _holding(monkeypatch, **fields):
-    """The vendored schema with fields the server's next re-export adds: {model: {field: schema}}."""
-    defs = json.loads(json.dumps(schema.defs()))
-    for model, more in fields.items():
-        defs[model]["properties"].update(more)
-    monkeypatch.setattr(schema, "defs", lambda: defs)
-
-
 @respx.mock
 def test_a_run_goes_on_against_its_filed_profile_when_the_tip_moves(tested, tmp_path, capsys, monkeypatch):
     _signed_in()
@@ -1255,17 +1250,13 @@ def test_blob_ids_are_revealed_only_for_source_files_of_at_least_1_kib(tested, t
     assert codeval.blobs(local, [calc, test]) == []
 
 
-def test_the_tip_says_why_it_failed_rather_than_nothing(monkeypatch):
-    _holding(monkeypatch, Tip={"error": {"anyOf": [{"$ref": "#/$defs/Step/properties/class"}, {"type": "null"}]}})
-    monkeypatch.setitem(
-        schema.defs()["Tip"]["properties"],
-        "error",
-        {"anyOf": [schema.defs()["Step"]["properties"]["class"], {"type": "null"}]},
-    )
+def test_the_tip_says_why_it_failed_rather_than_nothing():
     key = b"k" * 32
     assert codeval.tip(None, key) == {"tests": [], "error": "unknown"}
     broke = {"build": {"exit": 1, "seconds": 3, "step": "dep_resolve", "class": "dep_unresolved"}, "tests": []}
-    assert codeval.tip(broke, key)["error"] == "dep_unresolved"
+    assert codeval.tip(broke, key) == {"tests": [], "error": "dep_unresolved"}, "an error sends no runs"
+    with pytest.raises(schema.Refused, match="never both"):
+        schema.check("Tip", {**codeval.side(broke, key, "Tip"), "error": "dep_unresolved"})
     ran = {"tests": [{"exit": 0, "seconds": 1, "class": "ok"}]}
     assert "error" not in codeval.tip(ran, key)
     for got in (codeval.tip(None, key), codeval.tip(broke, key)):
@@ -1274,7 +1265,14 @@ def test_the_tip_says_why_it_failed_rather_than_nothing(monkeypatch):
 
 @pytest.mark.parametrize(
     "more, why",
-    [({"runs": 4}, "test runs"), ({"run_minutes": 0}, "below 1"), ({"blobs": list(range(65))}, "at most 64")],
+    [
+        ({"runs": 4}, "follow Next.runs: it is above 3"),
+        ({"run_minutes": 241}, "above 240"),
+        ({"hours_left": 25}, "above 24"),
+        ({"batch": 7}, "above 6"),
+        ({"commits": [1, 2, 3, 4, 5, 6]}, "too many"),
+        ({"blobs": list(range(65))}, "too many"),
+    ],
 )
 def test_instructions_beyond_the_schema_are_refused_before_anything_runs(tested, more, why):
     _, local = _profile(tested)
@@ -1312,8 +1310,6 @@ def test_the_disclosure_is_one_literal_line():
 def test_the_key_id_names_the_key_without_it_and_a_mismatch_says_where_the_run_goes_on(
     tested, tmp_path, capsys, monkeypatch
 ):
-    held = {"key_id": {"pattern": "^[0-9a-f]{16}$", "type": "string"}}
-    _holding(monkeypatch, Profile=held, Results=held)
     doc, local = _profile(tested)
     want = hmac_hex(local.key, "kennet-codeval-key")
     assert doc["key_id"] == want and local.key.hex() not in json.dumps(doc)
@@ -1324,7 +1320,7 @@ def test_the_key_id_names_the_key_without_it_and_a_mismatch_says_where_the_run_g
     results = respx.post(f"{API}/codeval/cv_7/results").respond(
         409, json={"error": {"type": "invalid_request_error", "code": "key_mismatch", "message": "x"}}
     )
-    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 1
+    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 6
     assert _bodies(results)[0]["key_id"] == want
     assert "this run continues on the machine that started it" in capsys.readouterr().err
 
@@ -1336,13 +1332,12 @@ def hmac_hex(key: bytes, label: str) -> str:
     return hmac.new(key, label.encode(), hashlib.sha256).hexdigest()[:16]
 
 
-def test_mssql_is_named_by_the_schemas_word():
+def test_an_image_the_schema_does_not_name_is_counted_not_named():
     from metaphi import codebase_env
 
-    assert codebase_env.public("mcr.microsoft.com/mssql/server:2022-latest") == "mcr-mssql"
-    assert codeval._env({"service_images": ["mcr-mssql", "acme-db"], "other_images": 0})["service_images"] == [
-        "mcr-mssql"
-    ]
+    assert codebase_env.public("mcr.microsoft.com/mssql/server:2022-latest") is None
+    got = codeval._env({"service_images": ["postgres", "acme-db"], "other_images": 1})
+    assert (got["service_images"], got["other_images"]) == (["postgres"], 2)
 
 
 @pytest.mark.parametrize(
@@ -1368,3 +1363,84 @@ def test_headers_pass_over_objects_a_partial_clone_does_not_hold(repo):
     tip = codeval._text(repo, "rev-parse", "HEAD")
     got = codeval._headers(repo, ["0" * 40, tip, "f" * 40], "author")
     assert got["0" * 40] == {} and got["f" * 40] == {} and got[tip]["author"].startswith("Sam Seller")
+
+
+@respx.mock
+def test_a_failed_tip_answers_the_batch_alone_and_nothing_else_runs(tested, tmp_path, monkeypatch):
+    calls = []
+    broke = {"build": {"exit": 1, "seconds": 3, "step": "dep_resolve", "class": "dep_unresolved"}, "tests": []}
+    monkeypatch.setattr(
+        codebase_checks,
+        "run",
+        lambda *a, **k: calls.append((a[5], a[13])) or {"tip": broke, "commits": [], "mutants": []},
+    )
+    _signed_in()
+    _, local = _profile(tested)
+    respx.post(f"{API}/codeval").respond(json={"run": "cv_9", "object": "codeval", "next": _next(local.kept["paths"])})
+    results = respx.post(f"{API}/codeval/cv_9/results").respond(json={"done": True})
+    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 0
+    (sent,) = _bodies(results)
+    schema.check("Results", sent)
+    assert sent["tip"] == {"tests": [], "error": "dep_unresolved"}
+    assert (sent["commits"], sent["mutants"], sent["blobs"]) == ([], [], [])
+    assert calls == [([], [])], "only the tip was run"
+
+
+def test_a_post_side_short_of_its_runs_is_not_sent_as_run():
+    key, ok = b"k" * 32, {"exit": 0, "seconds": 1, "class": "ok"}
+    pre = {"tests": [ok]}
+    assert codeval._unit({"pre": pre, "post": {"tests": [ok]}}, key, ("pre", "post"), 2) == {"error": "unknown"}
+    full = codeval._unit({"pre": pre, "post": {"tests": [ok, ok]}}, key, ("pre", "post"), 2)
+    assert len(full["post"]["tests"]) == 2
+    stopped = {"exit": None, "seconds": 9, "class": "test_timeout"}
+    assert "post" in codeval._unit({"post": {"tests": [stopped]}}, key, ("post",), 3), "a timeout stops the rest"
+    with pytest.raises(schema.Refused, match="never both"):
+        schema.check("CommitResult", {"commit": 1, "error": "unknown", **full})
+
+
+@pytest.mark.parametrize(
+    "change, why",
+    [
+        (lambda cs: cs.reverse(), "parents come before"),
+        (lambda cs: cs[0].update(reverts=99), "revert names"),
+        (lambda cs: cs[1].update(commit=cs[0]["commit"]), "its own id"),
+    ],
+)
+def test_the_history_sent_runs_parents_first(tested, change, why):
+    doc, _ = _profile(tested)
+    assert doc["commits"][-1]["commit"] == len(doc["commits"]) and doc["commits"][0]["parents"] == []
+    change(doc["commits"])
+    with pytest.raises(schema.Refused, match=why):
+        schema.check("Profile", doc)
+
+
+@respx.mock
+def test_a_profile_of_another_tip_is_filed_again_at_the_tip_the_server_holds(tested, tmp_path, capsys):
+    _signed_in()
+    _, local = _profile(tested)
+    filed = codeval._text(tested, "rev-parse", "HEAD~1")
+    refused = {
+        "error": {
+            "type": "invalid_request_error",
+            "code": "profile_mismatch",
+            "message": f"run cv_10 is measuring tip {filed}; it takes no profile of another tip until it ends. "
+            f"Measure tip {filed} and the run goes on where it stopped",
+        }
+    }
+    posted = respx.post(f"{API}/codeval").mock(
+        side_effect=[httpx.Response(409, json=refused), httpx.Response(200, json={"run": "cv_10", "done": True})]
+    )
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 0
+    first, second = _bodies(posted)
+    assert first["tip"] == local.tip and second["tip"] == filed
+    assert codeval_runs.kept_profile(local.home)["tip"] == filed
+
+
+@respx.mock
+def test_a_client_too_old_for_the_service_says_so(tested, capsys):
+    _signed_in()
+    respx.post(f"{API}/codeval").respond(
+        426, json={"error": {"type": "invalid_request_error", "code": "upgrade_required", "message": "old"}}
+    )
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 5
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "upgrade_required"

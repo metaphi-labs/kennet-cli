@@ -700,7 +700,6 @@
        "php",
        "rust",
        "gcc",
-       "mcr-mssql",
        "sonarqube",
        "registry",
        "localstack",
@@ -712,7 +711,7 @@
       ],
       "type": "string"
      },
-     "maxItems": 40,
+     "maxItems": 39,
      "title": "Service Images",
      "type": "array"
     }
@@ -1482,6 +1481,7 @@
    "description": "One batch of instructions. The CLI does exactly this and answers with `Results` naming the same `batch`.",
    "properties": {
     "batch": {
+     "maximum": 6,
      "minimum": 1,
      "title": "Batch",
      "type": "integer"
@@ -1492,6 +1492,7 @@
       "minimum": 0,
       "type": "integer"
      },
+     "maxItems": 64,
      "title": "Blobs",
      "type": "array"
     },
@@ -1501,10 +1502,12 @@
       "minimum": 0,
       "type": "integer"
      },
+     "maxItems": 5,
      "title": "Commits",
      "type": "array"
     },
     "hours_left": {
+     "maximum": 24,
      "minimum": 0,
      "title": "Hours Left",
      "type": "number"
@@ -1513,15 +1516,18 @@
      "items": {
       "$ref": "#/$defs/Mutant"
      },
+     "maxItems": 5,
      "title": "Mutants",
      "type": "array"
     },
     "run_minutes": {
+     "maximum": 240,
      "minimum": 1,
      "title": "Run Minutes",
      "type": "integer"
     },
     "runs": {
+     "maximum": 3,
      "minimum": 1,
      "title": "Runs",
      "type": "integer"
@@ -1633,6 +1639,13 @@
     "git": {
      "$ref": "#/$defs/Git"
     },
+    "key_id": {
+     "pattern": "^[0-9a-f]{16}$",
+     "title": "Key Id",
+     "type": "string",
+     "x-bits": 0,
+     "x-bits-why": "the server holds no seller's key"
+    },
     "licenses": {
      "items": {
       "enum": [
@@ -1686,6 +1699,7 @@
    "required": [
     "schema",
     "cli",
+    "key_id",
     "tip",
     "roots",
     "git",
@@ -1745,6 +1759,13 @@
      "maxItems": 5,
      "title": "Commits",
      "type": "array"
+    },
+    "key_id": {
+     "pattern": "^[0-9a-f]{16}$",
+     "title": "Key Id",
+     "type": "string",
+     "x-bits": 0,
+     "x-bits-why": "the server holds no seller's key"
     },
     "machine": {
      "$ref": "#/$defs/Machine"
@@ -1978,6 +1999,7 @@
    "required": [
     "schema",
     "cli",
+    "key_id",
     "rules",
     "batch",
     "took",
@@ -2296,10 +2318,63 @@
     "codes": {
      "default": [],
      "items": {
-      "pattern": "^(other|-?[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79})$",
-      "type": "string",
-      "x-bits": 14,
-      "x-bits-why": "the codes of the shipped code tables (under 2^14); any other is sent as other"
+      "enum": [
+       "E0061",
+       "E0106",
+       "E0277",
+       "E0308",
+       "E0369",
+       "E0382",
+       "E0384",
+       "E0405",
+       "E0412",
+       "E0425",
+       "E0432",
+       "E0433",
+       "E0499",
+       "E0502",
+       "E0505",
+       "E0560",
+       "E0596",
+       "E0597",
+       "E0599",
+       "E0609",
+       "TS1005",
+       "TS1109",
+       "TS1128",
+       "TS18048",
+       "TS2304",
+       "TS2305",
+       "TS2307",
+       "TS2322",
+       "TS2339",
+       "TS2345",
+       "TS2552",
+       "TS2554",
+       "TS2564",
+       "TS2741",
+       "TS2769",
+       "TS7006",
+       "CS0029",
+       "CS0103",
+       "CS0161",
+       "CS0165",
+       "CS0234",
+       "CS0246",
+       "CS0266",
+       "CS1002",
+       "CS1061",
+       "CS1503",
+       "CS1513",
+       "CS1525",
+       "-Wimplicit-function-declaration",
+       "-Wincompatible-pointer-types",
+       "-Wint-conversion",
+       "-Wreturn-type",
+       "-Wunused-variable",
+       "other"
+      ],
+      "type": "string"
      },
      "maxItems": 16,
      "title": "Codes",
@@ -2640,10 +2715,63 @@
     "codes": {
      "default": [],
      "items": {
-      "pattern": "^(other|-?[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79})$",
-      "type": "string",
-      "x-bits": 14,
-      "x-bits-why": "the codes of the shipped code tables (under 2^14); any other is sent as other"
+      "enum": [
+       "E0061",
+       "E0106",
+       "E0277",
+       "E0308",
+       "E0369",
+       "E0382",
+       "E0384",
+       "E0405",
+       "E0412",
+       "E0425",
+       "E0432",
+       "E0433",
+       "E0499",
+       "E0502",
+       "E0505",
+       "E0560",
+       "E0596",
+       "E0597",
+       "E0599",
+       "E0609",
+       "TS1005",
+       "TS1109",
+       "TS1128",
+       "TS18048",
+       "TS2304",
+       "TS2305",
+       "TS2307",
+       "TS2322",
+       "TS2339",
+       "TS2345",
+       "TS2552",
+       "TS2554",
+       "TS2564",
+       "TS2741",
+       "TS2769",
+       "TS7006",
+       "CS0029",
+       "CS0103",
+       "CS0161",
+       "CS0165",
+       "CS0234",
+       "CS0246",
+       "CS0266",
+       "CS1002",
+       "CS1061",
+       "CS1503",
+       "CS1513",
+       "CS1525",
+       "-Wimplicit-function-declaration",
+       "-Wincompatible-pointer-types",
+       "-Wint-conversion",
+       "-Wreturn-type",
+       "-Wunused-variable",
+       "other"
+      ],
+      "type": "string"
      },
      "maxItems": 16,
      "title": "Codes",
@@ -2960,7 +3088,7 @@
   },
   "Tip": {
    "additionalProperties": false,
-   "description": "The tip, built and tested, and measured beyond pass and fail.",
+   "description": "The tip, built and tested, and measured beyond pass and fail; or `error` alone, where it could not be. An\nenvironment's error (`env_*`, `cancelled`) leaves the tip asked again; any other ends the run.",
    "properties": {
     "build": {
      "anyOf": [
@@ -2988,6 +3116,39 @@
      ],
      "default": null,
      "title": "Coverage"
+    },
+    "error": {
+     "anyOf": [
+      {
+       "enum": [
+        "ok",
+        "dep_unresolved",
+        "dep_conflict",
+        "build_config",
+        "compile_source",
+        "compile_test",
+        "link",
+        "test_assertion",
+        "test_error",
+        "test_timeout",
+        "quality_gate",
+        "test_flaky",
+        "env_network",
+        "env_resource",
+        "env_timeout",
+        "env_toolchain_missing",
+        "env_permission",
+        "cancelled",
+        "unknown"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Error"
     },
     "installed_bytes": {
      "anyOf": [
@@ -3167,6 +3328,6 @@
    "type": "object"
   }
  },
- "description": "What `kennet codeval` sends (kennet.codeval.profile.v1, kennet.codeval.results.v1) and the instructions it is answered with (Next). Closed: no field takes free text. What the results extract from running code and reading logs is capped at 500000 bits a step and 117000000 bits a run (log2 of each field's domain, summed; hashes and codes by x-bits, durations as buckets of x-bounds-ms). The profile's git metadata is outside the cap: facts git already holds, not values extracted from content.",
+ "description": "What `kennet codeval` sends (kennet.codeval.profile.v1, kennet.codeval.results.v1) and the instructions it is answered with (Next). Closed: no field takes free text. What the results extract from running code and reading logs is capped at 500000 bits a step and 117000000 bits a run (log2 of each field's domain, summed; hashes by x-bits, test keys as opaque ids, durations as buckets of x-bounds-ms). The cap bounds what the published client sends; a client the seller modifies and runs reveals only the seller's own data. The profile's git metadata is outside the cap: facts git already holds, not values extracted from content.",
  "title": "Kennet CodeVal"
 }

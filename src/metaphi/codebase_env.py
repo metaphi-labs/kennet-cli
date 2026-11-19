@@ -42,16 +42,10 @@ def _yaml(body: bytes | None) -> Any:
         return None
 
 
-REGISTRY_IMAGES = {"mcr.microsoft.com/mssql/server": "mcr-mssql"}
-"""Official images outside Docker Hub, by the word the schema names them with."""
-
-
 def public(image: Any) -> str | None:
     if not isinstance(image, str) or "$" in image or not image.strip():
         return None
     name = image.strip().split("@")[0].rsplit(":", 1)[0] if ":" in image.split("/")[-1] else image.strip().split("@")[0]
-    if name.lower() in REGISTRY_IMAGES:
-        return REGISTRY_IMAGES[name.lower()]
     for prefix in ("docker.io/library/", "library/", "docker.io/"):
         name = name.removeprefix(prefix)
     return name.lower() if re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", name) else None
