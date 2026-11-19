@@ -225,7 +225,7 @@ def test_a_command_after_double_dash_is_the_test_and_another_starts_afresh(made,
 
 
 @respx.mock
-def test_not_signed_in_it_signs_in_with_a_printed_code_and_goes_on(made, capsys, monkeypatch):
+def test_not_signed_in_at_a_terminal_it_waits_on_the_printed_code_and_goes_on(made, capsys, monkeypatch):
     monkeypatch.delenv("METAPHI_API_KEY")
     _server()
     asked = []
@@ -237,7 +237,9 @@ def test_not_signed_in_it_signs_in_with_a_printed_code_and_goes_on(made, capsys,
         return {"email": "owner@example.com"}
 
     monkeypatch.setattr(cli.accounts, "login", login)
-    assert cli.main(["codeval", str(made)]) == cli.NEEDS_PERSON
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda q: "n")
+    assert cli.main(["codeval", str(made)]) == 0
     out = capsys.readouterr().out
     assert asked == [True] and "enter the code ABCD-EFGH" in out and "Signed in as owner@example.com" in out
 
@@ -286,3 +288,51 @@ def test_a_rewritten_history_says_what_to_do(made, capsys):
     assert cli.main(["codeval", str(made), "--json"]) == cli.FAILED
     err = json.loads(capsys.readouterr().out)["error"]
     assert "force-push or rebase" in err["next_step"] and _left(got) == ["/v1/kennet/codeval/picks"]
+
+
+@respx.mock
+def test_not_signed_in_with_no_terminal_it_prints_the_code_at_once_and_the_rerun_picks_up_the_approval(
+    made, capsys, monkeypatch
+):
+    monkeypatch.delenv("METAPHI_API_KEY")
+    monkeypatch.setattr(cli.accounts, "_sleep", lambda s: None)
+    got = _server()
+    A = config.DEFAULT_ACCOUNTS
+    start = respx.post(f"{A}/device/code").respond(
+        json={
+            "device_code": "dev",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": f"{A}/device",
+            "verification_uri_complete": f"{A}/device?user_code=ABCD-EFGH",
+            "interval": 5,
+            "expires_in": 600,
+        }
+    )
+    token = respx.post(f"{A}/oauth/token").respond(400, json={"error": "authorization_pending"})
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    said = json.loads(capsys.readouterr().out)
+    assert said == {
+        "state": "sign_in",
+        "url": f"{A}/device?user_code=ABCD-EFGH",
+        "code": "ABCD-EFGH",
+        "next_step": "the owner opens the URL and enters the code, then run the same command again",
+    }
+    assert start.call_count == 1 and not token.called and not got["picks"].called
+
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    assert json.loads(capsys.readouterr().out)["code"] == "ABCD-EFGH" and start.call_count == 1 and token.called
+
+    token.respond(json={"access_token": "tok"})
+    respx.post(f"{A}/keys/cli").respond(
+        json={
+            "email": "owner@example.com",
+            "org": "acme",
+            "api_key": "mai_sk_" + "c" * 43,
+            "test_api_key": "mai_sk_test_" + "d" * 40,
+            "scopes": [codeval.SCOPE],
+        }
+    )
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    out = capsys.readouterr()
+    assert json.loads(out.out)["state"] == "measured" and "Signed in as owner@example.com" in out.err
+    assert start.call_count == 1 and got["picks"].called and "device_pending" not in config.load()

@@ -235,7 +235,8 @@ def headless() -> bool:
 _sleep = time.sleep
 
 
-def device_login(say: Callable[[str], None] = print, wait_s: float | None = None) -> dict[str, Any]:
+def device_start() -> dict[str, Any]:
+    """Start a device sign-in: the code the person enters, where, and when it expires."""
     with _http() as h:
         r = h.post("/device/code", data={"client_id": CLIENT_ID})
     if r.status_code != 200:
@@ -244,17 +245,29 @@ def device_login(say: Callable[[str], None] = print, wait_s: float | None = None
     code = started.get("device_code")
     if not isinstance(code, str) or not isinstance(started.get("user_code"), str):
         raise need("the sign-in server sent no device code", "login_refused", "kennet login")
-    page = started.get("verification_uri_complete") or started.get("verification_uri")
-    say(f"To sign in, open {started.get('verification_uri')} and enter the code {started['user_code']}")
-    if page != started.get("verification_uri"):
-        say(f"Or open: {page}")
-    interval = max(float(started.get("interval") or 5), 2.0)
-    lasts = float(started.get("expires_in") or SIGN_IN_S)
-    until = time.time() + (lasts if wait_s is None else min(lasts, wait_s))
+    return {
+        "device_code": code,
+        "user_code": started["user_code"],
+        "url": started.get("verification_uri"),
+        "page": started.get("verification_uri_complete") or started.get("verification_uri"),
+        "interval": max(float(started.get("interval") or 5), 2.0),
+        "expires_at": time.time() + float(started.get("expires_in") or SIGN_IN_S),
+    }
+
+
+def device_poll(started: dict[str, Any], wait_s: float | None = None) -> dict[str, Any] | None:
+    """The keys once the person has approved the sign-in; None if `wait_s` ran out first. Raises when it was
+    declined or has expired."""
+    interval, until = started["interval"], started["expires_at"]
+    if wait_s is not None:
+        until = min(until, time.time() + wait_s)
     while time.time() < until:
         _sleep(interval)
         with _http() as h:
-            r = h.post("/oauth/token", data={"grant_type": DEVICE_GRANT, "device_code": code, "client_id": CLIENT_ID})
+            r = h.post(
+                "/oauth/token",
+                data={"grant_type": DEVICE_GRANT, "device_code": started["device_code"], "client_id": CLIENT_ID},
+            )
         got = _json(r)
         if r.status_code == 200 and isinstance(got.get("access_token"), str):
             return _keys(got["access_token"])
@@ -269,7 +282,50 @@ def device_login(say: Callable[[str], None] = print, wait_s: float | None = None
         if error == "expired_token":
             break
         raise need(_said(r), "login_refused", "kennet login")
+    if time.time() < started["expires_at"] and wait_s is not None:
+        return None
     raise need("the sign-in was not finished in time; run `kennet login` again", "login_expired", "kennet login")
+
+
+def device_login(say: Callable[[str], None] = print, wait_s: float | None = None) -> dict[str, Any]:
+    started = device_start()
+    say(f"To sign in, open {started['url']} and enter the code {started['user_code']}")
+    if started["page"] != started["url"]:
+        say(f"Or open: {started['page']}")
+    got = device_poll(started, wait_s)
+    if got is None:
+        raise need("the sign-in was not finished in time; run `kennet login` again", "login_expired", "kennet login")
+    return got
+
+
+PENDING = "device_pending"
+
+
+def pending_login(wait_s: float = 10.0) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Sign in with no one waiting at a terminal: finish the device sign-in started on an earlier run, or start one
+    and keep it. Answers (keys, the sign-in) once approved, or (None, the sign-in to show) while it is pending."""
+    started = config.load().get(PENDING)
+    if isinstance(started, dict) and float(started.get("expires_at") or 0) > time.time():
+        try:
+            got = device_poll(started, wait_s)
+        except Error as e:
+            _forget_pending()
+            if e.code != "login_expired":
+                raise
+        else:
+            if got is None:
+                return None, started
+            _forget_pending()
+            return got, started
+    started = device_start()
+    config.save({**config.load(), PENDING: started})
+    return None, started
+
+
+def _forget_pending() -> None:
+    cfg = config.load()
+    if cfg.pop(PENDING, None) is not None:
+        config.save(cfg)
 
 
 def login(

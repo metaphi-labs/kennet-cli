@@ -399,9 +399,9 @@ PARTNER_NAME = "kennet-partner"
 PARTNER_GUIDE = """CodeVal is a tool that helps data owners to monetize their private code with a completely private, and \
 local only assessment. It collects data and de identified logs that help Metaphi AI evaluate your data for commercial \
 licensing for AI training. Run `kennet codeval <paths-or-urls> --json` (add `-- '<build and test command>'` only if \
-it says it could not find one): it signs in if needed (relay the printed link and code to the user), builds and tests \
-on this machine, and picks up where it stopped when run again. When it exits 1, do what `error.next_step` says. When \
-it is done it exits 6 with a `next_step`: sending is the owner's alone, so tell them to run that same \
+it says it could not find one). If it exits 6 with `state` `sign_in`, give the user `url` and `code`, and once they \
+have entered it run the same command again. It builds and tests on this machine, and picks up where it stopped \
+when run again. When it exits 1, do what `error.next_step` says. When it is done it exits 6 with a `next_step`: sending is the owner's alone, so tell them to run that same \
 `kennet codeval` command in a terminal, where it shows exactly what would be sent and asks them. Never try to send it \
 yourself.
 """

@@ -350,21 +350,33 @@ def _codeval_line(a: argparse.Namespace) -> str:
     return shlex.join(["kennet", "codeval", *a.paths, *(["--", a.run_command] if a.run_command else [])])
 
 
-def _codeval_signin(say: Callable[[str], None]) -> None:
-    """Signed in with a key that holds CodeVal, or signed in now: the device code is printed, so an agent can relay
-    it and it works over SSH."""
+def _codeval_signin(a: argparse.Namespace, say: Callable[[str], None]) -> int | None:
+    """Signed in with a key that holds CodeVal, or signed in now. At a terminal the device code is shown and waited
+    on; with no one there (an agent) it is printed, kept, and picked up by the same command run again."""
     from metaphi import codeval
 
     try:
-        codeval.key_ready()
+        return codeval.key_ready()
     except accounts.Error as e:
         if e.code == "no_api_key" and accounts.pickup() is not None:
             return codeval.key_ready()
         if e.code != "not_signed_in":
             raise
+    if _interactive():
         got = accounts.login(say=say, device=True)
-        say(f"✓ Signed in as {got.get('email')}")
-        codeval.key_ready()
+    else:
+        got, started = accounts.pending_login()
+        if got is None:
+            step = "the owner opens the URL and enters the code, then run the same command again"
+            _out(
+                a,
+                {"state": "sign_in", "url": started["page"], "code": started["user_code"], "next_step": step},
+                f"To sign in, open {started['url']} and enter the code {started['user_code']}",
+                f"Then run the same command again: {_codeval_line(a)}",
+            )
+            return NEEDS_PERSON
+    say(f"\u2713 Signed in as {got.get('email')}")
+    return codeval.key_ready()
 
 
 def _codeval_say(say: Callable[[str], None], stream: IO[str]) -> Callable[[str], None]:
@@ -483,7 +495,8 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
     codeval.stream = stream
     update.current_for(sys.argv[1:], say)
     say(palette.paint(codeval.NOTICE, "dim", stream))
-    _codeval_signin(say)
+    if (signing := _codeval_signin(a, say)) is not None:
+        return signing
     with codeval.profiled(codeval.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
