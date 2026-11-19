@@ -1512,6 +1512,12 @@
      "title": "Hours Left",
      "type": "number"
     },
+    "measure": {
+     "maximum": 5,
+     "minimum": 0,
+     "title": "Measure",
+     "type": "integer"
+    },
     "mutants": {
      "items": {
       "$ref": "#/$defs/Mutant"
@@ -1538,6 +1544,7 @@
     }
    },
    "required": [
+    "measure",
     "batch",
     "tip",
     "commits",
@@ -1775,6 +1782,12 @@
     "machine": {
      "$ref": "#/$defs/Machine"
     },
+    "measure": {
+     "maximum": 5,
+     "minimum": 0,
+     "title": "Measure",
+     "type": "integer"
+    },
     "mutants": {
      "default": [],
      "items": {
@@ -2006,6 +2019,7 @@
     "cli",
     "key_id",
     "rules",
+    "measure",
     "batch",
     "took",
     "machine",
@@ -3093,7 +3107,7 @@
   },
   "Tip": {
    "additionalProperties": false,
-   "description": "The tip, built and tested, and measured beyond pass and fail; or `error` alone, where it could not be. An\nenvironment's error (`env_*`, `cancelled`) leaves the tip asked again; any other ends the run.",
+   "description": "The tip, built and tested, and measured beyond pass and fail; or `error` alone, where it could not be. An\nenvironment's failure (kennet/check/codeval.py `tip_environment`) leaves the tip asked again; any other error ends the run.",
    "properties": {
     "build": {
      "anyOf": [
@@ -3333,6 +3347,6 @@
    "type": "object"
   }
  },
- "description": "What `kennet codeval` sends (kennet.codeval.profile.v1, kennet.codeval.results.v1) and the instructions it is answered with (Next). Closed: no field takes free text. What the results extract from running code and reading logs is capped at 500000 bits a step and 117000000 bits a run (log2 of each field's domain, summed; hashes by x-bits, test keys as opaque ids, durations as buckets of x-bounds-ms). The cap bounds what the published client sends; a client the seller modifies and runs reveals only the seller's own data. The profile's git metadata is outside the cap: facts git already holds, not values extracted from content.",
+ "description": "What `kennet codeval` sends (kennet.codeval.profile.v1, kennet.codeval.results.v1) and the instructions it is answered with (Next). Closed: no field takes free text. What the results extract from running code and reading logs is capped at 500000 bits a step and 117000000 bits a measure, at most 6 measures a run (log2 of each field's domain, summed; hashes by x-bits, test keys as opaque ids, durations as buckets of x-bounds-ms). The cap bounds what the published client sends; a client the seller modifies and runs reveals only the seller's own data. The profile's git metadata is outside the cap: facts git already holds, not values extracted from content.",
  "title": "Kennet CodeVal"
 }

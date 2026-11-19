@@ -113,4 +113,6 @@ def from_object(error: dict[str, Any]) -> MetaphiError:
     )
     if tip := text("filed_tip"):  # profile_mismatch: the tip the CodeVal run measures, as data
         got.context["filed_tip"] = tip
+    if isinstance(error.get("measure"), int):  # superseded: the CodeVal run's live measure, as data
+        got.context["measure"] = error["measure"]
     return got

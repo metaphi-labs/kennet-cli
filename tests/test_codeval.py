@@ -864,6 +864,7 @@ def _next(local_paths: dict, **more) -> dict:
     money = next(i for i, p in local_paths.items() if p == "money.py")
     return {
         "batch": 1,
+        "measure": 0,
         "tip": True,
         "commits": [2],
         "mutants": [{"file": calc, "op": "arith", "nth": 0}],
@@ -914,7 +915,12 @@ def test_a_signed_in_run_with_no_terminal_goes_end_to_end(tested, tmp_path, caps
     (profile,), (sent,) = _bodies(posted), _bodies(results)
     schema.check("Profile", profile)
     schema.check("Results", sent)
-    assert sent["batch"] == 1 and sent["commands"]["by"] == "seller" and sent["commands"]["build"] is None
+    assert (
+        sent["batch"] == 1
+        and sent["measure"] == 0
+        and sent["commands"]["by"] == "seller"
+        and sent["commands"]["build"] is None
+    )
     (commit,) = sent["commits"]
     assert commit["commit"] == 2 and len(commit["post"]["tests"]) == 2 and len(commit["pre"]["tests"]) == 1
     assert commit["post"]["tests"][0]["exit"] == 0 and commit["post"]["tests"][0]["report"] == "junit"
@@ -1577,3 +1583,53 @@ def test_the_profile_is_the_tips_own_history_whatever_other_branches_hold(tested
     stray = {**doc["commits"][-1], "commit": len(doc["commits"]) + 1, "parents": [doc["commits"][0]["commit"]]}
     with pytest.raises(schema.Refused, match="in its history"):
         schema.check("Profile", {**doc, "commits": [*doc["commits"], stray]})
+
+
+@respx.mock
+def test_results_for_a_superseded_measure_stop_as_in_use(tested, tmp_path, capsys):
+    _signed_in()
+    _, local = _profile(tested)
+    asked = _next(local.kept["paths"], commits=[], mutants=[])
+    respx.post(f"{API}/codeval").respond(json={"run": "cv_16", "object": "codeval", "measure": 0, "next": asked})
+    gone = {"type": "invalid_request_error", "code": "superseded", "message": "m", "measure": 1}
+    results = respx.post(f"{API}/codeval/cv_16/results").respond(409, json={"error": gone})
+    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 6
+    assert _bodies(results)[0]["measure"] == 0
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "in_use"
+
+
+@respx.mock
+def test_a_restart_past_the_limit_says_the_live_measurement_goes_on(tested, capsys):
+    _signed_in()
+    limit = {"type": "invalid_request_error", "code": "restart_limit", "message": "m"}
+    respx.post(f"{API}/codeval").respond(409, json={"error": limit})
+    assert cli.main(["codeval", str(tested), "--restart", "--json", "--", "true"]) == 6
+    said = json.loads(capsys.readouterr().out)["error"]
+    assert said["code"] == "restart_limit" and "cannot be restarted again" in said["message"]
+    assert "continue the live measurement" in said["next_step"]
+
+
+@respx.mock
+def test_a_live_measure_other_than_the_one_filed_here_files_the_kept_profile_again(
+    tested, tmp_path, capsys, monkeypatch
+):
+    _signed_in()
+    _, local = _profile(tested)
+    asked = _next(local.kept["paths"], commits=[], mutants=[])
+    posted = respx.post(f"{API}/codeval").mock(
+        side_effect=[
+            httpx.Response(200, json={"run": "cv_17", "object": "codeval", "measure": 0, "next": asked}),
+            httpx.Response(200, json={"run": "cv_17", "object": "codeval", "measure": 1, "done": True}),
+        ]
+    )
+    looked = respx.get(f"{API}/codeval/cv_17").respond(json={"state": "measuring", "measure": 1, "next": asked})
+    with monkeypatch.context() as m:
+        m.setattr(codeval, "measured", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt))
+        assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 130
+    assert codeval_runs.run_state(local.home)["measure"] == 0
+    (tested / "money.py").write_text("RATE = 0\n" * 200)
+    git(tested, "commit", "-qam", "moved on")
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 0
+    first, second = _bodies(posted)
+    assert looked.call_count == 1 and second == first, "the kept profile, not the moved tip's"
+    assert codeval_runs.run_state(local.home)["measure"] == 1

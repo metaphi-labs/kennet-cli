@@ -1254,7 +1254,13 @@ SEND_BUDGET_S = 300.0
 
 
 def _named(e: errors.MetaphiError) -> errors.MetaphiError:
-    if e.code == "insufficient_scope":
+    if e.code == "restart_limit":
+        e.message = (
+            "this repository has been measured afresh as many times as a run takes and cannot be restarted again; "
+            "the measurement it holds goes on"
+        )
+        e.next_step = "continue the live measurement: run `kennet codeval` without --restart where it runs"
+    elif e.code == "insufficient_scope":
         e.message += (
             "; it takes kennet:codeval:write. `kennet login` hands this machine keys that hold it "
             "once your organization does"
@@ -1871,6 +1877,7 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
         "key_id": key_id(local.key),
         "rules": extract.rules_hash(),
         "batch": nxt["batch"],
+        "measure": nxt["measure"],
         "machine": machine(bench.box, bench.found[0].image if bench.found else None),
         "toolchain": bench.toolchain(),
         "commits": [],

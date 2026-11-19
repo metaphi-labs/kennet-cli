@@ -25,7 +25,8 @@ from metaphi import __version__, accounts, agents, config, errors, palette, skil
 
 FAILED, AUTH, LATER, UPGRADE, NEEDS_PERSON = 1, 3, 4, 5, 6
 # kennet codeval: install a tool, give a command, fix the machine the tip ended on, or choose where the run goes on
-PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing", "environment", "in_use"])
+# (another machine or clone holds it, or it cannot be restarted again)
+PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing", "environment", "in_use", "restart_limit"])
 
 
 def status(error: errors.MetaphiError) -> int:
@@ -555,7 +556,19 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                         say(
                             f"{local.name}: going on with {kept['run']}, measured against the profile it was filed with"
                         )
-                        got = _codeval_state(kept["run"], codeval.get_run(kept["run"]))
+                        state = codeval.get_run(kept["run"])
+                        if state.get("measure") != kept.get("measure"):
+                            # the server's live measure is not the one this clone filed for: file the kept profile
+                            # again; the server answers the live measure when it is this profile's, else a refusal
+                            try:
+                                got = codeval.send_filed(local)
+                            except errors.MetaphiError as e:
+                                if e.code in IN_USE:
+                                    raise _in_use(a, org) from None
+                                raise
+                            codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip, measure=got.get("measure"))
+                        else:
+                            got = _codeval_state(kept["run"], state)
             if got is None:
                 say(f"Reading {local.name}\u2026")
                 try:
