@@ -11,7 +11,7 @@ import httpx
 import pytest
 import respx
 
-from metaphi import codebase_checks, codeval, config, errors
+from metaphi import codebase_checks, codeval, codeval_runs, config, errors
 
 API = config.DEFAULT_API
 SECRET = [
@@ -1140,7 +1140,6 @@ def test_units_at_once_follow_cores_free_memory_and_the_cap(monkeypatch):
 def _at_once(monkeypatch, n=2):
     monkeypatch.setattr(codebase_checks, "workers", lambda units, peak=None, budget=None: (n, 1))
     monkeypatch.setattr(codeval, "shares_state", lambda services, plan: False)
-    monkeypatch.setattr(codebase_checks, "audited", lambda seed, units: set())
 
 
 def test_a_sellers_own_command_on_this_machine_runs_one_unit_at_a_time(tested, monkeypatch):
@@ -1163,13 +1162,32 @@ def test_units_run_at_once_and_each_run_says_how_many_ran_with_it(tested, monkey
             assert c["shared"]["concurrency"] == 2 and c["shared"]["wall_s"] >= 1 and c["shared"]["post"]
 
 
-def test_a_unit_drawn_for_audit_runs_again_alone_and_keeps_its_shared_run(tested, monkeypatch):
+def test_a_unit_that_shows_a_red_flag_runs_again_alone_and_keeps_both_attempts(tested, monkeypatch):
     _at_once(monkeypatch)
-    monkeypatch.setattr(codebase_checks, "audited", lambda seed, units: {0})
+    flagged = iter([True])
+    monkeypatch.setattr(codebase_checks, "_suspect", lambda row, base: next(flagged, False))
     got = _checked(tested, test=PYTEST.format(py=sys.executable))[1]["repos"][0]
-    first = got["commits"][0]
+    (first,) = [c for c in got["commits"] if "shared" in c]
     assert {r["concurrency"] for r in first["post"]["tests"]} == {1}
     assert first["shared"]["concurrency"] == 2 and set(first["shared"]) >= {"pre", "post", "wall_s"}
+    assert first["shared"]["post"]["tests"] and first["post"]["tests"], "both attempts are kept"
+
+
+def test_both_sides_of_a_commit_run_at_the_same_path(tested, tmp_path):
+    seen = tmp_path / "pwd"
+    _checked(tested, runs=1, test=f"pwd >> {seen}; " + PYTEST.format(py=sys.executable))
+    lines = seen.read_text().split()
+    assert len(lines) >= 4 and len(set(lines[1:])) == len(lines[1:]) // 2, "each commit's pre and post share a path"
+
+
+def test_builds_and_tests_see_a_fixed_environment(tested, tmp_path, monkeypatch):
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "dummy-secret")
+    monkeypatch.setenv("SOME_TEAM_SETTING", "x")
+    seen = tmp_path / "env"
+    _checked(tested, runs=1, commits=(2,), test=f"env >> {seen}; " + PYTEST.format(py=sys.executable))
+    got = seen.read_text()
+    assert "dummy-secret" not in got and "SOME_TEAM_SETTING" not in got
+    assert "PATH=" in got and "KENNET_TESTS=" in got
 
 
 def test_a_unit_that_collided_with_another_runs_again_alone_before_it_counts(tested, monkeypatch, tmp_path):
@@ -1203,14 +1221,10 @@ def test_beside_others_a_failure_that_may_be_the_others_doing_runs_again_alone()
     assert codebase_checks._suspect({"pre": {"tests": [{"exit": 137, "reported": 10}]}}, tip), "killed for memory"
     assert codebase_checks._suspect({"post": {"tests": [{"exit": None}]}}, tip), "stopped for time"
     assert codebase_checks._suspect({"post": {"tests": [{"exit": 0, "reported": 7}]}}, tip), "a test went missing"
-
-
-def test_the_audit_draw_is_a_tenth_at_least_one_and_follows_the_seed():
-    assert len(codebase_checks.audited("ab" * 16, 3)) == 1
-    assert len(codebase_checks.audited("ab" * 16, 41)) == 5
-    assert codebase_checks.audited("ab" * 16, 41) == codebase_checks.audited("ab" * 16, 41)
-    assert codebase_checks.audited("ab" * 16, 41) != codebase_checks.audited("cd" * 16, 41)
-    assert codebase_checks.audited("ab" * 16, 0) == set()
+    grown = {"pre": {"tests": [{"exit": 1, "reported": 4}]}, "post": {"tests": [{"exit": 0, "reported": 4}]}}
+    assert not codebase_checks._suspect(grown, tip), "counted against the commit's own base, not the tip"
+    fewer = {"pre": {"tests": [{"exit": 1, "reported": 4}]}, "post": {"tests": [{"exit": 0, "reported": 3}]}}
+    assert codebase_checks._suspect(fewer, tip), "fewer tests after the change than before it"
 
 
 def test_the_hours_are_the_runs_own_seconds_and_stopping_for_them_spent_them(tested):
@@ -1219,3 +1233,39 @@ def test_the_hours_are_the_runs_own_seconds_and_stopping_for_them_spent_them(tes
     assert repo["stopped"] == "hours" and len(repo["commits"]) == 1, "the first commit spent the hour's budget"
     spent = sum(r["seconds"] for c in repo["commits"] for k in ("pre", "post") for r in c[k]["tests"])
     assert spent >= 1
+
+
+def test_a_proof_counts_as_fixed_git_does_whatever_the_users_git_settings(tmp_path, monkeypatch):
+    r = tmp_path / "alg"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    (r / "f").write_text("a\nb\nx\nx\nb\nc\nb\nb\nx\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "one")
+    (r / "f").write_text("a\nx\na\nb\nc\na\n")
+    git(r, "commit", "-qam", "two")
+    git(r, "config", "diff.algorithm", "histogram")
+    (tmp_path / "global").write_text("[diff]\n\talgorithm = histogram\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "global"))
+    sha = subprocess.run(
+        ["git", "-C", str(r), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    users = subprocess.run(
+        ["git", "-C", str(r), "show", "--numstat", "--format=", sha], capture_output=True, check=True
+    ).stdout
+    assert users.startswith(b"3\t6\t"), "the user's git counts by histogram"
+    head, numstat = codeval.proof(r, sha)
+    assert head.decode().strip() == sha and numstat == b"2\t5\t[file]\n", "the proof counts as git's default does"
+
+
+def test_an_error_keeps_what_was_measured_before_it(tested, monkeypatch, tmp_path):
+    real = codebase_checks.run
+
+    def breaks_late(*a, **k):
+        real(*a, **k)
+        raise RuntimeError("the disk went away")
+
+    monkeypatch.setattr(codebase_checks, "run", breaks_late)
+    ledger = codeval_runs.Run(tmp_path / "run")
+    got = _checked(tested, runs=1, ledger=ledger)[1]["repos"][0]
+    assert got["stopped"] == "error" and got["tip"] and [c["commit"] for c in got["commits"]] == [2, 3]

@@ -307,6 +307,7 @@ class Known:
 
     values: dict[str, tuple[str, bool, bool]] = field(default_factory=dict)
     segments: dict[str, str] = field(default_factory=dict)  # a name replaced as a whole path or URL segment
+    parts: dict[str, str] = field(default_factory=dict)  # a name replaced wherever it is, even inside a word
     _compiled: dict[bool, tuple[re.Pattern[bytes], dict[bytes, bytes]]] = field(default_factory=dict)
 
     def add(self, value: str | None, placeholder: str, word: bool = False, late: bool = False) -> None:
@@ -361,6 +362,19 @@ class Known:
             self.segments.setdefault(name.lower(), placeholder)
             self._compiled.clear()
 
+    def part(self, name: str, placeholder: str) -> None:
+        """A name replaced wherever it stands, any case, even inside a longer word (`TestLedgerline`,
+        `@acmefin/sdk`): a repository's or a company's name, when it is no common word."""
+        if len(name) >= PART_MIN:
+            self.parts.setdefault(name.lower(), placeholder)
+            self._compiled.clear()
+
+    def _part_pattern(self) -> re.Pattern[bytes] | None:
+        if not self.parts:
+            return None
+        names = b"|".join(re.escape(n.encode()) for n in sorted(self.parts, key=len, reverse=True))
+        return re.compile(rb"(?i)((?-i:" + PLACEHOLDER_BYTES + rb"))|(" + names + rb")")
+
     def _segment_pattern(self) -> re.Pattern[bytes] | None:
         if not self.segments:
             return None
@@ -382,6 +396,7 @@ class Known:
         return spans
 
     def replace_segments(self, data: bytes, counts: collections.Counter) -> bytes:
+        data = self.replace_parts(data, counts)
         pattern = self._segment_pattern()
         if pattern is None:
             return data
@@ -396,6 +411,20 @@ class Known:
             data = data[:a] + joined.sub(sub, data[a:b]) + data[b:]
         return pattern.sub(sub, data)
 
+    def replace_parts(self, data: bytes, counts: collections.Counter) -> bytes:
+        pattern = self._part_pattern()
+        if pattern is None:
+            return data
+
+        def sub(m: re.Match[bytes]) -> bytes:
+            if m.group(1):
+                return m.group(0)
+            placeholder = self.parts[m.group(2).decode().lower()]
+            counts[_kind_of(placeholder.encode())] += 1
+            return placeholder.encode()
+
+        return pattern.sub(sub, data)
+
     def left(self, data: bytes) -> collections.Counter:
         """Known identifiers still in `data`, counted by kind."""
         pattern, to = self._pattern(None)
@@ -407,6 +436,10 @@ class Known:
                 got.update(
                     _kind_of(self.segments[m.group(1).decode().lower()].encode()) for m in joined.finditer(data[a:b])
                 )
+        if (parts := self._part_pattern()) is not None:
+            got.update(
+                _kind_of(self.parts[m.group(2).decode().lower()].encode()) for m in parts.finditer(data) if m.group(2)
+            )
         return got
 
 
@@ -589,17 +622,44 @@ def _url_names(repo: dict[str, Any]) -> set[str]:
 
 
 def _repo_name(k: Known, name: str, n: int, declared: list[str]) -> None:
-    """The repository's name is an identifier: always replaced in a path or URL (`/ledgerline`), and as a bare word
-    too unless the repository declares a package or module of that name or under it (`ledgerline-core`), or it is a
-    common word (`api`, `server`).
-    Replaced after the patterns, so a URL that holds it is still found whole."""
+    """The repository's name is an identifier: always replaced in a path, URL or host name (`/ledgerline`,
+    `ledgerline.acme.com`); and anywhere else, any case, even inside a longer word (`TestLedgerline`,
+    `ledgerline_test.go`), unless the repository declares a package or module of that name or under it
+    (`ledgerline-core`), where code names it, or it is a common word (`api`, `server`). A name under PART_MIN letters
+    is replaced only as a whole word. Replaced after the patterns, so a URL that holds it is still found whole."""
     if len(name) < 4:
         return
     k.segment(name, f"[repo:{n}]")
     folded = re.sub(r"[-_.\s]+", "-", name.lower())
     namespace = any(d == folded or d.startswith(folded + "-") for d in declared)
-    if not namespace and name.lower() not in COMMON_WORDS and name.lower() not in _dictionary():
+    if namespace or name.lower() in COMMON_WORDS or name.lower() in _dictionary():
+        return
+    if len(name) >= PART_MIN:
+        k.part(name, f"[repo:{n}]")
+        if (joined := re.sub(r"[-_.\s]+", "", name)) != name:
+            k.part(joined, f"[repo:{n}]")
+    else:
         k.add(name, f"[repo:{n}]", word=True, late=True)
+
+
+PART_MIN = 5
+"""The fewest letters a name has to be replaced inside longer words: shorter ones match too much by chance."""
+SUFFIXES_2 = frozenset(
+    ["co.uk", "org.uk", "ac.uk", "com.au", "net.au", "co.nz", "co.jp", "co.in", "com.br", "com.cn", "co.za", "com.sg"]
+    + ["com.mx", "co.kr", "com.tr", "com.hk", "com.tw", "co.il", "com.ar", "ae.org", "co.ae", "com.sa", "com.my"]
+)
+
+
+def company_stem(domain: str) -> str | None:
+    """The company name a seller's email domain carries (`acmefin` from `eng.acmefin.co.uk`), or None."""
+    labels = domain.lower().rstrip(".").split(".")
+    if len(labels) < 2:
+        return None
+    cut = 2 if ".".join(labels[-2:]) in SUFFIXES_2 and len(labels) >= 3 else 1
+    stem = labels[-cut - 1]
+    if len(stem) < PART_MIN or stem in COMMON_WORDS or stem in _dictionary():
+        return None
+    return stem
 
 
 def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
@@ -639,6 +699,9 @@ def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
                 k.add(handle, f"[author:{i}]", word=True)
             if domain and not _public(domain) and domain not in PUBLIC_EMAIL and domain in domains:
                 k.add(domain, f"[domain:{domains[domain]}]", late=True)
+                if stem := company_stem(domain):
+                    for form in {stem, stem.replace("-", "")}:
+                        k.part(form, f"[domain:{domains[domain]}]")
         for name, email in repo.get("people") or []:
             i = authors.get(email.lower())
             if i is not None and "@" not in name:
@@ -662,6 +725,8 @@ def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
         for other in out:
             for name in other.segments if other is not k else ():
                 k.segment(name, "[repo]")
+            for name, placeholder in other.parts.items() if other is not k else ():
+                k.part(name, re.sub(r"^\[(repo|domain):\d+\]$", r"[\1]", placeholder))
             for value, (placeholder, word, late) in other.values.items():
                 k.add(value, re.sub(r"^\[(author|domain):\d+\]$", r"[\1]", placeholder), word, late)
     return out
@@ -731,6 +796,42 @@ def _secrets(data: bytes, counts: collections.Counter) -> bytes:
     return TOKEN.sub(high, data)
 
 
+ARN_ACCOUNT = re.compile(rb"(arn:aws[\w-]*:[\w-]*:[\w-]*:)(\d{12})(?=:)")
+ACCOUNT_ID = re.compile(rb"(?i)(\baws[_ -]?account(?:[_ -]?id)?\W{1,4})(\d{12})\b")
+WINDOWS_USER = re.compile(rb"(?i)(\b[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/))([^\\/\s\"'<>|:*?]+)")
+WINDOWS_SHARED = frozenset([b"public", b"default", b"default user", b"all users"])
+SERIAL = re.compile(
+    rb"(?i)(\bserial(?:[ _-]?(?:number|no\.?))?(?:[ \t]*\([^)\n]{1,20}\))?[ \t]*[:=#]?[ \t]*)([A-Z0-9]{8,14})\b"
+)
+
+
+def _machine(data: bytes, counts: collections.Counter) -> bytes:
+    """What names a machine or an account by shape: an AWS account id (in an ARN, or named), a Windows user's
+    folder (`C:\\Users\\<name>`), a serial number."""
+
+    def account(m: re.Match[bytes]) -> bytes:
+        counts["aws_account"] += 1
+        return m.group(1) + b"[aws_account]"
+
+    def user(m: re.Match[bytes]) -> bytes:
+        if m.group(2).lower() in WINDOWS_SHARED or m.group(2).startswith(b"["):
+            return m.group(0)
+        counts["user"] += 1
+        return m.group(1) + b"[user]"
+
+    def serial(m: re.Match[bytes]) -> bytes:
+        value = m.group(2)
+        if not (re.search(rb"\d", value) and re.search(rb"[A-Za-z]", value)):
+            return m.group(0)
+        counts["serial"] += 1
+        return m.group(1) + b"[serial]"
+
+    data = ARN_ACCOUNT.sub(account, data)
+    data = ACCOUNT_ID.sub(account, data)
+    data = WINDOWS_USER.sub(user, data)
+    return SERIAL.sub(serial, data)
+
+
 def _patterns(data: bytes, counts: collections.Counter) -> bytes:
     def counted(kind: str, placeholder: bytes) -> Callable[[re.Match[bytes]], bytes]:
         def sub(m: re.Match[bytes]) -> bytes:
@@ -787,6 +888,7 @@ def _patterns(data: bytes, counts: collections.Counter) -> bytes:
     data = IPV6.sub(ipv6, data)
     data = IPV4.sub(ipv4, data)
     data = HOST.sub(host, data)
+    data = _machine(data, counts)
     data = _addresses(data, counts)
     return _phones(data, counts)
 

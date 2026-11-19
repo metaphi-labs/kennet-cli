@@ -468,7 +468,7 @@ def test_not_signed_in_with_no_terminal_it_prints_the_code_at_once_and_the_rerun
 @pytest.mark.parametrize(
     ("message", "said"),
     [
-        ("ab12: it was picked for another profile of it; CodeVal measures a repository once", "measured before"),
+        ("ab12: it was picked for another profile of it; CodeVal measures a repository once", "is not kept"),
         ("ab12: this history was already picked as another repository", "a fork or a near copy"),
     ],
 )
@@ -547,3 +547,49 @@ def test_a_send_cut_short_while_the_logs_are_checked_only_asks_again(made, capsy
     got["complete"].mock(return_value=httpx.Response(200, json={"object": "codeval_logs", "state": "received"}))
     assert cli.main(["codeval", str(made)]) == 0
     assert got["part"].call_count == 2, "after the check began, no part is sent again"
+
+
+@respx.mock
+def test_one_repository_files_the_entry_it_was_committed_to_wherever_and_however_it_runs_again(
+    made, capsys, tmp_path, monkeypatch
+):
+    got = _server()
+    real = codebase_checks._commit
+
+    def killed(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(codebase_checks, "_commit", killed)
+    assert cli.main(["codeval", str(made), "--json"]) == 130
+    capsys.readouterr()
+    committed = json.loads(got["picks"].calls[0].request.content)["repos"][0]["profile_sha256"]
+    monkeypatch.setattr(codebase_checks, "_commit", real)
+    monkeypatch.setattr(codeval, "_hunks", lambda *a: None)  # a later kennet that profiles otherwise
+
+    def filed() -> str:
+        profile = json.loads(gzip.decompress((_home(tmp_path) / codeval.PAYLOAD / codeval.PROFILE).read_bytes()))
+        return codeval.entry_sha256(profile["repos"][0])
+
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON, "resumed after the kill"
+    assert filed() == committed
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    assert filed() == committed, "another folder"
+    assert cli.main(["codeval", str(made), "--json", "--", "make", "test"]) == cli.NEEDS_PERSON
+    assert filed() == committed, "another command"
+    assert {json.loads(c.request.content)["repos"][0]["profile_sha256"] for c in got["picks"].calls} == {committed}
+    capsys.readouterr()
+
+
+@respx.mock
+def test_a_repository_committed_at_another_commit_says_so(made, capsys, tmp_path):
+    _server()
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    capsys.readouterr()
+    (made / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    git(made, "commit", "-qam", "later")
+    assert cli.main(["codeval", str(made), "--json"]) == cli.FAILED
+    err = json.loads(capsys.readouterr().out)["error"]
+    assert err["code"] == "committed_elsewhere" and "check out" in err["next_step"]

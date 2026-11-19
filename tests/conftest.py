@@ -160,3 +160,8 @@ def engine(tmp_path, monkeypatch):
 def _writes_under_tmp(tmp_path, monkeypatch):
     """Tests write only under tmp_path: a run's default folders are relative to the working directory."""
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _state_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("KENNET_STATE_HOME", str(tmp_path / "state"))

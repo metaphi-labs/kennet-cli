@@ -618,8 +618,7 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                 (home / "picks.json").write_text(json.dumps(picked, indent=1))
             edits, revealed = codeval_draws.drawn(doc, [r["seed"] for r in picked["repos"]])
             plan = codebase_checks.Plan(test=a.run_command, logs=home / "logs", ledger=run)
-            seeds = [r["seed"] for r in picked["repos"]]
-            report = codeval.checked(kept, codeval.targets(kept, picked), edits, plan, say, Steps(), seeds)
+            report = codeval.checked(kept, codeval.targets(kept, picked), edits, plan, say, Steps())
             for local, got, ids in zip(kept, report["repos"], revealed, strict=True):
                 got["blobs"] = codeval.blobs(local, ids)
             (home / "checks.json").write_text(json.dumps(report, indent=1))

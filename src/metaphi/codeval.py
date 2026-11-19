@@ -22,7 +22,18 @@ from typing import IO, Any
 
 import httpx
 
-from metaphi import __version__, api, codebase_checks, codebase_env, codebase_sites, config, deid, deid_model, errors
+from metaphi import (
+    __version__,
+    api,
+    codebase_checks,
+    codebase_env,
+    codebase_sites,
+    codeval_runs,
+    config,
+    deid,
+    deid_model,
+    errors,
+)
 from metaphi import codebase_reading as reading
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
@@ -276,6 +287,9 @@ _FIXED = (
     "log.follow=false",
     "diff.noprefix=false",
     "diff.mnemonicPrefix=false",
+    "diff.algorithm=myers",
+    "diff.indentHeuristic=true",
+    "diff.renameLimit=1000",
     "i18n.logOutputEncoding=UTF-8",
 )
 
@@ -713,9 +727,16 @@ def _git_ready() -> None:
         )
 
 
-def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
+def first_root(repo: Path) -> str:
+    """The root of the repository's first-parent line: what the service names it by (`fingerprint`)."""
+    return _text(repo, "rev-list", "--first-parent", "--max-parents=0", "HEAD").split()[-1]
+
+
+def compute(repo: Path, name: str, keep: dict | None = None, salt: bytes | None = None) -> dict[str, Any]:
+    """The repository's profile entry. `salt` keys its salted hashes (subjects, blobs): the one kept for the
+    repository, so the same history always gives the same entry."""
     authors, domains, paths, dirs = _Ids(), _Ids(), _Ids(), _Ids()
-    salt = secrets.token_bytes(32)
+    salt = salt or secrets.token_bytes(32)
     people: list[dict] = []
     order: dict[str, int] = {}
     words: dict[int, set[str]] = {}
@@ -965,14 +986,40 @@ def profiled(paths: list[str], say: Callable[[str], None] = print) -> Iterator[t
             local: dict = {"name": name, "given": given}
             began = time.monotonic()
             try:
-                repos.append(compute(path, name, local))
+                local["fingerprint"] = fingerprint(first_root(path))
+                salt = codeval_runs.salt(local["fingerprint"], secrets.token_bytes(32))
+                repos.append(compute(path, name, local, salt))
                 local["seconds"] = time.monotonic() - began
                 kept.append(local)
             except (Unreadable, ValueError, OSError):
                 say(f"\u2717 Skipped {name}: {SKIPPED_FIX['unreadable']}")
                 skipped.append({"name": name, "reason": "unreadable"})
         doc = {"schema": SCHEMA, "tool_version": __version__, "repos": repos, "skipped": skipped}
-        yield pseudonymized(doc, kept), kept
+        yield as_committed(pseudonymized(doc, kept), kept), kept
+
+
+def as_committed(doc: dict[str, Any], kept: list[dict]) -> dict[str, Any]:
+    """The profile with each repository's entry as it was committed to at `/picks`, byte for byte, where one is kept:
+    what is filed is what was committed to, never a recompute. A repository whose history has moved on since it was
+    committed to stops here, with what to do."""
+    repos = []
+    for entry, local in zip(doc["repos"], kept, strict=True):
+        held = codeval_runs.committed(local["fingerprint"]) if local.get("fingerprint") else None
+        if held is None:
+            repos.append(entry)
+            continue
+        was = json.loads(held)
+        if was.get("tip") != entry.get("tip"):
+            raise errors.MetaphiError(
+                f"{local['name']} was committed to at its commit {str(was.get('tip'))[:12]}, and its history has "
+                "moved on since (CodeVal measures a repository once)",
+                code="committed_elsewhere",
+                next_step=f"check out {was.get('tip')} in {local['given']} and run the same command again to finish "
+                "that run, or leave this repository out",
+            )
+        local["entry"] = held
+        repos.append(was)
+    return {**doc, "repos": repos}
 
 
 CHMOD_IMAGE = "busybox:1.37"
@@ -1024,7 +1071,6 @@ def checked(
     plan: codebase_checks.Plan,
     say: Callable[[str], None] = print,
     steps: Steps | None = None,
-    seeds: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build and test each repository's tip and its picked past commits. Raises `codebase_checks.Stuck` when a
     person must act; every unit finished before it is kept in the plan's ledger."""
@@ -1095,9 +1141,7 @@ def checked(
                     say(f"\u2717 {local['name']}'s services did not start ({logs / 'services.log'})")
                 elif services.shared:
                     codebase_setup.NETWORK[:] = ["--network", f"container:{services.shared}"]
-            mine = dataclasses.replace(
-                mine, alone=shares_state(services, plan), seed=seeds[n] if seeds and n < len(seeds) else None
-            )
+            mine = dataclasses.replace(mine, alone=shares_state(services, plan))
             try:
                 if plan.test is None:
                     say(f"Setting up {local['name']}\u2026")
@@ -1142,8 +1186,13 @@ def checked(
                 raise
             except Exception as e:  # noqa: BLE001
                 say(f"\u2717 {local['name']}: tests stopped ({type(e).__name__}: {e})")
-                got = {"from": "tip", "runs": RUNS, "test_given": plan.test is not None, "stopped": "error"}
-                got.update(commits=[], edits=[])
+                got = {
+                    "from": "tip",
+                    "runs": RUNS,
+                    "test_given": plan.test is not None,
+                    "stopped": "error",
+                    **measured_so_far(plan.ledger, local["name"], targets, planted),
+                }
             finally:
                 if services:
                     services.down()
@@ -1181,6 +1230,25 @@ def checked(
                 except (OSError, subprocess.TimeoutExpired):
                     pass
     return {"schema": CHECKS_SCHEMA, "tool_version": __version__, "repos": out, "seconds": steps.seconds()}
+
+
+def measured_so_far(ledger: Any, name: str, targets: list[int], edits: list[dict]) -> dict[str, Any]:
+    """What a repository stopped by an error had measured: its tip and the finished prefix of its past commits and
+    edits, from the run's ledger, as `codebase_checks.run` would have reported them."""
+    if ledger is None:
+        return {"commits": [], "edits": []}
+    out: dict[str, Any] = {"commits": [], "edits": []}
+    if (tip := ledger.get(name, "tip")) is not None:
+        out["tip"] = tip["tip"]
+    for i in targets:
+        if (row := ledger.get(name, "commit", i)) is None:
+            break
+        out["commits"].append(row)
+    for b in edits:
+        if (row := ledger.get(name, "edit", [b.get("file"), b.get("op"), b.get("nth")])) is None:
+            break
+        out["edits"].append(row)
+    return out
 
 
 def blobs(local: dict, ids: list[int]) -> dict[str, str]:
@@ -1378,6 +1446,12 @@ def picks(doc: dict[str, Any], kept: list[dict], sleep: Callable[[float], None] 
     except errors.MetaphiError as e:
         if step := next((s for said, s in PICK_REFUSALS if said in str(e)), None):
             e.next_step = step
+        if "picked for another profile" in str(e) and not all(k.get("entry") for k in kept):
+            e.next_step = (
+                "the profile this repository was committed to is not kept on this machine (kennet keeps it in "
+                f"{codeval_runs.state_home() / 'codeval'}), so it cannot be measured again; leave it out and run the "
+                "same command again"
+            )
         raise
     repos = got.get("repos")
     if (
@@ -1388,6 +1462,10 @@ def picks(doc: dict[str, Any], kept: list[dict], sleep: Callable[[float], None] 
         or not all(isinstance(r.get("seed"), str) and re.fullmatch(r"(?:[0-9a-f]{2})+", r["seed"]) for r in repos)
     ):
         raise errors.APIError("the service sent no usable picks; run the same command again", code="unavailable")
+    for r, k in zip(doc["repos"], kept, strict=True):
+        if k.get("fingerprint") and not k.get("entry"):
+            k["entry"] = committed_bytes(r)
+            codeval_runs.commit(k["fingerprint"], k["entry"])
     return got
 
 
@@ -1600,19 +1678,10 @@ def logs_packed(
 def proof(repo: Path, sha: str) -> tuple[bytes, bytes]:
     """A measured commit's proof, as the service reads it: `git rev-parse` of the commit whose tree was measured, and
     `git show -M --diff-merges=first-parent --numstat --format=` of it with each path replaced by `[file]` (a path can
-    name a person), its counts as git printed them."""
-    head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", f"{sha}^{{commit}}"],
-        capture_output=True,
-        timeout=60,
-        check=True,
-    ).stdout
-    stat = subprocess.run(
-        ["git", "-C", str(repo), "show", "-M", "--diff-merges=first-parent", "--numstat", "--format=", sha],
-        capture_output=True,
-        timeout=300,
-        check=True,
-    ).stdout
+    name a person), its counts as git printed them. Run under the same fixed git as the profile (`_git`, `_ENV`), so a
+    user's own git settings (`diff.algorithm`, rename limits) cannot change the counts."""
+    head = _out(repo, "rev-parse", "--verify", f"{sha}^{{commit}}")
+    stat = _out(repo, "show", "-M", "--diff-merges=first-parent", "--numstat", "--format=", sha)
     lines = [b"\t".join([*line.split(b"\t", 2)[:2], b"[file]"]) for line in stat.split(b"\n") if line.count(b"\t") >= 2]
     return head, b"".join(x + b"\n" for x in lines)
 
@@ -1723,12 +1792,15 @@ def pseudonymized(doc: dict[str, Any], kept: list[dict]) -> dict[str, Any]:
     return {**doc, "repos": repos, "skipped": skipped}
 
 
+def committed_bytes(entry: dict[str, Any]) -> bytes:
+    """A profile entry as it is committed to: UTF-8 JSON, keys sorted at every level, no whitespace, non-ASCII as
+    itself."""
+    return json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 def entry_sha256(entry: dict[str, Any]) -> str:
-    """The commitment to one repository's profile entry, sent to /picks before the profile: sha256 of the entry as
-    UTF-8 JSON, keys sorted at every level, no whitespace, non-ASCII as itself."""
-    return hashlib.sha256(
-        json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    """The commitment to one repository's profile entry, sent to /picks before the profile."""
+    return hashlib.sha256(committed_bytes(entry)).hexdigest()
 
 
 def profile_packed(doc: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:

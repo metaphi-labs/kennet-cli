@@ -4,9 +4,7 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import hashlib
-import math
 import os
-import random
 import re
 import secrets
 import shutil
@@ -43,7 +41,6 @@ class Plan:
     ledger: Any = None
     alone: bool = False  # one unit at a time: services are shared, or the seller's command shares this machine's caches
     memory: int | None = None  # bytes each container may hold
-    seed: str | None = None  # the repository's pick seed, hex: draws the units rerun alone for audit
 
 
 class Tree(dict):
@@ -486,7 +483,7 @@ def _edited(
             tree,
             Path(scratch),
             plan,
-            {**os.environ, "KENNET_TESTS": ""},
+            {**allowed(dict(os.environ)), "KENNET_TESTS": ""},
             runs,
             logs,
             label,
@@ -526,7 +523,7 @@ def _commit(
         {p: v for p, v in before.items() if p not in tests} | {p: after[p] for p in tests if p in after},
         links=after.links,
     )
-    env = {**os.environ, "KENNET_TESTS": in_code, "KENNET_JOBS": str(jobs)}
+    env = {**allowed(dict(os.environ)), "KENNET_TESTS": in_code, "KENNET_JOBS": str(jobs)}
     recipe, engine = found or (None, None)
     with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch:
         src, junit = Path(scratch) / "src", Path(scratch) / "junit"
@@ -538,10 +535,13 @@ def _commit(
         try:
             pre = _ran_side(shell, plan, env, 1, logs, f"{label}.pre", say, recipe)
             if recipe is None:
+                # The after side runs at the very path the before side ran at, so a command cannot tell them apart
+                # by $PWD: the before side's copy is moved away first.
                 shell.close()
-                src, junit = Path(scratch) / "post" / "src", Path(scratch) / "post" / "junit"
+                src.rename(Path(scratch) / "pre-src")
+                junit.rename(Path(scratch) / "pre-junit")
                 _write(repo, after, src)
-                junit.mkdir(parents=True)
+                junit.mkdir()
                 shell = Shell(None, None, src, junit, jobs=jobs)
             else:
                 for gone in set(pre_tree) - set(after):
@@ -679,8 +679,9 @@ def _runs(side: dict | None) -> list[dict]:
 
 def _suspect(row: dict, tip: dict | None) -> bool:
     """Whether a unit run beside others must run again alone before it counts: a build failed, its post side failed,
-    a run was killed (exit 137, out of memory) or stopped for time, or it reported fewer tests than the tip did alone.
-    A before side's tests failing is expected (the commit's new tests, over its parent) and is no sign."""
+    a run was killed (exit 137, out of memory) or stopped for time, or its post side reported fewer tests than its
+    own base did: a past commit's pre side (its parent, with the commit's tests), an edit's unedited tip. A before
+    side's tests failing is expected (the commit's new tests, over its parent) and is no sign."""
     runs = [r for k in ("pre", "post") for r in _runs(row.get(k))]
     if any(r.get("exit") is None or r.get("exit") == KILLED for r in runs):
         return True
@@ -688,22 +689,12 @@ def _suspect(row: dict, tip: dict | None) -> bool:
         return True
     if any(r.get("exit") != 0 for r in _runs(row.get("post"))):
         return True
-    most = max((t.get("reported") or 0 for t in (tip or {}).get("tests", [])), default=0)
-    return any((t.get("reported") or 0) < most for k in ("pre", "post") for t in (row.get(k) or {}).get("tests", []))
+    base = row.get("pre") if row.get("pre") is not None else tip
+    most = max((t.get("reported") or 0 for t in (base or {}).get("tests", [])), default=0)
+    return any((t.get("reported") or 0) < most for t in (row.get("post") or {}).get("tests", []))
 
 
 KILLED = 137
-AUDIT_SHARE = 0.1
-"""Of the units run beside others, this share (at least one) runs again alone whatever it showed, drawn from the
-repository's pick seed: how often a shared run and an alone one disagree is then measured, not assumed."""
-
-
-def audited(seed: str | None, units: int) -> set[int]:
-    """The units (0-based, in run order) rerun alone for audit."""
-    if not units:
-        return set()
-    rng = random.Random(bytes.fromhex(seed or "") + b"audit")
-    return set(rng.sample(range(units), max(1, math.ceil(units * AUDIT_SHARE))))
 
 
 def _spent(row: dict | None) -> float:
@@ -901,7 +892,7 @@ def _checks(
                     _tree(repo, tip),
                     Path(scratch) / "tip",
                     plan,
-                    {**os.environ, "KENNET_TESTS": ""},
+                    {**allowed(dict(os.environ)), "KENNET_TESTS": ""},
                     1,
                     logs,
                     "000-tip",
@@ -977,7 +968,6 @@ def _checks(
     halt: list[Stuck] = []
     gate = Gate()
     tip_side = out.get("tip")
-    audit = audited(plan.seed, len(targets) + len(edits)) if at_once > 1 else set()
     spent = [0.0]
     budget = plan.hours * 3600
     lock = threading.Lock()
@@ -992,16 +982,15 @@ def _checks(
         with lock:
             return spent[0] >= budget
 
-    def measured(key: object, label: str, attempt: Callable[[str], dict], audit: bool) -> tuple[dict, float]:
-        """A unit run beside the others, and run again alone when what it shows may be the others' doing, or when it
-        is drawn for audit; the shared attempt is kept beside the rerun as `shared`."""
+    def measured(key: object, label: str, attempt: Callable[[str], dict]) -> tuple[dict, float]:
+        """A unit run beside the others, and run again alone when what it shows may be the others' doing (`_suspect`);
+        both attempts are kept: the alone one as the row, the shared one beside it as `shared`."""
         began = time.monotonic()
         with gate.shared(key):
             row = attempt(label)
         took = time.monotonic() - began
-        if at_once > 1 and (audit or _suspect(row, tip_side)):
-            why = "drawn for audit" if audit and not _suspect(row, tip_side) else "to rule out the others' doing"
-            board.say(f"    {name}: {label} ran again alone, {why}")
+        if at_once > 1 and _suspect(row, tip_side):
+            board.say(f"    {name}: {label} ran again alone, to rule out the others' doing")
             first = _stamped(row, gate.concurrency(key))
             shared = {
                 **{k: first[k] for k in ("pre", "post") if first.get(k) is not None},
@@ -1032,7 +1021,7 @@ def _checks(
             def attempt(at: str) -> dict:
                 return _commit(repo, plan, runs, logs, at, parent, shas[i], lambda _s: None, found, jobs)
 
-            got, _took = measured(("commit", i), label, attempt, n - 1 in audit)
+            got, _took = measured(("commit", i), label, attempt)
             row = {"commit": i, "id": shas[i], **got}
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
@@ -1068,7 +1057,7 @@ def _checks(
             def attempt(at: str) -> dict:
                 return _edited(repo, tip_tree, plan, runs, logs, at, where[b["file"]], b["op"], b["nth"], found, jobs)
 
-            got, took = measured(("edit", n), label, attempt, n - 1 in audit)
+            got, took = measured(("edit", n), label, attempt)
             row = {**b, **got, "concurrency": _concurrency(got), "wall_s": round(took, 3)}
         except Exception as e:  # noqa: BLE001
             board.end(label, False, f"{name}: {label} could not run ({type(e).__name__})", eta.end(n, 0.0, False))

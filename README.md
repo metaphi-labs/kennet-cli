@@ -392,9 +392,8 @@ never runs a finished commit twice. In Docker or Podman, past commits and edits 
 copy: half the cores' worth, no more than the engine's memory holds at the latest commit's peak (each container is
 limited to its share), and at most `KENNET_CODEVAL_AT_ONCE` when set; the copies share one dependency cache, so
 nothing is downloaded twice. A commit or edit whose build fails, whose tests after the change fail, that is killed or
-stopped for time, or that reports fewer tests than the latest commit did alone, runs again alone before it counts,
-and so does a tenth of the rest (at least one, drawn from the pick's seed) to measure how often running together
-changes a result; the run beside the others is kept as `shared`. Each run records `concurrency` and `wall_s`. The
+stopped for time, or that reports fewer tests after the change than before it, runs again alone before it counts;
+the run beside the others is kept too, as `shared`. Each run records `concurrency` and `wall_s`. The
 12 hours are the builds' and tests' own time, summed. A repository with services,
 or a command given after `--` (it runs on this machine, with your own tool caches and home folder), runs one commit
 at a time. When it is stuck it exits 1 with one sentence and a `next_step`, such as

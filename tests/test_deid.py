@@ -94,7 +94,9 @@ def test_fixture_recall_and_precision_without_the_model(seller):
     recall, (true, made) = scored(deid.Scrubber(k))
     missed = {kind: f"{c}/{n}" for kind, (c, n) in recall.items() if c < n}
     assert set(missed) <= {"name"}, missed
-    assert true / made >= 0.97, (true, made)
+    # The fixtures do not label the company's name inside Java packages (`com.acmecorp.falcon`), which is replaced
+    # by design (`deid.company_stem`): those eight count against precision here.
+    assert true / made >= 0.88, (true, made)
 
 
 def test_known_identifiers_become_the_profiles_author_ids(seller):
@@ -537,3 +539,38 @@ def test_phones_and_addresses_by_shape(line, said):
 def test_an_authors_initial_and_surname_and_lowercase_given_name_are_their_id():
     scrub = _one({**PRIYA, "people": [["Rohan Kapoor", "priya.natarajan@acme-corp.com"]]})
     assert scrub.text("signed R. Kapoor, ping rohan") == "signed [author:3], ping [author:3]"
+
+
+def test_the_repository_and_company_names_are_replaced_inside_words_and_scopes():
+    seller = {
+        **SELLER,
+        "name": "ledgerline",
+        "remotes": ["git@github.com:acme-fin/ledgerline.git"],
+        "authors": {"jane.doe@acmefin.com": 1},
+        "domains": {"acmefin.com": 1},
+        "people": [["Jane Doe", "jane.doe@acmefin.com"]],
+        "declared": [],
+    }
+    said = _one(seller).text(
+        "--- FAIL: TestLedgerline (0.00s) ledgerline_test.go:12\nCloning into 'Ledgerline'...\n"
+        "npm ERR! 404 '@acmefin/sdk@1.0.0'\npackage com.AcmeFin.payments;\ndocker.io/acmefin/worker:latest"
+    )
+    assert "edgerline" not in said.lower() and "acmefin" not in said.lower()
+    assert "Test[repo:0]" in said and "@[domain:1]/sdk" in said
+    declared = _one({**seller, "declared": ["ledgerline"]}).text(
+        "--- FAIL: TestLedgerline https://ledgerline.acme.io/x"
+    )
+    assert "TestLedgerline" in declared and "ledgerline.acme.io" not in declared, "declared: kept in code, not hosts"
+    assert deid.company_stem("eng.acmefin.co.uk") == "acmefin" and deid.company_stem("mail.example.com") is None
+
+
+def test_aws_accounts_windows_users_and_serials_by_shape():
+    scrub = _one(SELLER)
+    said = scrub.text(
+        "arn:aws:iam::123456789012:role/deploy AWS_ACCOUNT_ID=210987654321\n"
+        "C:\\Users\\jdoe\\AppData\\x and C:/Users/Public/x\n"
+        "Serial Number (system): C02XK1ZZJGH5\nserial C02XK1ZZJGH5"
+    )
+    for gone in ("123456789012", "210987654321", "jdoe", "C02XK1ZZJGH5"):
+        assert gone not in said
+    assert "C:/Users/Public/x" in said and "role/deploy" in said
