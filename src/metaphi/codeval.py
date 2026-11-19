@@ -1175,8 +1175,8 @@ class Local:
 
     def __init__(self, name: str, given: str, path: Path, roots: list[str]):
         self.name, self.given, self.path, self.roots = name, given, path, roots
-        self.home = codeval_runs.home(roots)
-        self.key = codeval_runs.repo_key(self.home)
+        self.home = codeval_runs.home(roots, given if is_url(given) else str(path))
+        self.key = codeval_runs.repo_key(codeval_runs.repo_home(roots))
         self.kept: dict[str, Any] = {}
 
     @property
@@ -1294,24 +1294,28 @@ def send_filed(local: Local, sleep: Callable[[float], None] = time.sleep) -> dic
 
 RESTART_WHY = {
     "profile_gone": "the commit it was filed at is no longer in this clone",
-    "profile_mismatch": "the commit it was filed at is not in this clone",
-    "key_mismatch": "it was started on another machine",
+    "asked": "--restart",
+    "pending": "the restart sent before was cut off",
 }
 
 
 def restart(local: Local, why: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     """Measure the repository afresh: a profile of the current tip sent with `restart`, which the server files in
-    place of the open run's measure. What this machine finished for the old one is set aside (`replaced`)."""
+    place of the open run's measure. The new profile is kept and the run marked pending before it is sent, so a run
+    killed before the answer restarts again rather than binding the old profile to the new measure; what this clone
+    finished for the old one is set aside (`replaced`)."""
     if say:
         say(
             f"{local.name}: measuring the latest commit afresh ({RESTART_WHY.get(why, why)}); this replaces the "
             "earlier measurements of this repository"
         )
     local.kept = {}
-    got, _path = send_profile(local, {**profile(local), "restart": True}, sleep)
+    doc = {**profile(local), "restart": True}
     codeval_runs.replaced(local.home)
     file(local)
-    codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip)
+    codeval_runs.keep_run(local.home, tip=local.tip, restart="pending", measure=None)
+    got, _path = send_profile(local, doc, sleep)
+    codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip, restart=None, measure=got.get("measure"))
     return got
 
 
@@ -1495,12 +1499,14 @@ def side(raw: dict[str, Any], key: bytes, part: str = "Side") -> dict[str, Any]:
 
 
 def tip(raw: dict[str, Any] | None, key: bytes, source: set[int] | None = None) -> dict[str, Any]:
-    """The tip as sent, never nothing when it was asked for. When it did not get as far as a passing build and a test
-    run, `error` alone says why: the class its build ended in, or `unknown` when it could not be run here. Coverage is
+    """The tip as sent, never nothing when it was asked for. When it did not get as far as a passing build and test
+    runs that ended in the code, `error` alone says why: the class its build ended in, the environment class a test
+    run ended in, or `unknown` when it could not be run here. Coverage is
     sent for the tip's source files (`source`) only."""
     out = side(raw, key, "Tip") if raw else {"tests": []}
     build = out.get("build")
-    why = build["class"] if build and build["class"] != "ok" else None if out["tests"] else "unknown"
+    ended = next((t["class"] for t in out["tests"] if t["class"].startswith("env_")), None)
+    why = build["class"] if build and build["class"] != "ok" else ended if out["tests"] else "unknown"
     if why:
         return {"tests": [], "error": why}
     if out.get("coverage") is not None:
@@ -1539,10 +1545,8 @@ ENVIRONMENT = {
 def environment(local: Local, results: dict[str, Any]) -> errors.MetaphiError | None:
     """Why to stop once a batch whose tip ended in this machine's environment has been sent: the server would ask for
     the tip again, and this machine would end the same way. None when the tip did not. A rerun measures it again."""
-    sent = results.get("tip") or {}
-    classes = [sent.get("error"), *(r.get("class") for r in (sent.get("build"), *sent.get("tests", [])) if r)]
-    cls = next((c for c in classes if isinstance(c, str) and c.startswith("env_")), None)
-    if cls is None:
+    cls = (results.get("tip") or {}).get("error")
+    if not (isinstance(cls, str) and cls.startswith("env_")):
         return None
     what, fix = ENVIRONMENT.get(cls, ("something on this machine failed", "fix this machine"))
     stop = errors.MetaphiError(

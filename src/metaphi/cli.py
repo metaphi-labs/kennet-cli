@@ -24,8 +24,8 @@ import httpx
 from metaphi import __version__, accounts, agents, config, errors, palette, skill, update
 
 FAILED, AUTH, LATER, UPGRADE, NEEDS_PERSON = 1, 3, 4, 5, 6
-# kennet codeval: install a tool, give a command, or fix the machine the tip ended on
-PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing", "environment"])
+# kennet codeval: install a tool, give a command, fix the machine the tip ended on, or choose where the run goes on
+PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing", "environment", "in_use"])
 
 
 def status(error: errors.MetaphiError) -> int:
@@ -498,6 +498,22 @@ def codebase_hours(h: float) -> str:
     return about(h * 3600).removeprefix("about ")
 
 
+IN_USE = frozenset(["key_mismatch", "profile_mismatch", "superseded"])
+
+
+def _in_use(a: argparse.Namespace, org: str) -> errors.MetaphiError:
+    """Another machine or clone holds this repository's run (another key, another tip, or a newer measure): stop,
+    never restart on its own; the person chooses where it goes on."""
+    restart = shlex.join(["kennet", "codeval", *(a.paths or ["."]), "--restart"])
+    restart += f" -- {shlex.quote(a.run_command)}" if a.run_command else ""
+    return errors.MetaphiError(
+        f"Another machine or clone is measuring this repository for {org}. Continue there, or run `{restart}` to "
+        "replace that measurement.",
+        code="in_use",
+        next_step=restart,
+    )
+
+
 def _codeval_state(run: str, got: dict[str, Any]) -> dict[str, Any]:
     """A run's state from GET, in the terms a filing answers in."""
     if got.get("state") == "declined":
@@ -525,7 +541,9 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
         for local in codeval.opened(paths, Path(scratch), say):
             kept = codeval_runs.run_state(local.home)
             got = None
-            if kept.get("run"):
+            if a.restart or kept.get("restart") == "pending":
+                got = codeval.restart(local, "asked" if a.restart else "pending")
+            elif kept.get("run"):
                 try:
                     goes_on = codeval.resumed(local)
                 except errors.MetaphiError as e:
@@ -542,11 +560,11 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                 say(f"Reading {local.name}\u2026")
                 try:
                     got = codeval.send_filed(local)
-                    codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip)
                 except errors.MetaphiError as e:
-                    if e.code not in codeval.RESTART_WHY:
-                        raise
-                    got = codeval.restart(local, e.code)
+                    if e.code in IN_USE:
+                        raise _in_use(a, org) from None
+                    raise
+                codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip, measure=got.get("measure"))
             run = got["run"]
             row = {"name": local.name, "run": run, "sent": str(local.home / "sent")}
             bench = None
@@ -561,19 +579,12 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                     try:
                         got, _path = codeval.send_results(local, run, results)
                     except errors.MetaphiError as e:
-                        if e.code != "key_mismatch":
-                            raise
-                        got = codeval.restart(local, e.code)
-                        run = row["run"] = got["run"]
-                        continue
+                        if e.code in IN_USE:
+                            raise _in_use(a, org) from None
+                        raise
                     got.setdefault("run", run)
                     if stop := codeval.environment(local, results):
-                        if not got.get("done"):
-                            raise stop
-                        say(
-                            f"{local.name}: the latest commit kept ending in this machine's environment "
-                            f"({stop.context['class']}), so Metaphi AI ended the run"
-                        )
+                        raise stop
             except codebase_checks.Stuck as e:
                 e.next_step = e.next_step or _codeval_line(a)
                 raise
@@ -1883,6 +1894,11 @@ def parser() -> argparse.ArgumentParser:
     )
     s.add_argument("paths", nargs="*", metavar="<path-or-url>", help="git clones or URLs (default: this directory)")
     s.add_argument("--no-browser", action="store_true", help="at sign-in, print the address and code; open nothing")
+    s.add_argument(
+        "--restart",
+        action="store_true",
+        help="measure the latest commit afresh, replacing the measurement another machine or clone holds",
+    )
     _json_flag(s)
     s.set_defaults(fn=cmd_codeval)
 

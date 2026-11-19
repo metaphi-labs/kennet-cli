@@ -1,9 +1,10 @@
 """A CodeVal run's state on this machine, so a run that stops goes on where it stopped. Nothing here is sent.
 
 Each repository has one folder, `<state>/codeval/<fingerprint>`, named as the server names its run: the sha256 of
-its root commits. It holds:
+its root commits. It holds `key`, the repository's HMAC key (random, mode 0600): what keys test ids, commands, subjects
+and blobs; one per repository on this machine. Each clone of it has its own run record, `clones/<clone>/` (the clone's
+absolute path, or its URL, hashed), so two clones never share a run:
 
-    key            the repository's HMAC key (random, mode 0600): what keys test ids, commands, subjects and blobs
     run.json       the server's run id and the tip it was measured at
     profile.json   what the filed profile bound the run to: its tip, commit order and ids (never re-read from git)
     checks.jsonl   each finished unit (the tip, a commit, a mutant), written and synced before the next starts
@@ -48,8 +49,15 @@ def fingerprint(roots: list[str]) -> str:
     return hashlib.sha256("\n".join(sorted(roots)).encode()).hexdigest()
 
 
-def home(roots: list[str]) -> Path:
+def repo_home(roots: list[str]) -> Path:
+    """The repository's folder, one per root fingerprint: it holds the key: one key per repository per machine."""
     return state_home() / "codeval" / fingerprint(roots)[:32]
+
+
+def home(roots: list[str], where: str) -> Path:
+    """One clone's run record: the repository's folder and the clone (its absolute path, or the URL it was cloned
+    from), so two clones of one repository never share a run."""
+    return repo_home(roots) / "clones" / hashlib.sha256(where.encode()).hexdigest()[:16]
 
 
 def _kept(path: Path, body: bytes) -> None:
