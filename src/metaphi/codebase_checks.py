@@ -1,43 +1,43 @@
 from __future__ import annotations
 
 import concurrent.futures
-import hashlib
+import contextlib
+import dataclasses
 import os
 import re
-import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
 from metaphi import codebase_reading as reading
-from metaphi import live
+from metaphi import codebase_setup, errors, live
 from metaphi.codebase_setup import Recipe, Shell, allowed
 from metaphi.steps import NONE, Steps
 
 RUN_MINUTES = 30.0
 HOURS = 12.0
-SALT = secrets.token_bytes(32)
 RANK = {"skipped": 0, "passed": 1, "failed": 2, "error": 3}
 
 
 @dataclass(frozen=True)
 class Plan:
     test: str | None = None
-    build: str | None = None
     run_minutes: float = RUN_MINUTES
     hours: float = HOURS
     logs: Path | None = None
     cache: Path | None = None
     steps: Steps = NONE
-    deep: bool = False
     ledger: Any = None
+    alone: bool = False  # one unit at a time: services are shared, or the seller's command shares this machine's caches
+    memory: int | None = None  # bytes each container may hold
 
 
 class Tree(dict):
@@ -176,10 +176,15 @@ def _junit(d: Path) -> dict[str, str] | None:
 
 
 def outcomes(cases: dict[str, str] | None) -> dict[str, str]:
-    return {hashlib.sha256(SALT + k.encode()).hexdigest()[:16]: v for k, v in (cases or {}).items()}
+    """Each test case's outcome, by its name as the report gives it: kept on this machine. What is sent names a case
+    only by an HMAC under the repository's own key (`codeval_measure`)."""
+    return dict(cases or {})
 
 
-def _run(command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[bytes]) -> tuple[int | None, float]:
+def _run(
+    command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[bytes], peaks: list[int] | None = None
+) -> tuple[int | None, float]:
+    """Run `command` in its own process group; with `peaks`, append the most its whole tree held at once."""
     started = time.monotonic()
     p = subprocess.Popen(
         command,
@@ -191,10 +196,13 @@ def _run(command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[b
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    sampler = TreePeak(p.pid) if peaks is not None and os.name == "posix" else None
     try:
         code: int | None = p.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
         code = None
+    if sampler is not None and peaks is not None:
+        peaks.append(sampler.close())
     if os.name == "posix":
         try:
             os.killpg(p.pid, 9)
@@ -290,8 +298,9 @@ def _tail(path: Path, lines: int = 15) -> list[str]:
     return [f"    | {line}" for line in said[-lines:]]
 
 
-def _ran(code: int | None, took: float) -> dict[str, Any]:
-    return {"exit": code, "seconds": round(took)}
+def _ran(code: int | None, took: float, log: Path | None = None) -> dict[str, Any]:
+    """One build or test run. `log` is where its output is, on this machine: only its sha256 is sent."""
+    return {**({"log": str(log)} if log is not None else {}), "exit": code, "seconds": round(took)}
 
 
 def _tested(code: int | None, took: float, cases: dict[str, str] | None, log: Path) -> dict[str, Any]:
@@ -302,11 +311,12 @@ def _tested(code: int | None, took: float, cases: dict[str, str] | None, log: Pa
         counts = reading.counted(log)
         report = "summary" if counts else None
     return {
-        **_ran(code, took),
+        **_ran(code, took, log),
+        "error": reading.error_class(code, log) if code != 0 or not counts or counts[0] != counts[1] else None,
         "report": report,
         "reported": counts[0] if counts else None,
         "passed": counts[1] if counts else None,
-        "outcomes": outcomes(cases),
+        "cases": outcomes(cases),
     }
 
 
@@ -324,6 +334,7 @@ def _side(
     jobs: int = 1,
     edit: Callable[[Path], None] | None = None,
     measure: dict[int, str] | None = None,
+    peaks: list[int] | None = None,
 ) -> dict[str, Any]:
     _write(repo, tree, into / "src")
     if edit:
@@ -331,9 +342,11 @@ def _side(
     junit = into / "junit"
     junit.mkdir()
     recipe, engine = found or (None, None)
-    shell = Shell(engine, recipe.image if recipe else None, into / "src", junit, jobs=jobs, cache=plan.cache)
+    shell = Shell(
+        engine, recipe.image if recipe else None, into / "src", junit, jobs=jobs, cache=plan.cache, memory=plan.memory
+    )
     try:
-        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe, measure)
+        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe, measure, peaks)
     finally:
         shell.close()
 
@@ -348,10 +361,12 @@ def _ran_side(
     say: Callable[[str], None],
     recipe: Recipe | None,
     measure: dict[int, str] | None = None,
+    peaks: list[int] | None = None,
 ) -> dict[str, Any]:
     junit = shell.junit
+    peaks = peaks if peaks is not None and not shell.name else None  # in a container, its cgroup counts instead
     if not recipe:
-        build = plan.build
+        build = None
     elif recipe.image:
         build = (
             f"({recipe.setup or 'true'}) || echo 'setup failed at this commit; building on the set-up image' >&2; "
@@ -379,8 +394,9 @@ def _ran_side(
                 shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
+                peaks,
             )
-        side["build"] = _ran(code, took)
+        side["build"] = {**_ran(code, took, path), "error": reading.error_class(code, path)}
         shown("build", code, path)
         if code is None:
             shell.stop()
@@ -403,6 +419,7 @@ def _ran_side(
                 shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
+                peaks,
             )
         try:
             shutil.copytree(
@@ -466,7 +483,7 @@ def _edited(
             tree,
             Path(scratch),
             plan,
-            {**os.environ, "KENNET_TESTS": ""},
+            {**allowed(dict(os.environ)), "KENNET_TESTS": ""},
             runs,
             logs,
             label,
@@ -506,20 +523,25 @@ def _commit(
         {p: v for p, v in before.items() if p not in tests} | {p: after[p] for p in tests if p in after},
         links=after.links,
     )
-    env = {**os.environ, "KENNET_TESTS": in_code, "KENNET_JOBS": str(jobs)}
+    env = {**allowed(dict(os.environ)), "KENNET_TESTS": in_code, "KENNET_JOBS": str(jobs)}
     recipe, engine = found or (None, None)
     with tempfile.TemporaryDirectory(prefix="kennet-test-", ignore_cleanup_errors=True) as scratch:
         src, junit = Path(scratch) / "src", Path(scratch) / "junit"
         _write(repo, pre_tree, src)
         junit.mkdir()
-        shell = Shell(engine, recipe.image if recipe else None, src, junit, jobs=jobs, cache=plan.cache)
+        shell = Shell(
+            engine, recipe.image if recipe else None, src, junit, jobs=jobs, cache=plan.cache, memory=plan.memory
+        )
         try:
             pre = _ran_side(shell, plan, env, 1, logs, f"{label}.pre", say, recipe)
             if recipe is None:
+                # The after side runs at the very path the before side ran at, so a command cannot tell them apart
+                # by $PWD: the before side's copy is moved away first.
                 shell.close()
-                src, junit = Path(scratch) / "post" / "src", Path(scratch) / "post" / "junit"
+                src.rename(Path(scratch) / "pre-src")
+                junit.rename(Path(scratch) / "pre-junit")
                 _write(repo, after, src)
-                junit.mkdir(parents=True)
+                junit.mkdir()
                 shell = Shell(None, None, src, junit, jobs=jobs)
             else:
                 for gone in set(pre_tree) - set(after):
@@ -531,13 +553,146 @@ def _commit(
     return {"pre": pre, "post": post}
 
 
-def workers(n: int) -> tuple[int, int]:
+AT_ONCE_ENV = "KENNET_CODEVAL_AT_ONCE"  # the most units at once, under what the machine holds
+MEMORY_SHARE = 0.8  # of the memory free when units start, what they may take together
+
+
+def free_memory() -> int | None:
+    """Bytes the machine can give without swapping: Linux's MemAvailable; macOS's free, inactive and purgeable
+    pages."""
+    try:
+        if os.path.exists("/proc/meminfo"):
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        if sys.platform == "darwin":
+            said = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10, check=False).stdout
+            page = int(re.search(r"page size of (\d+) bytes", said).group(1))  # type: ignore[union-attr]
+            pages = dict(re.findall(r"^Pages (free|inactive|speculative|purgeable):\s+(\d+)", said, re.MULTILINE))
+            return page * sum(int(v) for v in pages.values()) or None
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _tree_rss(pgid: int) -> int:
+    """Bytes resident in every process of a process group: a build's whole tree, compilers and test JVMs together."""
+    try:
+        said = subprocess.run(
+            ["ps", "-A", "-o", "pgid=,rss="], capture_output=True, text=True, timeout=10, check=False
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    total = 0
+    for line in said.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == str(pgid) and parts[1].isdigit():
+            total += int(parts[1]) * 1024
+    return total
+
+
+class TreePeak:
+    """The most a process group held at once, sampled every `every` seconds while it runs."""
+
+    def __init__(self, pgid: int, every: float = 1.0) -> None:
+        self.pgid, self.every, self.peak = pgid, every, 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def _loop(self) -> None:
+        while not self.stop.is_set():
+            self.peak = max(self.peak, _tree_rss(self.pgid))
+            self.stop.wait(self.every)
+
+    def close(self) -> int:
+        self.stop.set()
+        self.thread.join(5)
+        return self.peak
+
+
+def workers(n: int, peak: int | None = None, budget: int | None = None) -> tuple[int, int]:
+    """(units at once, jobs each): half the cores' worth of units, no more than the memory budget holds at the tip's
+    peak each (the container engine's budget, or 80% of the host's free memory), nor than KENNET_CODEVAL_AT_ONCE; the
+    cores shared out among them."""
     cores = os.cpu_count() or 2
-    at_once = max(1, min(n, cores // 4))
+    at_once = max(1, min(n, cores // 2))
+    budget = budget or ((free * MEMORY_SHARE) if (free := free_memory()) else None)
+    if peak and budget:
+        at_once = min(at_once, max(1, int(budget // peak)))
+    try:
+        at_once = min(at_once, max(1, int(os.environ.get(AT_ONCE_ENV) or at_once)))
+    except ValueError:
+        pass
     return at_once, max(1, cores // at_once)
 
 
-Repair = Callable[[int, str, str], "tuple[Recipe, str | None] | None"]
+class Gate:
+    """Units run together through it; a unit rerun alone waits for the others to end and holds new ones back."""
+
+    def __init__(self) -> None:
+        self.cv = threading.Condition()
+        self.active: set[object] = set()
+        self.alone, self.waiting = False, 0
+
+    @contextlib.contextmanager
+    def shared(self, key: object) -> Iterator[None]:
+        with self.cv:
+            self.cv.wait_for(lambda: not self.alone and not self.waiting)
+            self.active.add(key)
+        try:
+            yield
+        finally:
+            with self.cv:
+                self.active.discard(key)
+                self.cv.notify_all()
+
+    @contextlib.contextmanager
+    def solo(self, key: object) -> Iterator[None]:
+        with self.cv:
+            self.waiting += 1
+            self.cv.wait_for(lambda: not self.active and not self.alone)
+            self.waiting -= 1
+            self.alone = True
+        try:
+            yield
+        finally:
+            with self.cv:
+                self.alone = False
+                self.cv.notify_all()
+
+
+def _runs(side: dict | None) -> list[dict]:
+    if not side:
+        return []
+    return [r for r in (side.get("build"), *side.get("tests", []), side.get("offline")) if r]
+
+
+def _suspect(row: dict, tip: dict | None) -> bool:
+    """Whether a unit run beside others must run again alone before it counts: a build failed, its post side failed,
+    a run was killed (exit 137, out of memory) or stopped for time, or its post side reported fewer tests than its
+    own base did: a past commit's pre side (its parent, with the commit's tests), an edit's unedited tip. A before
+    side's tests failing is expected (the commit's new tests, over its parent) and is no sign."""
+    runs = [r for k in ("pre", "post") for r in _runs(row.get(k))]
+    if any(r.get("exit") is None or r.get("exit") == KILLED for r in runs):
+        return True
+    if any((row.get(k) or {}).get("build", {}).get("exit", 0) != 0 for k in ("pre", "post")):
+        return True
+    if any(r.get("exit") != 0 for r in _runs(row.get("post"))):
+        return True
+    base = row.get("pre") if row.get("pre") is not None else tip
+    most = max((t.get("reported") or 0 for t in (base or {}).get("tests", [])), default=0)
+    return any((t.get("reported") or 0) < most for t in (row.get("post") or {}).get("tests", []))
+
+
+KILLED = 137
+
+
+def _spent(row: dict | None) -> float:
+    """A unit's runs' own seconds, as the service sums them against the hours."""
+    if not row:
+        return 0.0
+    return float(sum(r.get("seconds") or 0 for k in ("pre", "post") for r in _runs(row.get(k))))
 
 
 def about(seconds: float) -> str:
@@ -624,8 +779,22 @@ def _summary(name: str, what: str, rows: list[dict | None], total: int, board: l
     return f"\u2713 {name}: {len(ran)} of {total} {what} run, {built} built ({took})"
 
 
-def _neither_built(row: dict) -> bool:
-    return not row.get("broke") and all((row[s].get("build") or {}).get("exit", 0) != 0 for s in ("pre", "post"))
+class Stuck(errors.MetaphiError):
+    """A person must act before the run can go on: a tool is missing here. What finished is kept."""
+
+
+def _stuck(where: str, side: dict[str, Any], logs: _Logs, label: str) -> Stuck | None:
+    """Stuck when a build or test failed because a tool is not installed on this machine."""
+    for step, got in (("build", side.get("build")), *(("test-1", t) for t in side.get("tests", [])[:1])):
+        if got and got.get("error") == "toolchain_missing":
+            log = logs.root / f"{label}.{step}.log"
+            tool = reading.missing(log) or "a tool the build needs"
+            return Stuck(
+                f"{where}: {tool} is missing on this machine",
+                code="toolchain_missing",
+                next_step=f"install {tool}, then run the same command again; finished commits are kept",
+            )
+    return None
 
 
 def run(
@@ -639,32 +808,15 @@ def run(
     plan: Plan,
     say: Callable[[str], None],
     found: tuple[Recipe, str | None] | None = None,
-    eras: list[int | None] | None = None,
-    repair: Repair | None = None,
-    edits: list[dict] | None = None,
     paths: dict[int, str] | None = None,
     tipped: dict[str, Any] | None = None,
     stream: IO[str] | None = None,
+    edits: list[dict] | None = None,
 ) -> dict[str, Any]:
     board = live.Board(name, stream, say)
     try:
         return _checks(
-            repo,
-            name,
-            tip,
-            commits,
-            order,
-            targets,
-            runs,
-            plan,
-            board.say,
-            found,
-            eras,
-            repair,
-            edits,
-            paths,
-            tipped,
-            board,
+            repo, name, tip, commits, order, targets, runs, plan, board.say, found, paths, tipped, board, edits or []
         )
     finally:
         board.close()
@@ -681,37 +833,32 @@ def _checks(
     plan: Plan,
     say: Callable[[str], None],
     found: tuple[Recipe, str | None] | None,
-    eras: list[int | None] | None,
-    repair: Repair | None,
-    edits: list[dict] | None,
     paths: dict[int, str] | None,
     tipped: dict[str, Any] | None,
     board: live.Board,
+    edits: list[dict],
 ) -> dict[str, Any]:
     shas = {i: sha for sha, i in order.items()}
     by_id = {c["commit"]: c for c in commits}
-    deadline = time.monotonic() + plan.hours * 3600
     logs = _Logs((plan.logs or Path.cwd() / "kennet-test-logs") / name)
     given = plan.test is not None
     out: dict[str, Any] = {
-        "from": "tip",
-        "runs": runs,
-        "build_given": plan.build is not None,
-        "test_given": given,
         "stopped": "done",
         "commits": [],
-        "edits": [],
+        "mutants": [],
     }
-    at_once, jobs = (1, os.cpu_count() or 1) if given else workers(len(targets))
+    at_once, jobs = 1, os.cpu_count() or 1  # the tip runs alone, on every core
     if not given and found is None:
         out["commits"] = [{"commit": i, "broke": True} for i in targets]
-        out["edits"] = [{**b, "broke": True} for b in edits or []]
+        out["mutants"] = [{**b, "broke": True} for b in edits]
         return out
     tip_s: float | None = None
     ledger = plan.ledger
     kept_tip = ledger.get(name, "tip") if ledger else None
+    peak: int | None = None
+    tip_peaks: list[int] = []
     if kept_tip:
-        out["tip"], tip_s = kept_tip["tip"], kept_tip["seconds"]
+        out["tip"], tip_s, peak = kept_tip["tip"], kept_tip["seconds"], kept_tip.get("peak")
         say(f"{name}: the latest commit was run before; using that result")
     else:
         try:
@@ -725,7 +872,7 @@ def _checks(
                     _tree(repo, tip),
                     Path(scratch) / "tip",
                     plan,
-                    {**os.environ, "KENNET_TESTS": ""},
+                    {**allowed(dict(os.environ)), "KENNET_TESTS": ""},
                     1,
                     logs,
                     "000-tip",
@@ -733,13 +880,20 @@ def _checks(
                     found,
                     jobs,
                     measure=paths or {},
+                    peaks=tip_peaks,
                 )
             tip_s = time.monotonic() - began
+        except Exception as e:  # noqa: BLE001
+            say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
+        else:
+            if stuck := _stuck(f"{name}, the latest commit", measured, logs, "000-tip"):
+                raise stuck
             out["tip"] = (
                 {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
             )
+            peak = out["tip"].get("memory_peak_bytes") or max(tip_peaks, default=0) or None
             if ledger:
-                ledger.put(name, "tip", "", {"tip": out["tip"], "seconds": tip_s})
+                ledger.put(name, "tip", "", {"tip": out["tip"], "seconds": tip_s, "peak": peak})
             said = out["tip"]
             built = "build" not in said or said["build"]["exit"] == 0
             t = said["tests"][0] if said["tests"] else None
@@ -760,10 +914,7 @@ def _checks(
                 + (" builds" if built else " does not build")
                 + tested
             )
-        except Exception as e:  # noqa: BLE001
-            say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
 
-    edits = edits or []
     before = (
         sum(ledger.get(name, "commit", i) is not None for i in targets)
         + sum(ledger.get(name, "edit", [b.get("file"), b.get("op"), b.get("nth")]) is not None for b in edits)
@@ -772,7 +923,14 @@ def _checks(
     )
     if before:
         say(f"{name}: {before} of {len(targets) + len(edits)} past commits and edits were run before; running the rest")
-    eta = Eta(len(targets) + len(edits) - before, at_once, tip_s, deadline)
+    box = found[1] if found else None
+    budget = codebase_setup.memory_budget(box) if box else None
+    at_once, jobs = (
+        (1, os.cpu_count() or 1) if plan.alone else workers(len(targets) + len(edits) - before, peak, budget)
+    )
+    if box and budget:
+        plan = dataclasses.replace(plan, memory=max(budget // at_once, 1 << 30))
+    eta = Eta(len(targets) + len(edits) - before, at_once, tip_s, time.monotonic() + plan.hours * 3600 / at_once)
     if targets or edits:
         work = " and ".join(
             f"{k} {what}{'s' if k != 1 else ''}"
@@ -783,140 +941,134 @@ def _checks(
         say(
             f"{name}: building and testing {work}"
             + (f", {took}" if took else "")
-            + f"; it stops after {plan.hours:g} h"
+            + f"; it stops after {plan.hours:g} h of build and test time"
         )
+    halt: list[Stuck] = []
+    gate = Gate()
+    tip_side = out.get("tip")
+    spent = [0.0]
+    budget = plan.hours * 3600
+    lock = threading.Lock()
 
-    def label_of(n: int, i: int) -> str:
-        return f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
+    def spend(row: dict | None) -> None:
+        with lock:
+            spent[0] += _spent(row)
 
-    def one(n: int, i: int, with_: tuple[Recipe, str | None] | None = found, again: str = "") -> dict | None:
-        if not again and ledger and (kept := ledger.get(name, "commit", i)) is not None:
-            return kept
-        if time.monotonic() > deadline:
-            return None
-        label = label_of(n, i) + again
+    def over() -> bool:
+        """The hours are the past commits' and edits' own run seconds, summed as the service sums them (the shared
+        attempt of a unit rerun alone not counted): what is claimed as stopped for its hours always spent them."""
+        with lock:
+            return spent[0] >= budget
+
+    def measured(key: object, label: str, attempt: Callable[[str], dict]) -> tuple[dict, float]:
+        """A unit run beside the others, and run again alone when what it shows may be the others' doing (`_suspect`);
+        both attempts are kept: the alone one as the row, the shared one beside it as `shared`."""
         began = time.monotonic()
-        if not again:
-            eta.begin(n)
-            board.begin(label)
+        with gate.shared(key):
+            row = attempt(label)
+        took = time.monotonic() - began
+        if at_once > 1 and _suspect(row, tip_side):
+            board.say(f"    {name}: {label} ran again alone, to rule out the others' doing")
+            shared = {k: row[k] for k in ("pre", "post") if row.get(k) is not None}
+            began = time.monotonic()
+            with gate.solo(key):
+                row = attempt(f"{label}.alone")
+            took = time.monotonic() - began
+            return {**row, "shared": shared}, took
+        return row, took
+
+    def one(n: int, i: int) -> dict | None:
+        if ledger and (kept := ledger.get(name, "commit", i)) is not None:
+            spend(kept)
+            return kept
+        if over() or halt:
+            return None
+        label = f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
+        began = time.monotonic()
+        eta.begin(n)
+        board.begin(label)
         try:
             c = by_id[i]
-            row = {
-                "commit": i,
-                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], lambda _s: None, with_, jobs),
-            }
-            b = (row["post"].get("build") or {}).get("exit", 0)
-            line = f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})"
-            if again:
-                say(line)
-            else:
-                board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
-                if ledger:
-                    ledger.put(name, "commit", i, row)
-            return row
+            parent = shas[c["parents"][0]]
+
+            def attempt(at: str) -> dict:
+                return _commit(repo, plan, runs, logs, at, parent, shas[i], lambda _s: None, found, jobs)
+
+            got, _took = measured(("commit", i), label, attempt)
+            row = {"commit": i, **got}
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
-            if not again:
-                board.end(
-                    label,
-                    False,
-                    f"{name}: {label} could not run ({n}/{len(targets)})",
-                    eta.end(n, time.monotonic() - began, False),
-                )
+            board.end(label, False, f"{name}: {label} could not run ({n}/{len(targets)})", eta.end(n, 0.0, False))
             return {"commit": i, "broke": True}
+        if stuck := _stuck(f"{name}, commit {n} of {len(targets)}", row["post"], logs, f"{label}.post"):
+            halt.append(stuck)
+            board.end(label, False, f"{name}: {label} stopped: {stuck}", "")
+            return None
+        b = (row["post"].get("build") or {}).get("exit", 0)
+        line = f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})"
+        board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
+        if ledger:
+            ledger.put(name, "commit", i, row)
+        spend(row)
+        return row
 
+    tip_tree, where = _tree(repo, tip), paths or {}
+
+    def edited(n: int, b: dict) -> dict | None:
+        key = [b.get("file"), b.get("op"), b.get("nth")]
+        if ledger and (kept := ledger.get(name, "edit", key)) is not None:
+            spend(kept)
+            return kept
+        if over() or halt:
+            return None
+        label = f"{n:03d}-tip"
+        began = time.monotonic()
+        eta.begin(n)
+        board.begin(label)
+        try:
+
+            def attempt(at: str) -> dict:
+                return _edited(repo, tip_tree, plan, runs, logs, at, where[b["file"]], b["op"], b["nth"], found, jobs)
+
+            got, _took = measured(("edit", n), label, attempt)
+            row = {**b, **got}
+        except Exception as e:  # noqa: BLE001
+            board.end(label, False, f"{name}: {label} could not run ({type(e).__name__})", eta.end(n, 0.0, False))
+            return {**b, "broke": True}
+        built = (row["post"].get("build") or {}).get("exit", 0)
+        line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)})"
+        board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
+        if ledger:
+            ledger.put(name, "edit", key, row)
+        spend(row)
+        return row
+
+    units = [(one, n, i) for n, i in enumerate(targets, 1)] + [
+        (edited, n, b) for n, b in enumerate(edits, len(targets) + 1)
+    ]
     rows: list[dict | None] = []
-    if targets:
-        board.stage("past commits", len(targets))
+    done: list[dict | None] = []
+    if units:
+        board.stage(
+            "past commits and edits" if targets and edits else "past commits" if targets else "edits", len(units)
+        )
         with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("commits", at_once=at_once):
-            rows = list(pool.map(one, range(1, len(targets) + 1), targets))
-        board.close(_summary(name, "past commits", rows, len(targets), board))
-    if None in rows:
-        out["stopped"] = "hours"
-        rows = rows[: rows.index(None)]
-    if repair and eras and not given:
-        by_era: dict[int, list[int]] = {}
-        for k, row in enumerate(rows):
-            if eras[k] is not None:
-                by_era.setdefault(eras[k], []).append(k)
-        for era, ks in sorted(by_era.items()):
-            ran = [k for k in ks if _neither_built(rows[k])]
-            if not ran or time.monotonic() > deadline:
-                continue
-            k = ran[0]
-            tail = "\n".join(
-                line[6:] for line in _tail(logs.root / f"{label_of(k + 1, targets[k])}.post.build.log", 60)
+            got = list(pool.map(lambda u: u[0](u[1], u[2]), units))
+        rows, done = got[: len(targets)], got[len(targets) :]
+        board.close(
+            "; ".join(
+                _summary(name, what, part, len(part), board)
+                for what, part in (("past commits", rows), ("edits", done))
+                if part
             )
-            say(f"{name}: {len(ran)} builds failed; setting up again")
-            try:
-                with plan.steps.step("setup", era=era):
-                    fixed = repair(era, shas[targets[k]], tail)
-            except Exception as e:  # noqa: BLE001
-                say(f"    setup failed ({type(e).__name__}: {e})")
-                continue
-            if not fixed:
-                continue
-            with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("commits", era=era):
-                again = list(
-                    pool.map(
-                        one,
-                        [k + 1 for k in ran],
-                        [targets[k] for k in ran],
-                        [fixed] * len(ran),
-                        [f".era{era}"] * len(ran),
-                    )
-                )
-            for k, row in zip(ran, again, strict=True):
-                if row is not None and not _neither_built(row):
-                    rows[k] = row
-                    if ledger and not row.get("broke"):
-                        ledger.put(name, "commit", targets[k], row)
-    out["commits"] = rows
-    if edits:
-        tip_tree, paths = _tree(repo, tip), paths or {}
-
-        def edited(n: int, b: dict) -> dict | None:
-            key = [b.get("file"), b.get("op"), b.get("nth")]
-            if ledger and (kept := ledger.get(name, "edit", key)) is not None:
-                return kept
-            if time.monotonic() > deadline:
-                return None
-            label = f"{n:03d}-tip"
-            began = time.monotonic()
-            eta.begin(n)
-            board.begin(label)
-            try:
-                row = {
-                    **b,
-                    **_edited(
-                        repo, tip_tree, plan, runs, logs, label, paths[b["file"]], b["op"], b["nth"], found, jobs
-                    ),
-                }
-                built = (row["post"].get("build") or {}).get("exit", 0)
-                line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)})"
-                board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
-                if ledger:
-                    ledger.put(name, "edit", key, row)
-                return row
-            except Exception as e:  # noqa: BLE001
-                say(f"    {label}: could not run ({type(e).__name__}: {e})")
-                board.end(
-                    label,
-                    False,
-                    f"{name}: {label} could not run ({n - len(targets)}/{len(edits)})",
-                    eta.end(n, time.monotonic() - began, False),
-                )
-                return {**b, "broke": True}
-
-        board.stage("edits", len(edits))
-        with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("edits", at_once=at_once):
-            done = list(pool.map(edited, range(len(targets) + 1, len(targets) + len(edits) + 1), edits))
-        board.close(_summary(name, "edits", done, len(edits), board))
-        if None in done:
-            out["stopped"] = "hours"
-            done = done[: done.index(None)]
-        out["edits"] = done
+        )
+    if halt:
+        raise halt[0]
+    if None in rows or None in done:
+        out["stopped"] = "hours"
+    out["commits"] = rows  # None: not run, the hours spent first
+    out["mutants"] = done
     return out
 
 
-__all__ = ["Eta", "Plan", "about", "between", "outcomes", "run"]
+__all__ = ["Eta", "Plan", "Stuck", "about", "between", "outcomes", "run"]

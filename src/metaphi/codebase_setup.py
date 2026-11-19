@@ -8,24 +8,13 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
-import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import httpx
-
-from metaphi import config
-from metaphi.steps import NONE, Steps
-
-MAX_TURNS = 40
-MINUTES = 45.0
-COMMAND_MINUTES = 20.0
 SHOWN = 6000
-TOKENS = 4096
 
 
 CACHE = "/kennet/cache"
@@ -114,7 +103,10 @@ CACHES = {
     "GOCACHE": f"{CACHE}/gobuild",
     "GOFLAGS": "-count=1 -buildvcs=false",
     "GRADLE_USER_HOME": f"{CACHE}/gradle",
-    "MAVEN_OPTS": f"-Dmaven.repo.local={CACHE}/m2 -Dmaven.javadoc.skip=true -Dgpg.skip=true",
+    "MAVEN_OPTS": (
+        f"-Dmaven.repo.local={CACHE}/m2 -Dmaven.javadoc.skip=true -Dgpg.skip=true "
+        "-Daether.syncContext.named.factory=file-lock -Daether.syncContext.named.nameMapper=file-gav"
+    ),
     "CARGO_HOME": f"{CACHE}/cargo",
 }
 
@@ -137,30 +129,43 @@ def allowed(env: dict[str, str]) -> dict[str, str]:
 
 
 @functools.cache
-def limits(engine: str) -> tuple[str, ...]:
+def _info(engine: str) -> tuple[int | None, int | None]:
+    """The engine's CPUs and memory in bytes, as `<engine> info` reports them (a VM's on macOS, not the host's)."""
     try:
         got = subprocess.run([engine, "info", "--format", "{{json .}}"], capture_output=True, timeout=60, check=False)
         info = json.loads(got.stdout or b"{}")
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return ()
+        return None, None
     host = info.get("host") if isinstance(info.get("host"), dict) else {}
     cpus, memory = info.get("NCPU") or host.get("cpus"), info.get("MemTotal") or host.get("memTotal")
+    return (cpus if isinstance(cpus, int) else None), (memory if isinstance(memory, int) else None)
+
+
+def memory_budget(engine: str) -> int | None:
+    """What the containers of a run may hold together: three quarters of the engine's memory."""
+    memory = _info(engine)[1]
+    return memory * 3 // 4 if memory and memory > 1 << 30 else None
+
+
+def limits(engine: str, memory: int | None = None) -> tuple[str, ...]:
+    """CPU and memory limits for one container: all but one CPU, and `memory` bytes, or the whole budget."""
+    cpus = _info(engine)[0]
     out = []
-    if isinstance(cpus, int) and cpus > 1:
+    if cpus and cpus > 1:
         out.append(f"--cpus={cpus - 1}")
-    if isinstance(memory, int) and memory > 1 << 30:
-        out.append(f"--memory={memory * 3 // 4}")
+    if held := memory or memory_budget(engine):
+        out.append(f"--memory={held}")
     return tuple(out)
 
 
-def hardened(engine: str) -> list[str]:
+def hardened(engine: str, memory: int | None = None) -> list[str]:
     return [
         "--init",
         "--cap-drop=ALL",
         *(f"--cap-add={c}" for c in CAPS),
         "--security-opt=no-new-privileges",
         f"--pids-limit={PIDS}",
-        *limits(engine),
+        *limits(engine, memory),
     ]
 
 
@@ -177,7 +182,14 @@ def engine() -> str | None:
 
 class Shell:
     def __init__(
-        self, engine: str | None, image: str | None, src: Path, junit: Path, jobs: int = 0, cache: Path | None = None
+        self,
+        engine: str | None,
+        image: str | None,
+        src: Path,
+        junit: Path,
+        jobs: int = 0,
+        cache: Path | None = None,
+        memory: int | None = None,
     ):
         self.engine, self.image, self.src, self.junit, self.name = engine, image, src, junit, None
         self.extra: dict[str, str] = {}
@@ -192,7 +204,7 @@ class Shell:
                     "-d",
                     "--name",
                     name,
-                    *hardened(engine),
+                    *hardened(engine, memory),
                     "-v",
                     f"{src}:/work",
                     "-v",
@@ -329,26 +341,7 @@ def forget(engine: str | None, images: list[str]) -> None:
             subprocess.run([engine, "rmi", "-f", tag], capture_output=True, timeout=600, check=False)
 
 
-SYSTEM = """Make the build and the test suite of this repository run.
-
-Your commands run in a Linux container started from the image you `start` (an official image such as ubuntu:24.04,
-python:3.12, maven:3-eclipse-temurin-21, node:22, golang:1.23 or rust:1), as root, with network access. Start one
-first. The repository's files are in /work.
-
-When it works, call `propose` with three shell commands, each run with `sh -c` in /work:
-- setup: installs the toolchains and system packages the build needs; it runs once and is kept in an image.
-- build: fetches the dependencies and compiles; `true` where nothing builds. Use $KENNET_JOBS parallel jobs.
-- test: runs the whole test suite in under {minutes:g} minutes. Where the runner can, it writes JUnit XML into the
-  directory $KENNET_JUNIT; else keep the runner's summary line in the output. Where it can do neither, say why in
-  `uncounted`. $KENNET_TESTS lists, one per line, test files to include; the command still runs the whole suite.
-`propose` runs setup, build and test in a new container from that image. No command may change a file the
-repository holds; generated files and a build directory are fine.
-
-Each command you run stops after {command_minutes:g} minutes. Keep output short. Call `give_up` with the reason if the
-build needs something that cannot be had here."""
-
 FLOOR = 0.5
-GAVE_UP = ("toolchain", "service", "credentials", "license", "hardware", "other")
 Why = Literal[
     "build_failed",
     "tests_timeout",
@@ -358,98 +351,8 @@ Why = Literal[
     "tracked_file_changed",
     "no_image",
     "no_container",
-    "turns",
-    "minutes",
     "none_found",
-    "gave_up_toolchain",
-    "gave_up_service",
-    "gave_up_credentials",
-    "gave_up_license",
-    "gave_up_hardware",
-    "gave_up_other",
 ]
-
-TOOLS = [
-    {
-        "name": "start",
-        "description": "Start a fresh container from an image, the files mounted at /work; replaces the one running.",
-        "input_schema": {"type": "object", "properties": {"image": {"type": "string"}}, "required": ["image"]},
-    },
-    {
-        "name": "run",
-        "description": "Run a shell command where the files are; answers its exit code and the end of what it printed.",
-        "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-    },
-    {
-        "name": "propose",
-        "description": "Run setup, build and test from fresh files.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "setup": {"type": "string"},
-                "build": {"type": "string"},
-                "test": {"type": "string"},
-                "uncounted": {
-                    "type": "string",
-                    "description": "Only where the suite can write neither JUnit nor a "
-                    "summary line a runner prints: why. Then exit 0 alone takes it.",
-                },
-            },
-            "required": ["setup", "build", "test"],
-        },
-    },
-    {
-        "name": "give_up",
-        "description": "Stop: what this needs cannot be had here.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"why": {"type": "string", "enum": list(GAVE_UP)}, "reason": {"type": "string"}},
-            "required": ["why", "reason"],
-        },
-    },
-]
-
-
-class Model:
-    def __init__(self, reach: dict[str, Any], client: httpx.Client | None = None):
-        self.model = reach["model"]
-        self.http = client or httpx.Client(
-            base_url=reach["base_url"].rstrip("/"),
-            timeout=600,
-            headers={"x-api-key": reach["token"], "anthropic-version": "2023-06-01", "user-agent": config.USER_AGENT},
-        )
-        self.tokens = 0
-
-    def turn(self, system: str, messages: list[dict]) -> dict:
-        body = {
-            "model": self.model,
-            "max_tokens": TOKENS,
-            "tools": TOOLS,
-            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            "messages": _cached(messages),
-        }
-        for wait in (5, 20, 60, None):
-            r = self.http.post("/v1/messages", json=body)
-            if r.status_code < 500 and r.status_code != 429 or wait is None:
-                break
-            time.sleep(wait)
-        r.raise_for_status()
-        got = r.json()
-        u = got.get("usage") or {}
-        self.tokens += sum(
-            u.get(k) or 0
-            for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-        )
-        return got
-
-
-def _cached(messages: list[dict]) -> list[dict]:
-    if not messages:
-        return messages
-    last = dict(messages[-1])
-    content = last["content"] if isinstance(last["content"], list) else [{"type": "text", "text": last["content"]}]
-    last["content"] = [*content[:-1], {**content[-1], "cache_control": {"type": "ephemeral"}}]
-    return [*messages[:-1], last]
 
 
 def _shown(code: int | None, log: Path) -> str:
@@ -458,179 +361,6 @@ def _shown(code: int | None, log: Path) -> str:
     except OSError:
         said = ""
     return f"exit: {'stopped (too long)' if code is None else code}\n{said}"
-
-
-def find(
-    write: Callable[[Path], None],
-    tests: str,
-    model: Model,
-    engine: str | None,
-    logs: Path,
-    say: Callable[[str], None],
-    run_minutes: float,
-    cache: Path | None = None,
-    steps: Steps = NONE,
-    later: tuple[Recipe, str] | None = None,
-) -> tuple[Recipe | None, dict[str, Any]]:
-    from metaphi.codebase_checks import _junit, _run
-
-    started, turns, tokens = time.monotonic(), 0, model.tokens
-    snaps: list[str] = []
-    tries: list[dict[str, Any]] = []
-    logs.mkdir(parents=True, exist_ok=True)
-    talk = logs / "conversation.jsonl"
-    turns_log = logs / "turns.jsonl"
-    scratch = Path(tempfile.mkdtemp(prefix="kennet-setup-"))
-    shells: list[Shell] = []
-    found: Recipe | None = None
-    why: Why | None = None
-    report: str | None = None
-
-    def fresh(tag: str) -> tuple[Path, Path]:
-        src, junit = scratch / tag / "src", scratch / tag / "junit"
-        write(src)
-        junit.mkdir(parents=True)
-        return src, junit
-
-    def say_to(log_name: str, shell: Shell, command: str, minutes: float) -> tuple[int | None, Path]:
-        log = logs / log_name
-        with log.open("wb") as f:
-            code, _ = _run(shell.line(command, tests), shell.src, shell.env(tests), minutes * 60, f)
-        return code, log
-
-    if not engine:
-        raise RuntimeError("a container engine is required")
-    src, junit = fresh("work")
-    shell = Shell(None, None, src, junit)
-    shells.append(shell)
-    system = SYSTEM.format(minutes=run_minutes, command_minutes=COMMAND_MINUTES)
-    ask = "Set it up."
-    if later:
-        recipe, failed = later
-        ask = (
-            "At a later commit of this repository these commands built and tested it:\n"
-            + json.dumps({"setup": recipe.setup, "build": recipe.build, "test": recipe.test}, indent=1)
-            + "\nHere, at an older commit, the build failed; the end of what it printed:\n"
-            + failed[-SHOWN:]
-            + (
-                f"\nThe image {recipe.image} has the later commit's setup installed; starting from it saves "
-                "the installs."
-                if recipe.image
-                else ""
-            )
-            + "\nSet it up at this commit: keep what still holds, change what this commit's own files ask for."
-        )
-    messages: list[dict] = [{"role": "user", "content": ask}]
-    try:
-        while turns < MAX_TURNS and time.monotonic() - started < MINUTES * 60 and not found:
-            turns += 1
-            with steps.step("setup_model", turn=turns):
-                got = model.turn(system, messages)
-            messages.append({"role": "assistant", "content": got["content"]})
-            with talk.open("a") as f:
-                f.write(json.dumps(messages[-1]) + "\n")
-            with turns_log.open("a") as f:
-                f.write(json.dumps(messages[-1]) + "\n")
-            calls = [b for b in got["content"] if b.get("type") == "tool_use"]
-            if not calls:
-                messages.append({"role": "user", "content": "Go on with the tools: run, propose or give_up."})
-                continue
-            answers, stop = [], False
-            for c in calls:
-                name, args = c["name"], c.get("input") or {}
-                if name == "start":
-                    try:
-                        shell.close()
-                        shell = Shell(engine, str(args.get("image", "")), src, junit, cache=cache)
-                        shells.append(shell)
-                        said = f"started {args.get('image')}"
-                    except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
-                        said, why = f"could not start it: {e}", "no_container"
-                elif name == "run":
-                    if not shell.name:
-                        said = "start a container first"
-                    else:
-                        with steps.step("setup_commands", turn=turns):
-                            code, log = say_to(
-                                f"run-{turns:02d}.log", shell, str(args.get("command", "")), COMMAND_MINUTES
-                            )
-                        if code is None:
-                            shell.stop()
-                        said = _shown(code, log)
-                elif name == "propose" and not shell.name:
-                    said = "start a container first"
-                elif name == "propose":
-                    snap = shell.keep()
-                    if snap:
-                        snaps.append(snap)
-                    recipe = Recipe(
-                        str(args.get("setup", "")),
-                        str(args.get("build", "")),
-                        str(args.get("test", "")),
-                        snap or shell.image,
-                        str(args.get("uncounted", "")),
-                    )
-                    say("    trying commands")
-                    with steps.step("setup_proposals", turn=turns):
-                        said, kept, why, report = _tried(
-                            recipe,
-                            engine,
-                            fresh(f"try-{turns:02d}"),
-                            tests,
-                            logs,
-                            turns,
-                            run_minutes,
-                            _run,
-                            _junit,
-                            cache,
-                            tries,
-                        )
-                    if kept is not False:
-                        found = Recipe(recipe.setup, recipe.build, recipe.test, kept or None, recipe.uncounted)
-                        stop = True
-                elif name == "give_up":
-                    gave = str(args.get("why", "other"))
-                    said, stop, why = "stopped", True, f"gave_up_{gave if gave in GAVE_UP else 'other'}"
-                    with (logs / "gave-up.txt").open("w") as f:
-                        f.write(str(args.get("reason", "")))
-                else:
-                    said = f"no tool {name}"
-                answers.append({"type": "tool_result", "tool_use_id": c["id"], "content": said})
-            messages.append({"role": "user", "content": answers})
-            with talk.open("a") as f:
-                f.write(json.dumps(messages[-1]) + "\n")
-            with turns_log.open("a") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "role": "user",
-                            "content": [{**a, "content": str(a["content"]).split("\n", 1)[0]} for a in answers],
-                        }
-                    )
-                    + "\n"
-                )
-            if stop:
-                break
-    finally:
-        for s in shells:
-            s.close()
-        forget(engine, snaps)
-        shutil.rmtree(scratch, ignore_errors=True)
-    if found:
-        (logs / "recipe.json").write_text(json.dumps(found.__dict__, indent=1))
-    elif why is None or not why.startswith("gave_up"):
-        why = why or ("turns" if turns >= MAX_TURNS else "minutes")
-    return found, {
-        "by": "model",
-        "worked": found is not None,
-        "steps": turns,
-        "seconds": round(time.monotonic() - started),
-        "tokens": model.tokens - tokens,
-        "container": engine is not None,
-        "why": None if found else why,
-        "report": report if found else None,
-        "tries": tries,
-    }
 
 
 def _held(src: Path, only: dict[str, str] | None = None) -> dict[str, str]:
@@ -689,7 +419,7 @@ def _tried(
             if step == "test":
                 ran["test"] = _tested(code, took, junit_of(junit), log)
             else:
-                ran["build"] = _ran(code, took)
+                ran["build"] = _ran(code, took, log)
             said.append(f"{step}: {_shown(code, log)}")
             if step != "test" and code != 0:
                 return no("build_failed", "the build did not pass")
@@ -721,4 +451,4 @@ def _tried(
         shell.close()
 
 
-__all__ = ["Model", "Recipe", "Shell", "engine", "find", "forget"]
+__all__ = ["Recipe", "Shell", "engine", "forget"]

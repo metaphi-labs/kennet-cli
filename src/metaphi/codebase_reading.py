@@ -271,4 +271,58 @@ def counted(log: Path) -> tuple[int, int] | None:
     return None
 
 
-__all__ = ["READERS", "counted"]
+MISSING = (
+    re.compile(r"(?m)(?:^|: )([\w.+-]+): (?:command )?not found$"),
+    re.compile(r"(?m)^(?:/bin/)?(?:ba|z|da)?sh: (?:line \d+: )?([\w.+-]+): (?:command )?not found"),
+    re.compile(r"exec: \"?([\w.+-]+)\"?: executable file not found"),
+)
+JDK = re.compile(r"(?i)invalid (?:target|source) release:? (?:1\.)?(\d+)|requires (?:Java|JDK) (\d+)")
+JAVA = re.compile(r"Unable to locate a Java Runtime|JAVA_HOME is not (?:set|defined)")
+CLASSES = (
+    (
+        "dependency_fetch",
+        re.compile(
+            r"(?i)could not resolve (?:dependencies|host)|failed to fetch|ETIMEDOUT|"
+            r"ENOTFOUND|connection refused|Temporary failure in name resolution"
+        ),
+    ),
+    (
+        "compile_error",
+        re.compile(
+            r"(?i)compilation (?:error|failed)|error\[E\d+\]|error: |cannot find symbol|"
+            r"SyntaxError|undefined reference"
+        ),
+    ),
+    ("test_failure", re.compile(r"(?i)\bfail(?:ed|ures?)?\b")),
+)
+
+
+def missing(log: Path) -> str | None:
+    """The tool the log says is not installed here, as a person would name it ("java", "JDK 8"), or None."""
+    t = _text(log)
+    if m := JDK.search(t):
+        return f"JDK {m.group(1) or m.group(2)}"
+    if JAVA.search(t):
+        return "java"
+    for pattern in MISSING:
+        if m := pattern.search(t):
+            return m.group(1)
+    return None
+
+
+def error_class(code: int | None, log: Path) -> str | None:
+    """Why a step failed, as one of the schema's error classes: None when it passed. Killed by the kernel (137) is
+    out of memory; a failure no pattern names is `unknown`."""
+    if code == 0:
+        return None
+    if code is None:
+        return "timeout"
+    if code in (137, -9):
+        return "oom"
+    if code == 127 or JDK.search(_text(log)) or JAVA.search(_text(log)):
+        return "toolchain_missing"
+    t = _text(log)
+    return next((name for name, pattern in CLASSES if pattern.search(t)), "unknown")
+
+
+__all__ = ["READERS", "counted", "error_class", "missing"]

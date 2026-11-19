@@ -1,0 +1,2185 @@
+{
+ "$defs": {
+  "Agents": {
+   "additionalProperties": false,
+   "description": "Agent configuration files the repository holds at the tip, anywhere in the tree.",
+   "properties": {
+    "agents_md": {
+     "title": "Agents Md",
+     "type": "boolean"
+    },
+    "aider_conf": {
+     "title": "Aider Conf",
+     "type": "boolean"
+    },
+    "claude_md": {
+     "title": "Claude Md",
+     "type": "boolean"
+    },
+    "copilot_instructions": {
+     "title": "Copilot Instructions",
+     "type": "boolean"
+    },
+    "cursor_rules": {
+     "title": "Cursor Rules",
+     "type": "boolean"
+    },
+    "gemini_md": {
+     "title": "Gemini Md",
+     "type": "boolean"
+    },
+    "mcp_config": {
+     "title": "Mcp Config",
+     "type": "boolean"
+    },
+    "windsurf_rules": {
+     "title": "Windsurf Rules",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "agents_md",
+    "claude_md",
+    "gemini_md",
+    "copilot_instructions",
+    "cursor_rules",
+    "windsurf_rules",
+    "aider_conf",
+    "mcp_config"
+   ],
+   "title": "Agents",
+   "type": "object"
+  },
+  "Author": {
+   "additionalProperties": false,
+   "properties": {
+    "author": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Author",
+     "type": "integer"
+    },
+    "bot": {
+     "title": "Bot",
+     "type": "boolean"
+    },
+    "domain": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Domain",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "author",
+    "domain",
+    "bot"
+   ],
+   "title": "Author",
+   "type": "object"
+  },
+  "Change": {
+   "additionalProperties": false,
+   "properties": {
+    "added": {
+     "minimum": -1,
+     "title": "Added",
+     "type": "integer"
+    },
+    "deleted": {
+     "minimum": -1,
+     "title": "Deleted",
+     "type": "integer"
+    },
+    "file": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "File",
+     "type": "integer"
+    },
+    "gaps": {
+     "anyOf": [
+      {
+       "items": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+       },
+       "maxItems": 10000,
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Gaps"
+    },
+    "hunks": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Hunks",
+     "type": "integer"
+    },
+    "old_file": {
+     "anyOf": [
+      {
+       "maximum": 2147483647,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Old File"
+    },
+    "status": {
+     "enum": [
+      "A",
+      "C",
+      "D",
+      "M",
+      "R",
+      "T",
+      "U",
+      "X",
+      "B"
+     ],
+     "title": "Status",
+     "type": "string"
+    }
+   },
+   "required": [
+    "file",
+    "status",
+    "added",
+    "deleted",
+    "hunks"
+   ],
+   "title": "Change",
+   "type": "object"
+  },
+  "Commands": {
+   "additionalProperties": false,
+   "description": "The build and test commands, keyed: equal commands, equal keys; never the commands.",
+   "properties": {
+    "build": {
+     "anyOf": [
+      {
+       "pattern": "^[0-9a-f]{16}$",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Build"
+    },
+    "by": {
+     "enum": [
+      "ci",
+      "build_files",
+      "seller"
+     ],
+     "title": "By",
+     "type": "string"
+    },
+    "test": {
+     "pattern": "^[0-9a-f]{16}$",
+     "title": "Test",
+     "type": "string"
+    }
+   },
+   "required": [
+    "by",
+    "test"
+   ],
+   "title": "Commands",
+   "type": "object"
+  },
+  "Commit": {
+   "additionalProperties": false,
+   "properties": {
+    "author": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Author",
+     "type": "integer"
+    },
+    "body_lines": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Body Lines",
+     "type": "integer"
+    },
+    "commit": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Commit",
+     "type": "integer"
+    },
+    "committer": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Committer",
+     "type": "integer"
+    },
+    "day": {
+     "maximum": 200000,
+     "minimum": 0,
+     "title": "Day",
+     "type": "integer"
+    },
+    "files": {
+     "items": {
+      "$ref": "#/$defs/Change"
+     },
+     "maxItems": 1000000,
+     "title": "Files",
+     "type": "array"
+    },
+    "first_parent": {
+     "title": "First Parent",
+     "type": "boolean"
+    },
+    "fix_word": {
+     "title": "Fix Word",
+     "type": "boolean"
+    },
+    "hour": {
+     "maximum": 167,
+     "minimum": 0,
+     "title": "Hour",
+     "type": "integer"
+    },
+    "msg_chars": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Msg Chars",
+     "type": "integer"
+    },
+    "msg_lines": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Msg Lines",
+     "type": "integer"
+    },
+    "parents": {
+     "items": {
+      "maximum": 2147483647,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "maxItems": 64,
+     "title": "Parents",
+     "type": "array"
+    },
+    "path_terms": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Path Terms",
+     "type": "integer"
+    },
+    "pr_merge": {
+     "title": "Pr Merge",
+     "type": "boolean"
+    },
+    "prefixed": {
+     "title": "Prefixed",
+     "type": "boolean"
+    },
+    "revert": {
+     "title": "Revert",
+     "type": "boolean"
+    },
+    "reverts": {
+     "anyOf": [
+      {
+       "maximum": 2147483647,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Reverts"
+    },
+    "same_time": {
+     "title": "Same Time",
+     "type": "boolean"
+    },
+    "shared_idents": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Shared Idents"
+    },
+    "subject_chars": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Subject Chars",
+     "type": "integer"
+    },
+    "subject_key": {
+     "pattern": "^[0-9a-f]{16}$",
+     "title": "Subject Key",
+     "type": "string"
+    },
+    "ticket_refs": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Ticket Refs",
+     "type": "integer"
+    },
+    "trailers": {
+     "items": {
+      "$ref": "#/$defs/Trailer"
+     },
+     "maxItems": 1000,
+     "title": "Trailers",
+     "type": "array"
+    }
+   },
+   "required": [
+    "commit",
+    "parents",
+    "first_parent",
+    "author",
+    "committer",
+    "day",
+    "hour",
+    "same_time",
+    "msg_chars",
+    "msg_lines",
+    "subject_chars",
+    "body_lines",
+    "ticket_refs",
+    "path_terms",
+    "prefixed",
+    "pr_merge",
+    "fix_word",
+    "revert",
+    "subject_key",
+    "trailers",
+    "files"
+   ],
+   "title": "Commit",
+   "type": "object"
+  },
+  "CommitResult": {
+   "additionalProperties": false,
+   "description": "One instructed commit: its parent with the commit's test files laid over it (`pre`), then the commit itself\n(`post`, its tests run `runs` times). `error` alone where the run could not get that far.",
+   "properties": {
+    "commit": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Commit",
+     "type": "integer"
+    },
+    "error": {
+     "anyOf": [
+      {
+       "enum": [
+        "toolchain_missing",
+        "dependency_fetch",
+        "network",
+        "oom",
+        "timeout",
+        "disk",
+        "service",
+        "permission",
+        "not_run",
+        "compile_error",
+        "test_failure",
+        "unknown"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Error"
+    },
+    "post": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Side"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "pre": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Side"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "commit"
+   ],
+   "title": "CommitResult",
+   "type": "object"
+  },
+  "Covered": {
+   "additionalProperties": false,
+   "description": "One tip source file's coverage from the tip test run, by the runtime's own unit.",
+   "properties": {
+    "covered": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Covered",
+     "type": "integer"
+    },
+    "file": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "File",
+     "type": "integer"
+    },
+    "total": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Total",
+     "type": "integer"
+    },
+    "unit": {
+     "enum": [
+      "statement",
+      "line"
+     ],
+     "title": "Unit",
+     "type": "string"
+    }
+   },
+   "required": [
+    "file",
+    "unit",
+    "total",
+    "covered"
+   ],
+   "title": "Covered",
+   "type": "object"
+  },
+  "Dependency": {
+   "additionalProperties": false,
+   "description": "A dependency the lockfiles resolve from the ecosystem's public registry, by its public name; one resolved from\nanywhere else (a private registry, a path, a git URL) is counted in `Profile.private_deps`, never named.",
+   "properties": {
+    "eco": {
+     "enum": [
+      "npm",
+      "pypi",
+      "maven",
+      "gradle",
+      "go",
+      "cargo",
+      "rubygems",
+      "packagist",
+      "nuget",
+      "pub",
+      "hex",
+      "cocoapods",
+      "swiftpm",
+      "conan",
+      "vcpkg",
+      "cpan",
+      "cran",
+      "hackage",
+      "opam"
+     ],
+     "title": "Eco",
+     "type": "string"
+    },
+    "name": {
+     "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$",
+     "title": "Name",
+     "type": "string"
+    }
+   },
+   "required": [
+    "eco",
+    "name"
+   ],
+   "title": "Dependency",
+   "type": "object"
+  },
+  "Dir": {
+   "additionalProperties": false,
+   "properties": {
+    "dir": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Dir",
+     "type": "integer"
+    },
+    "parent": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Parent",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "dir",
+    "parent"
+   ],
+   "title": "Dir",
+   "type": "object"
+  },
+  "Env": {
+   "additionalProperties": false,
+   "description": "What the repository's own files at the tip say its tests need around them.",
+   "properties": {
+    "ci": {
+     "items": {
+      "enum": [
+       "github",
+       "gitlab",
+       "circleci",
+       "jenkins",
+       "azure",
+       "bitbucket",
+       "travis",
+       "buildkite",
+       "drone",
+       "woodpecker",
+       "teamcity",
+       "bamboo",
+       "cloudbuild"
+      ],
+      "type": "string"
+     },
+     "maxItems": 13,
+     "title": "Ci",
+     "type": "array"
+    },
+    "ci_files": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Ci Files",
+     "type": "integer"
+    },
+    "ci_services": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Ci Services",
+     "type": "integer"
+    },
+    "compose_built": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Compose Built",
+     "type": "integer"
+    },
+    "compose_files": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Compose Files",
+     "type": "integer"
+    },
+    "compose_services": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Compose Services",
+     "type": "integer"
+    },
+    "devcontainer": {
+     "title": "Devcontainer",
+     "type": "boolean"
+    },
+    "dockerfiles": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Dockerfiles",
+     "type": "integer"
+    },
+    "other_images": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Other Images",
+     "type": "integer"
+    },
+    "service_images": {
+     "items": {
+      "enum": [
+       "postgres",
+       "mysql",
+       "mariadb",
+       "redis",
+       "mongo",
+       "memcached",
+       "rabbitmq",
+       "elasticsearch",
+       "cassandra",
+       "zookeeper",
+       "couchdb",
+       "neo4j",
+       "influxdb",
+       "nats",
+       "nginx",
+       "httpd",
+       "consul",
+       "vault",
+       "alpine",
+       "ubuntu",
+       "debian",
+       "busybox",
+       "python",
+       "node",
+       "golang",
+       "openjdk",
+       "eclipse-temurin",
+       "ruby",
+       "php",
+       "rust",
+       "gcc",
+       "mcr-mssql",
+       "sonarqube",
+       "registry",
+       "localstack",
+       "minio",
+       "kafka",
+       "solr",
+       "traefik",
+       "haproxy"
+      ],
+      "type": "string"
+     },
+     "maxItems": 40,
+     "title": "Service Images",
+     "type": "array"
+    }
+   },
+   "required": [
+    "ci",
+    "ci_files",
+    "ci_services",
+    "compose_files",
+    "compose_services",
+    "compose_built",
+    "service_images",
+    "other_images",
+    "dockerfiles",
+    "devcontainer"
+   ],
+   "title": "Env",
+   "type": "object"
+  },
+  "File": {
+   "additionalProperties": false,
+   "properties": {
+    "at_tip": {
+     "title": "At Tip",
+     "type": "boolean"
+    },
+    "binary": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Binary"
+    },
+    "blank": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Blank"
+    },
+    "blob_key": {
+     "anyOf": [
+      {
+       "pattern": "^[0-9a-f]{16}$",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Blob Key"
+    },
+    "bytes": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Bytes"
+    },
+    "comment": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Comment"
+    },
+    "depth": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Depth",
+     "type": "integer"
+    },
+    "dir": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Dir",
+     "type": "integer"
+    },
+    "env_refs": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Env Refs"
+    },
+    "ext": {
+     "enum": [
+      "",
+      "go",
+      "py",
+      "java",
+      "kt",
+      "kts",
+      "scala",
+      "groovy",
+      "jelly",
+      "js",
+      "jsx",
+      "mjs",
+      "cjs",
+      "ts",
+      "tsx",
+      "vue",
+      "svelte",
+      "c",
+      "h",
+      "cc",
+      "cpp",
+      "cxx",
+      "hpp",
+      "hh",
+      "cs",
+      "fs",
+      "rb",
+      "php",
+      "rs",
+      "dart",
+      "swift",
+      "cbl",
+      "cob",
+      "cpy",
+      "jcl",
+      "bms",
+      "st",
+      "gs",
+      "pl",
+      "pm",
+      "f",
+      "f90",
+      "for",
+      "sh",
+      "bash",
+      "ps1",
+      "m",
+      "mm",
+      "ex",
+      "exs",
+      "erl",
+      "hs",
+      "ml",
+      "clj",
+      "lua",
+      "vb",
+      "pas",
+      "sql",
+      "r",
+      "jl",
+      "zig",
+      "nim",
+      "sol",
+      "v",
+      "sv",
+      "vhd",
+      "vhdl",
+      "tf",
+      "abap",
+      "rpg",
+      "pli",
+      "md",
+      "txt",
+      "rst",
+      "adoc",
+      "pdf",
+      "docx",
+      "doc",
+      "json",
+      "yaml",
+      "yml",
+      "toml",
+      "ini",
+      "xml",
+      "env",
+      "cfg",
+      "conf",
+      "lock",
+      "sum",
+      "properties",
+      "gradle",
+      "csv",
+      "tsv",
+      "jsonl",
+      "parquet",
+      "dat",
+      "bin",
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "svg",
+      "ico",
+      "ttf",
+      "woff",
+      "woff2",
+      "mp4",
+      "zip",
+      "gz",
+      "tar",
+      "jar"
+     ],
+     "title": "Ext",
+     "type": "string"
+    },
+    "file": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "File",
+     "type": "integer"
+    },
+    "generated_header": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Generated Header"
+    },
+    "imports_external": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Imports External"
+    },
+    "imports_internal": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Imports Internal"
+    },
+    "indent_sum": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Indent Sum"
+    },
+    "kind": {
+     "enum": [
+      "source",
+      "test",
+      "vendored",
+      "generated",
+      "doc",
+      "config",
+      "data",
+      "other"
+     ],
+     "title": "Kind",
+     "type": "string"
+    },
+    "known": {
+     "anyOf": [
+      {
+       "enum": [
+        "makefile",
+        "cmakelists.txt",
+        "dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "go.mod",
+        "go.sum",
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "cargo.toml",
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "gemfile",
+        "composer.json",
+        "pubspec.yaml",
+        "build.xml",
+        "jenkinsfile",
+        ".gitlab-ci.yml",
+        ".travis.yml",
+        "tox.ini",
+        "pytest.ini",
+        "license",
+        "license.txt",
+        "license.md",
+        "licence",
+        "licence.txt",
+        "licence.md",
+        "copying",
+        "copying.txt",
+        "unlicense",
+        "readme.md",
+        "contributing.md",
+        "changelog.md",
+        "codeowners",
+        "agents.md",
+        "claude.md",
+        "gemini.md",
+        "copilot-instructions.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".aider.conf.yml",
+        ".gitmodules",
+        ".gitattributes"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Known"
+    },
+    "license": {
+     "anyOf": [
+      {
+       "enum": [
+        "Apache-2.0",
+        "AGPL-3.0",
+        "LGPL",
+        "GPL",
+        "MPL-2.0",
+        "BSD",
+        "MIT",
+        "Unlicense",
+        "unknown"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "License"
+    },
+    "lines": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Lines"
+    },
+    "max_indent": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Max Indent"
+    },
+    "max_line": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Max Line"
+    },
+    "mock_refs": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Mock Refs"
+    },
+    "ops": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+       },
+       "propertyNames": {
+        "enum": [
+         "cmp",
+         "logic",
+         "arith",
+         "bool"
+        ]
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ops"
+    },
+    "test_fns": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Test Fns"
+    },
+    "tokens": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Tokens"
+    },
+    "url_refs": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Url Refs"
+    }
+   },
+   "required": [
+    "file",
+    "dir",
+    "depth",
+    "ext",
+    "kind",
+    "at_tip"
+   ],
+   "title": "File",
+   "type": "object"
+  },
+  "Git": {
+   "additionalProperties": false,
+   "properties": {
+    "branches": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Branches",
+     "type": "integer"
+    },
+    "lfs": {
+     "title": "Lfs",
+     "type": "boolean"
+    },
+    "pack_bytes": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Pack Bytes",
+     "type": "integer"
+    },
+    "submodules": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Submodules",
+     "type": "integer"
+    },
+    "tags": {
+     "items": {
+      "$ref": "#/$defs/Tag"
+     },
+     "maxItems": 100000,
+     "title": "Tags",
+     "type": "array"
+    }
+   },
+   "required": [
+    "branches",
+    "tags",
+    "submodules",
+    "lfs",
+    "pack_bytes"
+   ],
+   "title": "Git",
+   "type": "object"
+  },
+  "Machine": {
+   "additionalProperties": false,
+   "properties": {
+    "arch": {
+     "enum": [
+      "x86_64",
+      "arm64",
+      "other"
+     ],
+     "title": "Arch",
+     "type": "string"
+    },
+    "cpus": {
+     "maximum": 4096,
+     "minimum": 1,
+     "title": "Cpus",
+     "type": "integer"
+    },
+    "image": {
+     "anyOf": [
+      {
+       "pattern": "^sha256:[0-9a-f]{64}$",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Image"
+    },
+    "memory_bytes": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Memory Bytes",
+     "type": "integer"
+    },
+    "os": {
+     "enum": [
+      "linux",
+      "darwin",
+      "windows",
+      "other"
+     ],
+     "title": "Os",
+     "type": "string"
+    },
+    "runtime": {
+     "enum": [
+      "host",
+      "docker",
+      "podman"
+     ],
+     "title": "Runtime",
+     "type": "string"
+    }
+   },
+   "required": [
+    "os",
+    "arch",
+    "cpus",
+    "memory_bytes",
+    "runtime"
+   ],
+   "title": "Machine",
+   "type": "object"
+  },
+  "Mutant": {
+   "additionalProperties": false,
+   "description": "One operator at the tip to swap, and the tip's tests to run over it: the `nth` operator of class `op` in the\nfile, counted as the profile counted `File.ops`.",
+   "properties": {
+    "file": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "File",
+     "type": "integer"
+    },
+    "nth": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Nth",
+     "type": "integer"
+    },
+    "op": {
+     "enum": [
+      "cmp",
+      "logic",
+      "arith",
+      "bool"
+     ],
+     "title": "Op",
+     "type": "string"
+    }
+   },
+   "required": [
+    "file",
+    "op",
+    "nth"
+   ],
+   "title": "Mutant",
+   "type": "object"
+  },
+  "MutantResult": {
+   "additionalProperties": false,
+   "description": "One instructed mutant: the tip's tests run over the swap, or why that could not be done.",
+   "properties": {
+    "error": {
+     "anyOf": [
+      {
+       "enum": [
+        "toolchain_missing",
+        "dependency_fetch",
+        "network",
+        "oom",
+        "timeout",
+        "disk",
+        "service",
+        "permission",
+        "not_run",
+        "compile_error",
+        "test_failure",
+        "unknown"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Error"
+    },
+    "file": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "File",
+     "type": "integer"
+    },
+    "nth": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Nth",
+     "type": "integer"
+    },
+    "op": {
+     "enum": [
+      "cmp",
+      "logic",
+      "arith",
+      "bool"
+     ],
+     "title": "Op",
+     "type": "string"
+    },
+    "post": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Side"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "file",
+    "op",
+    "nth"
+   ],
+   "title": "MutantResult",
+   "type": "object"
+  },
+  "Next": {
+   "additionalProperties": false,
+   "description": "One batch of instructions. The CLI does exactly this and answers with `Results` naming the same `batch`.",
+   "properties": {
+    "batch": {
+     "minimum": 1,
+     "title": "Batch",
+     "type": "integer"
+    },
+    "blobs": {
+     "items": {
+      "maximum": 2147483647,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "title": "Blobs",
+     "type": "array"
+    },
+    "commits": {
+     "items": {
+      "maximum": 2147483647,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "title": "Commits",
+     "type": "array"
+    },
+    "hours_left": {
+     "minimum": 0,
+     "title": "Hours Left",
+     "type": "number"
+    },
+    "mutants": {
+     "items": {
+      "$ref": "#/$defs/Mutant"
+     },
+     "title": "Mutants",
+     "type": "array"
+    },
+    "run_minutes": {
+     "minimum": 1,
+     "title": "Run Minutes",
+     "type": "integer"
+    },
+    "runs": {
+     "minimum": 1,
+     "title": "Runs",
+     "type": "integer"
+    },
+    "tip": {
+     "title": "Tip",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "batch",
+    "tip",
+    "commits",
+    "mutants",
+    "blobs",
+    "runs",
+    "run_minutes",
+    "hours_left"
+   ],
+   "title": "Next",
+   "type": "object"
+  },
+  "Profile": {
+   "additionalProperties": false,
+   "description": "Stage 1: one repository as the CLI measures it, sent once, after the owner's consent.",
+   "properties": {
+    "agents": {
+     "$ref": "#/$defs/Agents"
+    },
+    "authors": {
+     "items": {
+      "$ref": "#/$defs/Author"
+     },
+     "maxItems": 1000000,
+     "title": "Authors",
+     "type": "array"
+    },
+    "cli": {
+     "pattern": "^\\d{1,6}\\.\\d{1,6}(\\.\\d{1,6})?$",
+     "title": "Cli",
+     "type": "string"
+    },
+    "commits": {
+     "items": {
+      "$ref": "#/$defs/Commit"
+     },
+     "maxItems": 2000000,
+     "minItems": 1,
+     "title": "Commits",
+     "type": "array"
+    },
+    "deps": {
+     "items": {
+      "$ref": "#/$defs/Dependency"
+     },
+     "maxItems": 20000,
+     "title": "Deps",
+     "type": "array"
+    },
+    "dirs": {
+     "items": {
+      "$ref": "#/$defs/Dir"
+     },
+     "maxItems": 5000000,
+     "title": "Dirs",
+     "type": "array"
+    },
+    "env": {
+     "$ref": "#/$defs/Env"
+    },
+    "files": {
+     "items": {
+      "$ref": "#/$defs/File"
+     },
+     "maxItems": 5000000,
+     "title": "Files",
+     "type": "array"
+    },
+    "first_day": {
+     "maximum": 200000,
+     "minimum": 0,
+     "title": "First Day",
+     "type": "integer"
+    },
+    "git": {
+     "$ref": "#/$defs/Git"
+    },
+    "licenses": {
+     "items": {
+      "enum": [
+       "Apache-2.0",
+       "AGPL-3.0",
+       "LGPL",
+       "GPL",
+       "MPL-2.0",
+       "BSD",
+       "MIT",
+       "Unlicense",
+       "unknown"
+      ],
+      "type": "string"
+     },
+     "maxItems": 9,
+     "title": "Licenses",
+     "type": "array"
+    },
+    "private_deps": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Private Deps",
+     "type": "integer"
+    },
+    "roots": {
+     "items": {
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+      "type": "string"
+     },
+     "maxItems": 64,
+     "minItems": 1,
+     "title": "Roots",
+     "type": "array"
+    },
+    "schema": {
+     "const": "kennet.codeval.profile.v1",
+     "title": "Schema",
+     "type": "string"
+    },
+    "tip": {
+     "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+     "title": "Tip",
+     "type": "string"
+    }
+   },
+   "required": [
+    "schema",
+    "cli",
+    "tip",
+    "roots",
+    "first_day",
+    "git",
+    "licenses",
+    "env",
+    "agents",
+    "deps",
+    "private_deps",
+    "authors",
+    "dirs",
+    "commits",
+    "files"
+   ],
+   "title": "Profile",
+   "type": "object"
+  },
+  "Results": {
+   "additionalProperties": false,
+   "description": "One batch answered: every commit and mutant the batch named, each once, and the blob ids of the files it named,\nand nothing else.",
+   "properties": {
+    "batch": {
+     "minimum": 1,
+     "title": "Batch",
+     "type": "integer"
+    },
+    "blobs": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/Revealed"
+     },
+     "maxItems": 256,
+     "title": "Blobs",
+     "type": "array"
+    },
+    "cli": {
+     "pattern": "^\\d{1,6}\\.\\d{1,6}(\\.\\d{1,6})?$",
+     "title": "Cli",
+     "type": "string"
+    },
+    "commands": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Commands"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "commits": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/CommitResult"
+     },
+     "maxItems": 64,
+     "title": "Commits",
+     "type": "array"
+    },
+    "machine": {
+     "$ref": "#/$defs/Machine"
+    },
+    "mutants": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/MutantResult"
+     },
+     "maxItems": 64,
+     "title": "Mutants",
+     "type": "array"
+    },
+    "schema": {
+     "const": "kennet.codeval.results.v1",
+     "title": "Schema",
+     "type": "string"
+    },
+    "seconds": {
+     "maximum": 315360000,
+     "minimum": 0,
+     "title": "Seconds",
+     "type": "integer"
+    },
+    "services": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Services"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "tip": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Side"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "toolchain": {
+     "items": {
+      "$ref": "#/$defs/Toolchain"
+     },
+     "maxItems": 32,
+     "title": "Toolchain",
+     "type": "array"
+    }
+   },
+   "required": [
+    "schema",
+    "cli",
+    "batch",
+    "seconds",
+    "machine",
+    "toolchain"
+   ],
+   "title": "Results",
+   "type": "object"
+  },
+  "Revealed": {
+   "additionalProperties": false,
+   "properties": {
+    "blob": {
+     "pattern": "^[0-9a-f]{40}$",
+     "title": "Blob",
+     "type": "string"
+    },
+    "file": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "File",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "file",
+    "blob"
+   ],
+   "title": "Revealed",
+   "type": "object"
+  },
+  "Services": {
+   "additionalProperties": false,
+   "properties": {
+    "count": {
+     "maximum": 9007199254740991,
+     "minimum": 0,
+     "title": "Count",
+     "type": "integer"
+    },
+    "from": {
+     "enum": [
+      "ci",
+      "compose"
+     ],
+     "title": "From",
+     "type": "string"
+    },
+    "refused": {
+     "default": [],
+     "items": {
+      "enum": [
+       "privileged",
+       "network_mode",
+       "host_namespace",
+       "cap_add",
+       "devices",
+       "security_opt",
+       "bind_mount"
+      ],
+      "type": "string"
+     },
+     "maxItems": 7,
+     "title": "Refused",
+     "type": "array"
+    },
+    "seconds": {
+     "maximum": 315360000,
+     "minimum": 0,
+     "title": "Seconds",
+     "type": "integer"
+    },
+    "up": {
+     "title": "Up",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "from",
+    "count",
+    "up",
+    "seconds"
+   ],
+   "title": "Services",
+   "type": "object"
+  },
+  "Side": {
+   "additionalProperties": false,
+   "properties": {
+    "build": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Step"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "coverage": {
+     "anyOf": [
+      {
+       "items": {
+        "$ref": "#/$defs/Covered"
+       },
+       "maxItems": 1000000,
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Coverage"
+    },
+    "installed_bytes": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Installed Bytes"
+    },
+    "memory_peak_bytes": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Memory Peak Bytes"
+    },
+    "offline": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Step"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "tests": {
+     "items": {
+      "$ref": "#/$defs/Step"
+     },
+     "maxItems": 16,
+     "title": "Tests",
+     "type": "array"
+    }
+   },
+   "required": [
+    "tests"
+   ],
+   "title": "Side",
+   "type": "object"
+  },
+  "Step": {
+   "additionalProperties": false,
+   "description": "One build or test run: how it ended, never what it printed.",
+   "properties": {
+    "error": {
+     "anyOf": [
+      {
+       "enum": [
+        "toolchain_missing",
+        "dependency_fetch",
+        "network",
+        "oom",
+        "timeout",
+        "disk",
+        "service",
+        "permission",
+        "not_run",
+        "compile_error",
+        "test_failure",
+        "unknown"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Error"
+    },
+    "exit": {
+     "anyOf": [
+      {
+       "maximum": 255,
+       "minimum": -255,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Exit"
+    },
+    "log": {
+     "pattern": "^[0-9a-f]{64}$",
+     "title": "Log",
+     "type": "string"
+    },
+    "outcomes": {
+     "anyOf": [
+      {
+       "maxProperties": 200000,
+       "patternProperties": {
+        "^[0-9a-f]{16}$": {
+         "enum": [
+          "passed",
+          "failed",
+          "error",
+          "skipped"
+         ],
+         "type": "string"
+        }
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Outcomes"
+    },
+    "passed": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Passed"
+    },
+    "report": {
+     "anyOf": [
+      {
+       "enum": [
+        "junit",
+        "summary"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Report"
+    },
+    "reported": {
+     "anyOf": [
+      {
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Reported"
+    },
+    "seconds": {
+     "maximum": 315360000,
+     "minimum": 0,
+     "title": "Seconds",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "exit",
+    "seconds",
+    "log"
+   ],
+   "title": "Step",
+   "type": "object"
+  },
+  "Tag": {
+   "additionalProperties": false,
+   "properties": {
+    "annotated": {
+     "title": "Annotated",
+     "type": "boolean"
+    },
+    "commit": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Commit",
+     "type": "integer"
+    },
+    "day": {
+     "anyOf": [
+      {
+       "maximum": 200000,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Day"
+    },
+    "release": {
+     "title": "Release",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "commit",
+    "day",
+    "annotated",
+    "release"
+   ],
+   "title": "Tag",
+   "type": "object"
+  },
+  "Toolchain": {
+   "additionalProperties": false,
+   "properties": {
+    "tool": {
+     "enum": [
+      "go",
+      "python",
+      "node",
+      "deno",
+      "bun",
+      "java",
+      "kotlin",
+      "scala",
+      "gradle",
+      "maven",
+      "sbt",
+      "dotnet",
+      "ruby",
+      "php",
+      "rust",
+      "cargo",
+      "gcc",
+      "clang",
+      "cmake",
+      "make",
+      "bazel",
+      "dart",
+      "flutter",
+      "swift",
+      "elixir",
+      "erlang",
+      "ghc",
+      "ocaml",
+      "zig",
+      "perl",
+      "r",
+      "julia",
+      "lua",
+      "gnucobol",
+      "docker",
+      "podman",
+      "uv",
+      "pip",
+      "poetry",
+      "npm",
+      "pnpm",
+      "yarn"
+     ],
+     "title": "Tool",
+     "type": "string"
+    },
+    "version": {
+     "pattern": "^\\d{1,6}\\.\\d{1,6}(\\.\\d{1,6})?$",
+     "title": "Version",
+     "type": "string"
+    }
+   },
+   "required": [
+    "tool",
+    "version"
+   ],
+   "title": "Toolchain",
+   "type": "object"
+  },
+  "Trailer": {
+   "additionalProperties": false,
+   "properties": {
+    "key": {
+     "enum": [
+      "signed-off-by",
+      "co-authored-by",
+      "reviewed-by",
+      "acked-by",
+      "tested-by",
+      "reported-by",
+      "suggested-by",
+      "helped-by",
+      "cc",
+      "fixes",
+      "closes",
+      "refs",
+      "link",
+      "change-id",
+      "assisted-by",
+      "generated-by",
+      "other"
+     ],
+     "title": "Key",
+     "type": "string"
+    },
+    "tool": {
+     "anyOf": [
+      {
+       "enum": [
+        "anthropic",
+        "openai",
+        "cursor",
+        "aider",
+        "cognition",
+        "codeium",
+        "windsurf",
+        "all_hands",
+        "factory",
+        "sweep",
+        "coderabbit",
+        "github",
+        "google"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Tool"
+    }
+   },
+   "required": [
+    "key"
+   ],
+   "title": "Trailer",
+   "type": "object"
+  }
+ },
+ "description": "What `kennet codeval` sends (kennet.codeval.profile.v1, kennet.codeval.results.v1) and the instructions it is answered with (Next). Closed: no field takes free text.",
+ "title": "Kennet CodeVal"
+}

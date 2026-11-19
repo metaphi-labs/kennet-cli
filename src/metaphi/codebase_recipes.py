@@ -531,6 +531,13 @@ def candidates(paths: set[str], read: Callable[[str], bytes | None]) -> list[Rec
     return out
 
 
+def from_ci(found: Recipe, paths: set[str], read: Callable[[str], bytes | None]) -> bool:
+    """Whether the recipe that worked is one the repository's CI config gives, rather than its build files."""
+    marked = {r.test for r in _markers(paths, read)}
+    ci = [r for r in candidates(paths, read) if r.test not in marked]
+    return any(r.test and r.test in found.test for r in ci)
+
+
 def contained(r: Recipe) -> Recipe:
     return Recipe(SUDO.sub("", r.setup), SUDO.sub("", r.build), SUDO.sub("", r.test), r.image)
 
@@ -624,4 +631,4 @@ def find(
     }
 
 
-__all__ = ["candidates", "contained", "find", "hosted"]
+__all__ = ["candidates", "contained", "find", "from_ci", "hosted"]

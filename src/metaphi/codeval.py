@@ -1,18 +1,27 @@
+"""`kennet codeval`: measure a repository here and send Metaphi AI typed measurements, never code, logs or names.
+
+The client holds no judgement of its own. It reads the repository's git metadata into the closed profile
+(`codeval_schema`), sends it, and does what the server's answer says: build and test the commits it names, swap the
+operators it names, send the blob ids of the files it names. What it sends back is typed results under the same
+schema: exits, seconds, counts, enums, and keyed hashes (HMAC under a key that never leaves this machine). Logs stay
+here; a run sends the sha256 of its log alone.
+"""
+
 from __future__ import annotations
 
 import collections
 import contextlib
 import gzip
 import hashlib
-import io
+import hmac
 import itertools
 import json
 import os
+import platform
 import re
 import secrets
+import shutil
 import subprocess
-import tarfile
-import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -20,17 +29,19 @@ from typing import IO, Any
 
 import httpx
 
-from metaphi import __version__, api, codebase_checks, codebase_env, codebase_sites, config, errors
+from metaphi import __version__, api, codebase_checks, codebase_env, codebase_sites, codeval_runs, config, errors
+from metaphi import codebase_reading as reading
+from metaphi import codeval_schema as schema
 from metaphi.o200k import tokens as _tokens
-from metaphi.steps import Steps
 
-SCHEMA = "kennet.repo_metadata.v15"
-CHECKS_SCHEMA = "kennet.repo_checks.v3"
-LOGS_SCHEMA = "kennet.repo_logs.v1"
-LOG_FILE_MOST = 4 << 20
-NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
-NOTICE = "Runs locally. Results are sent to Metaphi AI."
-LOCAL_NOTICE = "Runs locally."
+try:
+    import tomllib
+except ImportError:  # Python 3.10
+    tomllib = None  # type: ignore[assignment]
+
+PROFILE = schema.PROFILE
+RESULTS = schema.RESULTS
+DAYS = 200_000
 MAX_BLOB = 2_000_000
 MAX_BLOBS = 64
 
@@ -347,14 +358,37 @@ def _ext(path: str) -> str:
     return ext if ext in KNOWN_EXT else ""
 
 
-def _subject_key(subject: str, salt: bytes) -> str:
+def keyed(key: bytes, value: str) -> str:
+    """HMAC-SHA256 of `value` under the repository's own key, first 16 hex: equal values give equal keys in one
+    repository, and nothing else can be read from it. The key stays on this machine (`codeval_runs.repo_key`)."""
+    return hmac.new(key, value.encode("utf-8", "surrogateescape"), hashlib.sha256).hexdigest()[:16]
+
+
+def _subject_key(subject: str, key: bytes) -> str:
     said = HEX_RUN.sub("", TICKET.sub("", subject)).lower()
-    said = " ".join(re.sub(r"\d", "0", said).split())
-    return hashlib.sha256(salt + said.encode()).hexdigest()[:16]
+    return keyed(key, " ".join(re.sub(r"\d", "0", said).split()))
 
 
 def _path_words(path: str) -> set[str]:
     return {w.lower() for part in re.split(r"[/._-]+", path) for w in PATH_WORD.findall(part)}
+
+
+HOUR_S, DAY_S = 3600, 86400
+MONDAY = 3  # 1970-01-01, day 0, was a Thursday: (day + 3) % 7 is 0 on Mondays
+
+
+def _day(at: int) -> int:
+    """The day a time falls on, counted from 1970-01-01 in UTC."""
+    return at // DAY_S
+
+
+def _how(at: int, tz: str) -> int:
+    """The hour of the week, 0 (Monday 00h) to 167 (Sunday 23h), in the clock of the person who made it. The offset
+    itself is not sent: it would say where they are."""
+    m = re.fullmatch(r"([+-])(\d{2})(\d{2})", tz)
+    off = (1 if m[1] == "+" else -1) * (int(m[2]) * HOUR_S + int(m[3]) * 60) if m else 0
+    local = at + off
+    return ((_day(local) + MONDAY) % 7) * 24 + (local % DAY_S) // HOUR_S
 
 
 def _commits(
@@ -363,31 +397,32 @@ def _commits(
     domains: _Ids,
     people: list[dict],
     order: dict[str, int],
-    salt: bytes,
     words: dict[int, set[str]],
+    key: bytes,
 ) -> list[dict]:
-    fields = "%H%x00%P%x00%aE%x00%cE%x00%at%x00%ct%x00%ad%x00%B%x00%(trailers:only,unfold)%x00"
+    fields = "%H%x00%P%x00%aE%x00%cE%x00%at%x00%ct%x00%ad%x00%cd%x00%B%x00%(trailers:only,unfold)%x00"
     raw = _out(repo, "log", "HEAD", "--topo-order", "--reverse", "--date=format:%z", f"--format={fields}").split(b"\0")
 
     def person(address: str) -> int:
-        key = address.lower()
-        if key not in authors:
+        low = address.lower()
+        if low not in authors:
             people.append(
-                {"author": authors.of(key), "domain": domains.of(key.rpartition("@")[2]), "bot": bool(BOT.search(key))}
+                {"author": authors.of(low), "domain": domains.of(low.rpartition("@")[2]), "bot": bool(BOT.search(low))}
             )
-        return authors[key]
+        return authors[low]
 
     first = set(_text(repo, "rev-list", "--first-parent", "HEAD").split())
-    rows = [[x.decode("utf-8", "replace") for x in raw[i : i + 9]] for i in range(0, len(raw) - 8, 9)]
+    rows = [[x.decode("utf-8", "replace") for x in raw[i : i + 10]] for i in range(0, len(raw) - 9, 10)]
     for row in rows:
         order[row[0].strip()] = len(order) + 1
     commits = []
     for row in rows:
-        sha, parents, author, committer, at, ct, tz, msg, block = row
+        sha, parents, author, committer, at, ct, atz, _ctz, msg, block = row
         sha = sha.strip()
         back = REVERTS.search(msg)
         subject, *body = msg.split("\n")
         words[order[sha]] = {w.lower() for w in WORD.findall(msg) if len(w) >= 4}
+        at_s, ct_s = _time(at), _time(ct)
         commits.append(
             {
                 "commit": order[sha],
@@ -395,9 +430,9 @@ def _commits(
                 "first_parent": sha in first,
                 "author": person(author),
                 "committer": person(committer),
-                "authored_at": _time(at),
-                "committed_at": _time(ct),
-                "tz": tz if re.fullmatch(r"[+-]\d{4}", tz) else "+0000",
+                "day": _day(at_s),
+                "hour": _how(at_s, atz.strip()),
+                "same_time": at_s == ct_s,
                 "msg_chars": len(msg),
                 "msg_lines": msg.count("\n") + 1,
                 "ticket_refs": len(TICKET.findall(PR_NUMBER.sub("", msg))),
@@ -412,7 +447,7 @@ def _commits(
                 "body_lines": sum(bool(x.strip()) for x in body),
                 "prefixed": bool(PREFIX.match(subject)),
                 "path_terms": 0,
-                "subject_key": _subject_key(subject, salt),
+                "subject_key": _subject_key(subject, key),
                 "files": [],
             }
         )
@@ -422,14 +457,61 @@ def _commits(
 TRAILER_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
 
-def _trailers(block: str) -> list[dict[str, str]]:
+TRAILER_KEYS = frozenset(
+    [
+        "signed-off-by",
+        "co-authored-by",
+        "reviewed-by",
+        "acked-by",
+        "tested-by",
+        "reported-by",
+        "suggested-by",
+        "helped-by",
+        "cc",
+        "fixes",
+        "closes",
+        "refs",
+        "link",
+        "change-id",
+        "assisted-by",
+        "generated-by",
+    ]
+)
+TOOLS = (
+    ("anthropic", ("anthropic.com", "claude.ai")),
+    ("openai", ("openai.com",)),
+    ("cursor", ("cursor.com", "cursor.sh", "anysphere.co")),
+    ("aider", ("aider.chat",)),
+    ("cognition", ("cognition.ai", "cognition-labs.com", "devin.ai")),
+    ("codeium", ("codeium.com",)),
+    ("windsurf", ("windsurf.com",)),
+    ("all_hands", ("all-hands.dev",)),
+    ("factory", ("factory.ai",)),
+    ("sweep", ("sweep.dev",)),
+    ("coderabbit", ("coderabbit.ai",)),
+    ("github", ("github.com",)),
+    ("google", ("google.com",)),
+)
+"""Coding assistant vendors by their email domains (or a subdomain): a trailer names the vendor, never the domain."""
+
+
+def _tool(domain: str) -> str | None:
+    return next((t for t, ds in TOOLS for d in ds if domain == d or domain.endswith("." + d)), None)
+
+
+"""Trailer keys sent as they are; any other (a project's own, `project-falcon`) is sent as `other`."""
+
+
+def _trailers(block: str) -> list[dict[str, Any]]:
     out = []
     for line in block.split("\n"):
         key, sep, value = line.partition(":")
         key = key.strip().lower()
         if sep and TRAILER_KEY.fullmatch(key):
             m = EMAIL_DOMAIN.search(value)
-            out.append({"key": key, "domain": m[1].lower().rstrip(".") if m else ""})
+            out.append(
+                {"key": key if key in TRAILER_KEYS else "other", "tool": _tool(m[1].lower().rstrip(".")) if m else None}
+            )
     return out
 
 
@@ -669,13 +751,175 @@ def _git_ready() -> None:
         )
 
 
-def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
+SERVICE_IMAGES = frozenset(
+    [
+        "postgres",
+        "mysql",
+        "mariadb",
+        "redis",
+        "mongo",
+        "memcached",
+        "rabbitmq",
+        "elasticsearch",
+        "cassandra",
+        "zookeeper",
+        "couchdb",
+        "neo4j",
+        "influxdb",
+        "nats",
+        "nginx",
+        "httpd",
+        "consul",
+        "vault",
+        "alpine",
+        "ubuntu",
+        "debian",
+        "busybox",
+        "python",
+        "node",
+        "golang",
+        "openjdk",
+        "eclipse-temurin",
+        "ruby",
+        "php",
+        "rust",
+        "gcc",
+        "sonarqube",
+        "registry",
+        "localstack",
+        "minio",
+        "kafka",
+        "solr",
+        "traefik",
+        "haproxy",
+    ]
+)
+"""Official images a service may be named by; any other image is counted, never named."""
+
+
+def _env(env: dict[str, Any]) -> dict[str, Any]:
+    """What `codebase_env.needs` read, in the schema's terms: service images by official name or counted."""
+    named = [n for n in env.get("service_images", []) if n in SERVICE_IMAGES]
+    other = env.get("other_images", 0) + len(env.get("service_images", [])) - len(named)
+    return {**env, "service_images": sorted(named), "other_images": other}
+
+
+AGENT_FILES = (
+    ("agents_md", re.compile(r"(^|/)AGENTS\.md$", re.IGNORECASE)),
+    ("claude_md", re.compile(r"(^|/)CLAUDE(\.local)?\.md$|(^|/)\.claude/", re.IGNORECASE)),
+    ("gemini_md", re.compile(r"(^|/)GEMINI\.md$|(^|/)\.gemini/", re.IGNORECASE)),
+    ("copilot_instructions", re.compile(r"(^|/)copilot-instructions\.md$|(^|/)\.github/instructions/")),
+    ("cursor_rules", re.compile(r"(^|/)\.cursorrules$|(^|/)\.cursor/rules/")),
+    ("windsurf_rules", re.compile(r"(^|/)\.windsurfrules$|(^|/)\.windsurf/rules/")),
+    ("aider_conf", re.compile(r"(^|/)\.aider\.conf\.ya?ml$")),
+    ("mcp_config", re.compile(r"(^|/)\.mcp\.json$|(^|/)\.(cursor|vscode)/mcp\.json$")),
+)
+
+
+def _agents(paths: set[str]) -> dict[str, bool]:
+    return {name: any(pattern.search(p) for p in paths) for name, pattern in AGENT_FILES}
+
+
+PUBLIC_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}")
+NPM_REGISTRY = "https://registry.npmjs.org/"
+CRATES = "registry+https://github.com/rust-lang/crates.io-index"
+PYPI = ("https://pypi.org/simple", "https://pypi.org/simple/")
+RUBYGEMS = ("https://rubygems.org/", "https://rubygems.org")
+
+
+def _toml(body: bytes) -> dict[str, Any]:
+    if tomllib is None:
+        return {}
+    try:
+        return tomllib.loads(body.decode("utf-8", "replace"))
+    except (tomllib.TOMLDecodeError, ValueError):
+        return {}
+
+
+def _npm(body: bytes) -> Iterator[tuple[str, bool]]:
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return
+    for key, pkg in (doc.get("packages") or {}).items() if isinstance(doc, dict) else ():
+        if "node_modules/" not in key or not isinstance(pkg, dict) or pkg.get("link"):
+            continue
+        name = key.rsplit("node_modules/", 1)[1]
+        resolved = pkg.get("resolved")
+        yield name.split("/", 1)[-1], isinstance(resolved, str) and resolved.startswith(NPM_REGISTRY)
+
+
+def _cargo(body: bytes) -> Iterator[tuple[str, bool]]:
+    for pkg in _toml(body).get("package") or []:
+        if isinstance(pkg, dict) and isinstance(pkg.get("name"), str) and "source" in pkg:
+            yield pkg["name"], pkg["source"] == CRATES
+
+
+def _poetry(body: bytes) -> Iterator[tuple[str, bool]]:
+    for pkg in _toml(body).get("package") or []:
+        if isinstance(pkg, dict) and isinstance(pkg.get("name"), str):
+            source = pkg.get("source")
+            yield pkg["name"], not source or (isinstance(source, dict) and source.get("url") in PYPI)
+
+
+def _uv(body: bytes) -> Iterator[tuple[str, bool]]:
+    for pkg in _toml(body).get("package") or []:
+        if not isinstance(pkg, dict) or not isinstance(pkg.get("name"), str):
+            continue
+        source = pkg.get("source") if isinstance(pkg.get("source"), dict) else {}
+        if "editable" in source or "virtual" in source:
+            continue  # the repository's own projects
+        yield pkg["name"], source.get("registry") in PYPI
+
+
+def _gems(body: bytes) -> Iterator[tuple[str, bool]]:
+    public = False
+    for line in body.decode("utf-8", "replace").splitlines():
+        if line and not line[0].isspace():
+            public = False
+        if line.startswith("  remote: "):
+            public = line.split(": ", 1)[1].strip() in RUBYGEMS
+        elif m := re.match(r"^    ([A-Za-z0-9_.-]+) \(", line):
+            yield m[1], public
+
+
+LOCKFILES = (
+    ("npm", re.compile(r"(^|/)package-lock\.json$"), _npm),
+    ("cargo", re.compile(r"(^|/)Cargo\.lock$"), _cargo),
+    ("pypi", re.compile(r"(^|/)poetry\.lock$"), _poetry),
+    ("pypi", re.compile(r"(^|/)uv\.lock$"), _uv),
+    ("rubygems", re.compile(r"(^|/)Gemfile\.lock$"), _gems),
+)
+"""Lockfiles whose entries say where each dependency resolved from. A name is sent only for one resolved from the
+ecosystem's public registry; any other (a private registry, a path, a git URL) is counted, never named."""
+
+
+def _dependencies(tree: dict[str, tuple[str, str, int]], read: Callable[[str], bytes | None]) -> tuple[list, int]:
+    named: set[tuple[str, str]] = set()
+    private: set[tuple[str, str]] = set()
+    for path in sorted(tree):
+        if VENDORED.search(path):
+            continue
+        for eco, pattern, parse in LOCKFILES:
+            if pattern.search(path) and (body := read(path)) is not None:
+                for name, public in parse(body):
+                    low = name.lower()
+                    if public and PUBLIC_NAME.fullmatch(low):
+                        named.add((eco, low))
+                    else:
+                        private.add((eco, low))
+    private -= named
+    return [{"eco": e, "name": n} for e, n in sorted(named)][:20_000], len(private)
+
+
+def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
+    """One repository's profile (`kennet.codeval.profile.v1`): its git metadata and per-file counts, as ids, counts,
+    enums and keyed hashes. `key` is the repository's own HMAC key, kept on this machine."""
     authors, domains, paths, dirs = _Ids(), _Ids(), _Ids(), _Ids()
-    salt = secrets.token_bytes(32)
     people: list[dict] = []
     order: dict[str, int] = {}
     words: dict[int, set[str]] = {}
-    commits = _commits(repo, authors, domains, people, order, salt, words)
+    commits = _commits(repo, authors, domains, people, order, words, key)
     by_sha = {sha: commits[i - 1] for sha, i in order.items()}
     _changes(repo, by_sha, paths, order)
     named = {i: _path_words(path) for path, i in paths.items()}
@@ -683,6 +927,9 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
         changed = {i for x in c["files"] for i in (x["file"], x.get("old_file")) if i is not None}
         c["path_terms"] = len(words[c["commit"]] & set().union(*(named[i] for i in changed)))
     _hunks(repo, by_sha, paths)
+    first_day = min((c["day"] for c in commits if c["day"] > 0), default=0)
+    for c in commits:
+        c["day"] = min(max(c["day"] - first_day, 0), DAYS)
     tree: dict[str, tuple[str, str, int]] = {}
     for entry in _out(repo, "ls-tree", "-r", "-l", "-z", "HEAD").split(b"\0"):
         if b"\t" in entry:
@@ -709,12 +956,12 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
             "depth": path.count("/"),
             "ext": _ext(path),
             "kind": _kind(path),
-            "known_name": (b if (b := os.path.basename(path).lower()) in KNOWN else None),
+            "known": (b if (b := os.path.basename(path).lower()) in KNOWN else None),
             "at_tip": path in tree,
         }
         if path in tree:
             if tree[path][0] != "160000":
-                row["blob"] = hashlib.sha256(salt + tree[path][1].encode()).hexdigest()[:16]
+                row["blob_key"] = keyed(key, tree[path][1])
             row["bytes"] = tree[path][2]
         rows[path] = row
     wanted: dict[str, list[str]] = collections.defaultdict(list)
@@ -736,12 +983,19 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
                 licenses.add(rows[path]["license"])
             if low == ".gitattributes" and b"filter=lfs" in body:
                 lfs = True
+
+    def read(p: str) -> bytes | None:
+        return next((b for _s, b in _blobs(repo, [tree[p][1]])), None) if p in tree else None
+
     tip = _text(repo, "rev-parse", "HEAD")
-    env, start = codebase_env.needs(
-        {p for p, (mode, _s, _z) in tree.items() if mode != "160000"},
-        lambda p: next((b for _s, b in _blobs(repo, [tree[p][1]])), None) if p in tree else None,
-    )
+    blobs = {p for p, (mode, _s, _z) in tree.items() if mode != "160000"}
+    env, start = codebase_env.needs(blobs, read)
+    deps, private = _dependencies(tree, read)
     pack = re.search(r"size-pack: (\d+)", _text(repo, "count-objects", "-v"))
+    tags = _tags(repo, order)
+    for t in tags:
+        at = t.pop("at")
+        t["day"] = min(max(_day(at) - first_day, 0), DAYS) if t["annotated"] and at is not None else None
     if keep is not None:
         keep.update(
             path=repo,
@@ -752,18 +1006,23 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
             paths={row["file"]: path for path, row in rows.items() if row["at_tip"]},
         )
     return {
-        "name": name,
+        "schema": PROFILE,
+        "cli": __version__,
         "tip": tip,
-        "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split(),
+        "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split()[:64],
+        "first_day": min(first_day, DAYS),
         "git": {
             "branches": len(_text(repo, "for-each-ref", "--format=x", "refs/heads", "refs/remotes").split()),
-            "tag_refs": _tags(repo, order),
+            "tags": tags,
             "submodules": sum(m == "160000" for m, _s, _z in tree.values()),
             "lfs": lfs,
             "pack_bytes": int(pack[1]) * 1024 if pack else 0,
         },
         "licenses": sorted(licenses),
-        "env": env,
+        "env": _env(env),
+        "agents": _agents(set(tree)),
+        "deps": deps,
+        "private_deps": private,
         "authors": people,
         "dirs": [{"dir": d, "parent": up} for d, up in tree_dirs.items()],
         "commits": commits,
@@ -824,40 +1083,6 @@ def repositories(paths: list[str]) -> list[str]:
     return out
 
 
-@contextlib.contextmanager
-def profiled(paths: list[str], say: Callable[[str], None] = print) -> Iterator[tuple[dict[str, Any], list[dict]]]:
-    _git_ready()
-    repos, skipped, used, kept = [], [], set(), []
-    with tempfile.TemporaryDirectory(prefix="kennet-clone-") as scratch:
-        for n, given in enumerate(paths, 1):
-            url = is_url(given)
-            path = None if url else Path(given).expanduser().resolve()
-            name = _name_of(given, n, used)
-            if url:
-                say(f"Cloning {name}\u2026")
-                path = Path(scratch) / f"{n}.git"
-                failed = _clone(given, path)
-                if failed:
-                    say(f"\u2717 Skipped {name}: clone failed ({failed}). {SKIPPED_FIX['clone_failed']}")
-                    skipped.append({"name": name, "reason": "clone_failed"})
-                    continue
-            reason = why_not(path) if path.is_dir() else "not_a_git_repository"
-            if reason:
-                say(f"\u2717 Skipped {name}: {SKIPPED_FIX[reason]}")
-                skipped.append({"name": name, "reason": reason})
-                continue
-            local: dict = {"name": name, "given": given}
-            began = time.monotonic()
-            try:
-                repos.append(compute(path, name, local))
-                local["seconds"] = time.monotonic() - began
-                kept.append(local)
-            except (Unreadable, ValueError, OSError):
-                say(f"\u2717 Skipped {name}: {SKIPPED_FIX['unreadable']}")
-                skipped.append({"name": name, "reason": "unreadable"})
-        yield {"schema": SCHEMA, "tool_version": __version__, "repos": repos, "skipped": skipped}, kept
-
-
 CHMOD_IMAGE = "busybox:1.37"
 
 
@@ -882,311 +1107,69 @@ def _name_of(given: str, n: int, used: set[str]) -> str:
     return name
 
 
-def _key(pairs: list[list[str]]) -> str:
-    return "run_" + hashlib.sha256(json.dumps(pairs).encode()).hexdigest()[:16]
+DOCS = "https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected"
 
 
-def run_id(doc: dict[str, Any]) -> str:
-    return _key([[r["name"], r["tip"]] for r in doc["repos"]])
+def disclosure(paths: list[str]) -> tuple[str, str]:
+    """What every run says first, before it reads or sends anything."""
+    said = " ".join(paths)
+    return (
+        f"CodeVal measures {said} here and sends Metaphi AI typed measurements, never source code, logs or names.",
+        f"Exactly what: {DOCS}",
+    )
 
 
-def _remote_tip(url: str) -> str | None:
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    try:
-        got = subprocess.run(
-            ["git", "-c", "protocol.ext.allow=never", "ls-remote", "--", url, "HEAD"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    sha = got.stdout.split()[0] if got.returncode == 0 and got.stdout.split() else ""
-    return sha if re.fullmatch(r"[0-9a-f]{40,64}", sha) else None
+class Local:
+    """One repository as this machine holds it: what the measurements need and what is never sent (its paths, its
+    commit ids, its key)."""
+
+    def __init__(self, name: str, given: str, path: Path, roots: list[str]):
+        self.name, self.given, self.path, self.roots = name, given, path, roots
+        self.home = codeval_runs.home(roots)
+        self.key = codeval_runs.repo_key(self.home)
+        self.kept: dict[str, Any] = {}
+
+    @property
+    def tip(self) -> str:
+        return self.kept["tip"]
 
 
-def run_key(paths: list[str]) -> str | None:
-    """The run id `profiled` would give these repositories, read from each one's latest commit alone: a detached
-    run is named before its history is read. None when no repository can be read."""
-    pairs: list[list[str]] = []
+def opened(paths: list[str], scratch: Path, say: Callable[[str], None]) -> Iterator[Local]:
+    """Each repository given that can be read, cloned first when given by URL; one that cannot is named and passed."""
+    _git_ready()
     used: set[str] = set()
     for n, given in enumerate(paths, 1):
         name = _name_of(given, n, used)
+        path = Path(given).expanduser().resolve()
         if is_url(given):
-            tip = _remote_tip(given)
-        else:
-            path = Path(given).expanduser().resolve()
-            ok = path.is_dir() and why_not(path) is None
-            tip = _ask(path, "rev-parse", "HEAD") if ok else None
-        if tip:
-            pairs.append([name, tip])
-    return _key(pairs) if pairs else None
-
-
-def checked(
-    kept: list[dict],
-    planned: dict[str, Any] | None,
-    plan: codebase_checks.Plan,
-    say: Callable[[str], None] = print,
-    ref: str | None = None,
-    steps: Steps | None = None,
-) -> dict[str, Any]:
-    import dataclasses
-
-    from metaphi import codebase_harwell, codebase_recipes, codebase_setup
-
-    out, images, box, models = [], [], None, []
-    steps = steps or Steps()
-    if plan.test is None:
-        box = codebase_setup.engine()
-        if not box and plan.deep:
-            raise errors.MetaphiError(
-                "--deep runs its commands in containers, and no Docker or Podman is running",
-                code="container_required",
-                next_step="start Docker or Podman, then run the same command again",
-            )
-        if not box:
-            say("No Docker or Podman: running on this machine")
-    engine = box or (codebase_setup.engine() if any(k.get("start") for k in kept) else None)
-
-    def model() -> codebase_setup.Model | None:
-        if not plan.deep or not ref:
-            return None
-        if not models or time.time() > models[-1][1] - 3600:
-            with steps.step("token"):
-                reach = setup_reach(ref)
-            models.append((codebase_setup.Model(reach), reach.get("expires_at") or time.time() + 8 * 3600))
-        return models[-1][0]
-
-    planned = planned or {"repos": [[] for _ in kept], "runs": 0}
-    first = planned.get("first")
-    with (
-        tempfile.TemporaryDirectory(prefix="kennet-cache-", ignore_cleanup_errors=True) as caches,
-        contextlib.ExitStack() as done,
-    ):
-        done.callback(codebase_setup.forget, box, images)
-        net = None
-        if box:
-            net = f"kennet-{secrets.token_hex(6)}"
-            if (
-                subprocess.run(
-                    [box, "network", "create", net], capture_output=True, timeout=120, check=False
-                ).returncode
-                == 0
-            ):
-                codebase_setup.NETWORK[:] = ["--network", net]
-                done.callback(
-                    subprocess.run, [box, "network", "rm", net], capture_output=True, timeout=120, check=False
-                )
-            else:
-                net = None
-            done.callback(codebase_setup.NETWORK.clear)
-        for n, (local, targets) in enumerate(zip(kept, planned["repos"], strict=True)):
-            targets = targets[:first] if first is not None else targets
-            if plan.ledger and (finished := plan.ledger.get(local["name"], "repo")) is not None:
-                say(f"{local['name']}: checked before; using that result")
-                out.append(finished)
+            say(f"Cloning {name}…")
+            path = scratch / f"{n}.git"
+            if failed := _clone(given, path):
+                say(f"✗ Skipped {name}: clone failed ({failed}). {SKIPPED_FIX['clone_failed']}")
                 continue
-            repo, logs = local["path"], (plan.logs or Path.cwd() / "kennet-codeval") / local["name"]
-            mine = dataclasses.replace(
-                plan, cache=Path(caches) / str(n) if box else None, steps=Steps(logs / "steps.jsonl")
-            )
-            mine.steps.total["history"] = local.get("seconds", 0.0)
-            if mine.cache:
-                mine.cache.mkdir()
-            found, setup, tip = None, [] if plan.test is None else None, {}
-
-            def setup_at(
-                sha: str,
-                where: Path,
-                era: int | None,
-                later: tuple[codebase_setup.Recipe, str] | None,
-                repo=repo,
-                mine=mine,
-                setup=setup,
-                tip=tip,
-            ) -> codebase_setup.Recipe | None:
-                tree = codebase_checks._tree(repo, sha)
-
-                def write(d: Path) -> None:
-                    codebase_checks._write(repo, tree, d)
-
-                with mine.steps.step("setup", era=era):
-                    recipe, how = codebase_recipes.find(
-                        write,
-                        _reader(repo, tree),
-                        set(tree),
-                        "",
-                        box,
-                        where,
-                        say,
-                        plan.run_minutes,
-                        mine.cache,
-                        mine.steps,
-                        skip=later[0] if later else None,
-                        tip=tip if era is None else None,
-                    )
-                    setup.append({"era": era, **how})
-                    if recipe is None and (m := model()) is not None:
-                        recipe, how = codebase_setup.find(
-                            write,
-                            "",
-                            m,
-                            box,
-                            where / "model",
-                            say,
-                            plan.run_minutes,
-                            mine.cache,
-                            mine.steps,
-                            later=later,
-                        )
-                        setup.append({"era": era, **how})
-                if recipe and recipe.image:
-                    images.append(recipe.image)
-                return recipe
-
-            services = None
-            if engine and local.get("start"):
-                tip_tree = codebase_checks._tree(repo, local["tip"])
-                services = codebase_env.Services(
-                    engine,
-                    local["start"],
-                    lambda d, t=tip_tree, r=repo: codebase_checks._write(r, t, d),
-                    logs / "services.log",
-                    net if box else None,
-                )
-                say(f"Starting {local['name']}'s services\u2026")
-                with mine.steps.step("services"):
-                    up = services.up()
-                if not up["up"]:
-                    say(f"\u2717 {local['name']}'s services did not start ({logs / 'services.log'})")
-                elif services.shared:
-                    codebase_setup.NETWORK[:] = ["--network", f"container:{services.shared}"]
-            built = (
-                codebase_harwell.checked(repo, local["tip"], local["name"], api.key(None, False), say, mine.steps)
-                if plan.deep and ref
-                else None
-            )
-            try:
-                if plan.ledger:
-                    plan.ledger.phase("setup")
-                if plan.test is None:
-                    say(f"Setting up {local['name']}\u2026")
-                    recipe = setup_at(local["tip"], logs / "setup", None, None)
-                    if not recipe:
-                        say(f"\u2717 Could not set up {local['name']} ({logs / 'setup'})")
-                    if recipe:
-                        found = (recipe, box)
-                era_of = (planned.get("eras") or [[]] * len(kept))[n][: len(targets)] or None
-                if plan.ledger:
-                    plan.ledger.phase("checks")
-
-                def repair(era: int, sha: str, tail: str, logs=logs, found=found, setup_at=setup_at):
-                    recipe = setup_at(sha, logs / f"setup-era{era}", era, (found[0], tail))
-                    return (recipe, box) if recipe else None
-
-                got = codebase_checks.run(
-                    repo,
-                    local["name"],
-                    local["tip"],
-                    local["commits"],
-                    local["order"],
-                    targets,
-                    planned["runs"],
-                    mine,
-                    say,
-                    found,
-                    era_of,
-                    repair if found and setup is not None else None,
-                    (planned.get("edits") or [[]] * len(kept))[n],
-                    local.get("paths"),
-                    tip or None,
-                    stream,
-                )
-            except Exception as e:  # noqa: BLE001
-                say(f"\u2717 {local['name']}: tests stopped ({type(e).__name__}: {e})")
-                got = {
-                    "from": "tip",
-                    "runs": planned["runs"],
-                    "build_given": plan.build is not None,
-                    "test_given": plan.test is not None,
-                    "stopped": "error",
-                    "commits": [],
-                    "edits": [],
-                }
-            finally:
-                if services:
-                    services.down()
-                    codebase_setup.NETWORK[:] = ["--network", net] if net else []
-            if setup:
-                got["setup"] = setup
-            if services:
-                got["services"] = services.got
-            if built:
-                got["build_remote"] = built
-            got["seconds"] = mine.steps.seconds()
-            out.append(got)
-            if plan.ledger and got.get("stopped") != "error":
-                plan.ledger.put(local["name"], "repo", "", got)
-            if box and mine.cache:
-                try:
-                    subprocess.run(
-                        [
-                            box,
-                            "run",
-                            "--rm",
-                            "-v",
-                            f"{mine.cache}:/c",
-                            "--entrypoint",
-                            "chmod",
-                            found[0].image if found and found[0].image else CHMOD_IMAGE,
-                            "-R",
-                            "a+rwX",
-                            "/c",
-                        ],
-                        capture_output=True,
-                        timeout=600,
-                        check=False,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-    return {"schema": CHECKS_SCHEMA, "tool_version": __version__, "repos": out, "seconds": steps.seconds()}
-
-
-def add_blobs(kept: list[dict], report: dict[str, Any], planned: dict[str, Any] | None) -> None:
-    if not planned or "blobs" not in planned:
-        return
-    for local, got, ids in zip(kept, report["repos"], planned["blobs"], strict=True):
-        if got is None or "blobs" in got:
+        reason = why_not(path) if path.is_dir() else "not_a_git_repository"
+        if reason:
+            say(f"✗ Skipped {name}: {SKIPPED_FIX[reason]}")
             continue
-        tree, paths = codebase_checks._tree(local["path"], local["tip"]), local.get("paths") or {}
-        got["blobs"] = {
-            str(i): tree[paths[i]][1]
-            for i in ids[:MAX_BLOBS]
-            if isinstance(i, int) and paths.get(i) in tree and re.fullmatch(r"[0-9a-f]{40}", tree[paths[i]][1])
-        }
+        roots = _text(path, "rev-list", "--max-parents=0", "HEAD").split()
+        yield Local(name, given, path, roots)
 
 
-SENT = (
-    "What is sent to Metaphi AI:",
-    "  \u00b7 counts and ids for files, folders, commits and authors",
-    "  \u00b7 the shape of commit messages, never their text",
-    "  \u00b7 build and test output and logs",
-    "  \u00b7 the git ids of files Metaphi AI names",
-)
-DEEP_SENT = "  \u00b7 with --deep: the contents of files read to set up the build"
-TAKES = "Then it builds and tests past commits here, which can take hours; the time left shows as it runs."
-
-
-def sent_lines(deep: bool = False) -> tuple[str, ...]:
-    return (*SENT, DEEP_SENT) if deep else SENT
+def profile(local: Local) -> dict[str, Any]:
+    """The repository's profile, checked against the schema; what it needs to run the server's instructions stays in
+    `local.kept`."""
+    try:
+        got = compute(local.path, local.key, local.kept)
+    except (Unreadable, ValueError, OSError) as e:
+        raise errors.MetaphiError(
+            f"git could not read {local.name}", code="unreadable", next_step=SKIPPED_FIX["unreadable"]
+        ) from e
+    schema.check("Profile", got)
+    return got
 
 
 def packed(doc: dict[str, Any]) -> bytes:
-    return gzip.compress(json.dumps(doc, separators=(",", ":")).encode(), mtime=0)
+    return json.dumps(doc, separators=(",", ":"), sort_keys=True).encode()
 
 
 SEND = httpx.Timeout(30.0, connect=10.0, read=90.0, write=600.0)
@@ -1237,14 +1220,40 @@ def _call(method: str, path: str, sleep: Callable[[float], None], answered: bool
             sleep(2.0)
 
 
-def post(body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    return _call(
-        "POST",
-        "/codeval",
-        sleep,
-        content=body,
-        headers={"content-encoding": "gzip", "content-type": "application/json"},
-    )
+def _sent(local: Local, name: str, kind: str, doc: dict[str, Any]) -> tuple[bytes, Path]:
+    """The one way a body leaves: checked against the schema (any free text refused), kept on this machine exactly as
+    sent, and gzipped."""
+    schema.check(kind, doc)
+    body = packed(doc)
+    return gzip.compress(body, mtime=0), codeval_runs.sent(local.home, name, body)
+
+
+GZIP = {"content-encoding": "gzip", "content-type": "application/json"}
+
+
+def _answer(got: dict[str, Any]) -> dict[str, Any]:
+    """The server's answer, its instructions checked against the schema before any is followed."""
+    if isinstance(got.get("next"), dict):
+        schema.check("Next", got["next"])
+    return got
+
+
+def send_profile(
+    local: Local, doc: dict[str, Any], sleep: Callable[[float], None] = time.sleep
+) -> tuple[dict[str, Any], Path]:
+    body, path = _sent(local, "profile.json", "Profile", doc)
+    return _answer(_call("POST", "/codeval", sleep, content=body, headers=GZIP)), path
+
+
+def send_results(
+    local: Local, run: str, doc: dict[str, Any], sleep: Callable[[float], None] = time.sleep
+) -> tuple[dict[str, Any], Path]:
+    body, path = _sent(local, f"results-{doc['batch']}.json", "Results", doc)
+    return _answer(_call("POST", f"/codeval/{run}/results", sleep, content=body, headers=GZIP)), path
+
+
+def get_run(run: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    return _answer(_call("GET", f"/codeval/{run}", sleep))
 
 
 SCOPE = "kennet:codeval:write"
@@ -1259,110 +1268,389 @@ def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
     _call("GET", "/codeval/access", sleep, answered=False)
 
 
-def plan(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    return _call("POST", f"/codeval/{ref}/plan", sleep)
+# -- measuring what the server names -------------------------------------------------------------------------------
+
+STEP_MOST = 10 * 365 * 86400
+TESTS_MOST = 200_000
 
 
-def setup_reach(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    got = _call("POST", f"/codeval/{ref}/setup", sleep)
-    config.check_url(got.get("base_url"), "the setup model's address")
-    return got
+def _log(raw: dict[str, Any]) -> str:
+    """The sha256 of a run's log; the log stays here."""
+    h = hashlib.sha256()
+    with contextlib.suppress(OSError), open(raw.get("log") or os.devnull, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-def post_logs(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    return _call("POST", f"/codeval/{ref}/logs", sleep, content=body, headers={"content-type": "application/gzip"})
+def step(raw: dict[str, Any], key: bytes) -> dict[str, Any]:
+    """One build or test run as sent: how it ended, never what it printed. Test cases are named by HMAC alone."""
+    code = raw.get("exit")
+    error = None if code == 0 else raw.get("error") or ("timeout" if code is None else "unknown")
+    out: dict[str, Any] = {"exit": code, "seconds": min(int(raw.get("seconds") or 0), STEP_MOST), "log": _log(raw)}
+    if error:
+        out["error"] = error
+    for k in ("reported", "passed", "report"):
+        if raw.get(k) is not None:
+            out[k] = raw[k]
+    if raw.get("cases"):
+        out["outcomes"] = dict(
+            itertools.islice(((keyed(key, "test\0" + c), o) for c, o in sorted(raw["cases"].items())), TESTS_MOST)
+        )
+    return out
 
 
-def post_checks(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    return _call(
-        "POST",
-        f"/codeval/{ref}/checks",
-        sleep,
-        content=body,
-        headers={"content-encoding": "gzip", "content-type": "application/json"},
+def side(raw: dict[str, Any], key: bytes) -> dict[str, Any]:
+    out: dict[str, Any] = {"tests": [step(t, key) for t in raw.get("tests", [])][:16]}
+    for k in ("build", "offline"):
+        if raw.get(k):
+            out[k] = step(raw[k], key)
+    for k in ("installed_bytes", "memory_peak_bytes", "coverage"):
+        if raw.get(k) is not None:
+            out[k] = raw[k]
+    return out
+
+
+def _unit(raw: dict[str, Any] | None, key: bytes) -> dict[str, Any]:
+    if raw is None:
+        return {"error": "not_run"}
+    if raw.get("broke") or not raw.get("post"):
+        return {"error": "unknown"}
+    return {k: side(raw[k], key) for k in ("pre", "post") if raw.get(k) is not None}
+
+
+OS = {"linux": "linux", "darwin": "darwin", "windows": "windows"}
+ARCH = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}
+
+
+def _memory() -> int:
+    with contextlib.suppress(ValueError, OSError, AttributeError):
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    with contextlib.suppress(OSError, ValueError, subprocess.TimeoutExpired):
+        said = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=10, check=False)
+        return int(said.stdout.strip())
+    return 0
+
+
+def _digest(engine: str | None, image: str | None) -> str | None:
+    if not engine or not image:
+        return None
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        said = subprocess.run(
+            [engine, "image", "inspect", "-f", "{{.Id}}", image],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        ).stdout.strip()
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", said):
+            return said
+    return None
+
+
+def machine(engine: str | None, image: str | None) -> dict[str, Any]:
+    out = {
+        "os": OS.get(platform.system().lower(), "other"),
+        "arch": ARCH.get(platform.machine().lower(), "other"),
+        "cpus": max(1, min(os.cpu_count() or 1, 4096)),
+        "memory_bytes": _memory(),
+        "runtime": Path(engine).name if engine and Path(engine).name in ("docker", "podman") else "host",
+    }
+    if digest := _digest(engine, image):
+        out["image"] = digest
+    return out
+
+
+TOOLS = {
+    "go": ("go", "version"),
+    "python": ("python3", "--version"),
+    "node": ("node", "--version"),
+    "deno": ("deno", "--version"),
+    "bun": ("bun", "--version"),
+    "java": ("java", "-version"),
+    "kotlin": ("kotlin", "-version"),
+    "maven": ("mvn", "--version"),
+    "gradle": ("gradle", "--version"),
+    "sbt": ("sbt", "--version"),
+    "dotnet": ("dotnet", "--version"),
+    "ruby": ("ruby", "--version"),
+    "php": ("php", "--version"),
+    "rust": ("rustc", "--version"),
+    "cargo": ("cargo", "--version"),
+    "gcc": ("gcc", "--version"),
+    "clang": ("clang", "--version"),
+    "cmake": ("cmake", "--version"),
+    "make": ("make", "--version"),
+    "bazel": ("bazel", "--version"),
+    "dart": ("dart", "--version"),
+    "swift": ("swift", "--version"),
+    "elixir": ("elixir", "--version"),
+    "perl": ("perl", "--version"),
+    "zig": ("zig", "version"),
+    "uv": ("uv", "--version"),
+    "pip": ("pip", "--version"),
+    "poetry": ("poetry", "--version"),
+    "npm": ("npm", "--version"),
+    "pnpm": ("pnpm", "--version"),
+    "yarn": ("yarn", "--version"),
+}
+"""The schema's toolchains, by the command that runs each and how it says its version."""
+WORDS = {"python": ("python", "python3", "pytest", "pip"), "maven": ("mvn", "mvnw"), "gradle": ("gradle", "gradlew")}
+SEMVER = re.compile(r"(?<![\d.])(\d{1,6})\.(\d{1,6})(?:\.(\d{1,6}))?")
+
+
+def _version(said: str) -> str | None:
+    m = SEMVER.search(said)
+    return ".".join(x for x in m.groups() if x is not None) if m else None
+
+
+def toolchain(commands: list[str], engine: str | None, image: str | None, log: Path) -> list[dict[str, str]]:
+    """The tools the commands name, by their numeric versions as this machine (or the set-up image) reports them;
+    each answer whole in `log`, which stays here."""
+    words = set(re.findall(r"[\w.+-]+", " ".join(commands)))
+    named = [t for t, (run, _a) in TOOLS.items() if words & {t, run, *WORDS.get(t, ())}]
+    out: list[dict[str, str]] = []
+    log.parent.mkdir(parents=True, exist_ok=True)
+    for tool in named:
+        run, flag = TOOLS[tool]
+        argv = [engine, "run", "--rm", "--entrypoint", run, image, flag] if engine and image else [run, flag]
+        if not (engine and image) and not shutil.which(run):
+            continue
+        try:
+            got = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        said = got.stdout + got.stderr
+        with log.open("a") as f:
+            f.write(f"$ {' '.join(argv)}\n{said}\n")
+        if got.returncode == 0 and (version := _version(said)):
+            out.append({"tool": tool, "version": version})
+    if engine and image and (version := _version(_engine_version(engine))):
+        out.append({"tool": Path(engine).name, "version": version})
+    return out[:32]
+
+
+def _engine_version(engine: str) -> str:
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        return subprocess.run(
+            [engine, "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        ).stdout
+    return ""
+
+
+def _undetected(local: Local, logs: Path, box: str | None) -> codebase_checks.Stuck:
+    """No build and test recipe worked: name a missing tool when the tries' logs show one."""
+    import shlex
+
+    tool = next((t for f in sorted(logs.glob("*.log")) if (t := reading.missing(f))), None)
+    if tool and not box:
+        said = f"could not build {local.name}: {tool} is missing on this machine"
+        step = f"install {tool} (or start Docker or Podman), then run the same command again"
+    else:
+        said = f"could not find how to build and test {local.name}"
+        step = f"give the command that builds and tests it: kennet codeval {shlex.quote(local.given)} -- '<command>'"
+    return codebase_checks.Stuck(said, code="test_command_missing", next_step=step)
+
+
+class Bench:
+    """What a repository's runs share for as long as this process measures it: the container engine, the set-up
+    image (pulled and set up once), one dependency cache, the services, and the recipe found from CI config and
+    build files. `close` puts it all away."""
+
+    def __init__(self, local: Local, given: str | None, say: Callable[[str], None]):
+        from metaphi import codebase_setup
+
+        self.local, self.given, self.say = local, given, say
+        self.box = codebase_setup.engine() if given is None else None
+        self.found: tuple[codebase_setup.Recipe, str | None] | None = None
+        self.by: str | None = "seller" if given is not None else None
+        self.tip: dict[str, Any] = {}
+        self.services: codebase_env.Services | None = None
+        self.images: list[str] = []
+        self.net: str | None = None
+        self.done = contextlib.ExitStack()
+        self.logs = local.home / "logs"
+        self.cache = local.home / "cache" if self.box else None
+        self.ready = False
+
+    def open(self) -> None:
+        """Set up once: the network, the services, and the build and test recipe."""
+        if self.ready:
+            return
+        self.ready = True
+        from metaphi import codebase_recipes, codebase_setup
+
+        local, say, box = self.local, self.say, self.box
+        if self.given is None and not box:
+            say("No Docker or Podman: running on this machine")
+        self.done.callback(codebase_setup.forget, box, self.images)
+        if box:
+            net = f"kennet-{secrets.token_hex(6)}"
+            if (
+                subprocess.run(
+                    [box, "network", "create", net], capture_output=True, timeout=120, check=False
+                ).returncode
+                == 0
+            ):
+                self.net = net
+                codebase_setup.NETWORK[:] = ["--network", net]
+                self.done.callback(
+                    subprocess.run, [box, "network", "rm", net], capture_output=True, timeout=120, check=False
+                )
+            self.done.callback(codebase_setup.NETWORK.clear)
+        if self.cache:
+            self.cache.mkdir(parents=True, exist_ok=True)
+        engine = box or (codebase_setup.engine() if local.kept.get("start") else None)
+        if engine and local.kept.get("start"):
+            tree = codebase_checks._tree(local.path, local.tip)
+            self.services = codebase_env.Services(
+                engine,
+                local.kept["start"],
+                lambda d, t=tree, r=local.path: codebase_checks._write(r, t, d),
+                self.logs / "services.log",
+                self.net,
+            )
+            self.done.callback(self.services.down)
+            say(f"Starting {local.name}'s services…")
+            if not self.services.up()["up"]:
+                say(f"✗ {local.name}'s services did not start ({self.logs / 'services.log'})")
+            elif self.services.shared:
+                codebase_setup.NETWORK[:] = ["--network", f"container:{self.services.shared}"]
+        if self.given is not None:
+            return
+        say(f"Setting up {local.name}…")
+        tree = codebase_checks._tree(local.path, local.tip)
+        recipe, _how = codebase_recipes.find(
+            lambda d, r=local.path, t=tree: codebase_checks._write(r, t, d),
+            _reader(local.path, tree),
+            set(tree),
+            "",
+            box,
+            self.logs / "setup",
+            say,
+            codebase_checks.RUN_MINUTES,
+            self.cache,
+            tip=self.tip,
+        )
+        if recipe is None:
+            raise _undetected(local, self.logs / "setup", box)
+        if recipe.image:
+            self.images.append(recipe.image)
+        self.found = (recipe, box)
+        self.by = "ci" if codebase_recipes.from_ci(recipe, set(tree), _reader(local.path, tree)) else "build_files"
+
+    def commands(self) -> dict[str, Any] | None:
+        key = self.local.key
+        if self.given is not None:
+            return {"by": "seller", "build": None, "test": keyed(key, self.given)}
+        if not self.found:
+            return None
+        r = self.found[0]
+        build = " && ".join(x for x in (r.setup, r.build) if x)
+        return {"by": self.by, "build": keyed(key, build) if build else None, "test": keyed(key, r.test)}
+
+    def toolchain(self) -> list[dict[str, str]]:
+        r = self.found[0] if self.found else None
+        said = [self.given] if self.given is not None else [r.setup, r.build, r.test] if r else []
+        return toolchain([x for x in said if x], self.box, r.image if r else None, self.logs / "toolchain.log")
+
+    def close(self) -> None:
+        if self.box and self.cache and self.cache.exists():
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                image = self.found[0].image if self.found and self.found[0].image else CHMOD_IMAGE
+                subprocess.run(
+                    [
+                        self.box,
+                        "run",
+                        "--rm",
+                        "-v",
+                        f"{self.cache}:/c",
+                        "--entrypoint",
+                        "chmod",
+                        image,
+                        "-R",
+                        "a+rwX",
+                        "/c",
+                    ],
+                    capture_output=True,
+                    timeout=600,
+                    check=False,
+                )
+        self.done.close()
+
+
+def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str], None] = print) -> dict[str, Any]:
+    """Do exactly what one batch of instructions says, and answer it in the schema's terms. Each finished unit is
+    kept in the run's journal first, so a run killed part way goes on where it stopped."""
+    import dataclasses
+
+    began = time.monotonic()
+    bench.open()
+    ledger = codeval_runs.Run(local.home)
+    plan = codebase_checks.Plan(
+        test=bench.given,
+        run_minutes=float(nxt["run_minutes"]),
+        hours=float(nxt["hours_left"]),
+        logs=local.home / "logs",
+        cache=bench.cache,
+        ledger=ledger,
+        alone=bench.services is not None or bench.given is not None,
     )
+    plan = dataclasses.replace(plan, logs=local.home / "logs" / f"batch-{nxt['batch']}")
+    kept = local.kept
+    mutants = [{"file": m["file"], "op": m["op"], "nth": m["nth"]} for m in nxt["mutants"]]
+    raw = codebase_checks.run(
+        local.path,
+        local.name,
+        local.tip,
+        kept["commits"],
+        kept["order"],
+        list(nxt["commits"]),
+        int(nxt["runs"]),
+        plan,
+        say,
+        bench.found,
+        kept["paths"],
+        bench.tip or None,
+        stream,
+        mutants,
+    )
+    key = local.key
+    out: dict[str, Any] = {
+        "schema": RESULTS,
+        "cli": __version__,
+        "batch": nxt["batch"],
+        "machine": machine(bench.box, bench.found[0].image if bench.found else None),
+        "toolchain": bench.toolchain(),
+        "commits": [{"commit": i, **_unit(r, key)} for i, r in zip(nxt["commits"], raw["commits"], strict=False)],
+        "mutants": [{**m, **_unit(r, key)} for m, r in zip(mutants, raw["mutants"], strict=False)],
+        "blobs": blobs(local, nxt["blobs"]),
+    }
+    answered = {c["commit"] for c in out["commits"]}
+    out["commits"] += [{"commit": i, "error": "not_run"} for i in nxt["commits"] if i not in answered]
+    done = len(out["mutants"])
+    out["mutants"] += [{**m, "error": "not_run"} for m in mutants[done:]]
+    if (commands := bench.commands()) is not None:
+        out["commands"] = commands
+    if bench.services is not None:
+        out["services"] = {
+            k: v for k, v in bench.services.got.items() if k in ("from", "count", "up", "seconds", "refused")
+        }
+    if nxt["tip"] and raw.get("tip"):
+        out["tip"] = side(raw["tip"], key)
+    out["seconds"] = min(round(time.monotonic() - began), STEP_MOST)
+    return out
 
 
-REDACT = (
-    ("private_key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)),
-    ("metaphi_key", re.compile(rb"mai_sk_[A-Za-z0-9_-]{20,}")),
-    ("aws_access_key", re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("github_token", re.compile(rb"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})")),
-    ("slack_token", re.compile(rb"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("google_api_key", re.compile(rb"\bAIza[0-9A-Za-z_-]{35}")),
-    ("api_key", re.compile(rb"\bsk-[A-Za-z0-9_-]{20,}")),
-    ("jwt", re.compile(rb"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
-    ("url_credentials", re.compile(rb"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)")),
-    (
-        "assignment",
-        re.compile(
-            rb"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[\"']?\s*[=:]\s*[\"']?)"
-            rb"(?!\[redacted)[^\s\"']{4,}"
-        ),
-    ),
-)
-
-
-def redacted(data: bytes, counts: collections.Counter) -> bytes:
-    for kind, pattern in REDACT:
-        tag = b"[redacted:" + kind.encode() + b"]"
-
-        def sub(m: re.Match, tag: bytes = tag, kind: str = kind) -> bytes:
-            counts[kind] += 1
-            return (m.group(1) if m.re.groups else b"") + tag
-
-        data = pattern.sub(sub, data)
-    return data
-
-
-def logs_packed(root: Path, ref: str, names: list[str]) -> tuple[bytes, dict[str, int]]:
-    buf, counts = io.BytesIO(), collections.Counter()
-    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
-
-        def add(name: str, data: bytes) -> None:
-            info = tarfile.TarInfo(name)
-            info.size, info.mode, info.mtime = len(data), 0o644, 0
-            tar.addfile(info, io.BytesIO(data))
-
-        add("kennet-logs.json", json.dumps({"schema": LOGS_SCHEMA, "ref": ref, "tool_version": __version__}).encode())
-        for n, repo in enumerate(names):
-            for f in sorted((root / repo).rglob("*")) if (root / repo).is_dir() else []:
-                name = f"{n}/{f.relative_to(root / repo).as_posix()}"
-                if f.is_symlink() or not f.is_file() or NOT_PACKED.search(name):
-                    continue
-                try:
-                    data = f.read_bytes()
-                except OSError:
-                    continue
-                if len(data) > LOG_FILE_MOST:
-                    data = (
-                        data[: 512 << 10]
-                        + b"\n[... cut by kennet codeval ...]\n"
-                        + data[-(LOG_FILE_MOST - (512 << 10)) :]
-                    )
-                add(name, redacted(data, counts))
-    return buf.getvalue(), dict(sorted(counts.items()))
-
-
-__all__ = [
-    "CHECKS_SCHEMA",
-    "LOGS_SCHEMA",
-    "NOTICE",
-    "SCHEMA",
-    "SENT",
-    "TAKES",
-    "add_blobs",
-    "checked",
-    "compute",
-    "key_ready",
-    "logs_packed",
-    "packed",
-    "plan",
-    "post",
-    "post_checks",
-    "post_logs",
-    "profiled",
-    "redacted",
-    "setup_reach",
-    "why_not",
-]
+def blobs(local: Local, ids: list[int]) -> list[dict[str, Any]]:
+    """The raw git blob ids at the tip of the files the server names."""
+    tree, paths = codebase_checks._tree(local.path, local.tip), local.kept.get("paths") or {}
+    return [
+        {"file": i, "blob": tree[paths[i]][1]}
+        for i in ids
+        if paths.get(i) in tree and re.fullmatch(r"[0-9a-f]{40}", tree[paths[i]][1])
+    ][:256]

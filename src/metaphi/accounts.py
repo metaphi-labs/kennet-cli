@@ -235,26 +235,56 @@ def headless() -> bool:
 _sleep = time.sleep
 
 
-def device_login(say: Callable[[str], None] = print, wait_s: float | None = None) -> dict[str, Any]:
+AGAIN = "Nothing was sent. Run the same command for a new code."
+
+
+def device_start(scope: str | None = None) -> dict[str, Any]:
+    """Start a device sign-in, for `scope` alone when one is named: the code the person enters, where, and when it
+    expires."""
     with _http() as h:
-        r = h.post("/device/code", data={"client_id": CLIENT_ID})
+        r = h.post("/device/code", data={"client_id": CLIENT_ID, **({"scope": scope} if scope else {})})
     if r.status_code != 200:
         raise _refused(r)
     started = _json(r)
     code = started.get("device_code")
     if not isinstance(code, str) or not isinstance(started.get("user_code"), str):
         raise need("the sign-in server sent no device code", "login_refused", "kennet login")
-    page = started.get("verification_uri_complete") or started.get("verification_uri")
-    say(f"To sign in, open {started.get('verification_uri')} and enter the code {started['user_code']}")
-    if page != started.get("verification_uri"):
-        say(f"Or open: {page}")
-    interval = max(float(started.get("interval") or 5), 2.0)
-    lasts = float(started.get("expires_in") or SIGN_IN_S)
-    until = time.time() + (lasts if wait_s is None else min(lasts, wait_s))
-    while time.time() < until:
-        _sleep(interval)
+    return {
+        "device_code": code,
+        "user_code": started["user_code"],
+        "url": started.get("verification_uri"),
+        "page": started.get("verification_uri_complete") or started.get("verification_uri"),
+        "interval": max(float(started.get("interval") or 5), 2.0),
+        "expires_at": time.time() + float(started.get("expires_in") or SIGN_IN_S),
+        **({"scope": scope} if scope else {}),
+    }
+
+
+def shown(started: dict[str, Any]) -> dict[str, Any]:
+    """A pending sign-in as an agent relays it: where, the code, the link that carries the code, and until when."""
+    return {
+        "verification_uri": started.get("url"),
+        "user_code": started.get("user_code"),
+        "verification_uri_complete": started.get("page"),
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(started.get("expires_at") or 0))),
+    }
+
+
+def device_poll(started: dict[str, Any], wait_s: float | None = None, now: bool = False) -> dict[str, Any] | None:
+    """The keys once the person has approved the sign-in; None if `wait_s` ran out first. With `now`, it asks once
+    at once before waiting (a sign-in started on an earlier run). Raises when it was declined or has expired."""
+    interval, until = started["interval"], started["expires_at"]
+    if wait_s is not None:
+        until = min(until, time.time() + wait_s)
+    while time.time() < until or now:
+        if not now:
+            _sleep(interval)
+        now = False
         with _http() as h:
-            r = h.post("/oauth/token", data={"grant_type": DEVICE_GRANT, "device_code": code, "client_id": CLIENT_ID})
+            r = h.post(
+                "/oauth/token",
+                data={"grant_type": DEVICE_GRANT, "device_code": started["device_code"], "client_id": CLIENT_ID},
+            )
         got = _json(r)
         if r.status_code == 200 and isinstance(got.get("access_token"), str):
             return _keys(got["access_token"])
@@ -265,11 +295,68 @@ def device_login(say: Callable[[str], None] = print, wait_s: float | None = None
             interval += 5
             continue
         if error == "access_denied":
-            raise need("the sign-in was declined", "login_refused", "kennet login")
+            raise need(f"Sign-in denied. {AGAIN}", "login_refused", "kennet login")
         if error == "expired_token":
             break
         raise need(_said(r), "login_refused", "kennet login")
-    raise need("the sign-in was not finished in time; run `kennet login` again", "login_expired", "kennet login")
+    if time.time() < started["expires_at"] and wait_s is not None:
+        return None
+    raise need(f"The code expired. {AGAIN}", "login_expired", "kennet login")
+
+
+def device_login(say: Callable[[str], None] = print, wait_s: float | None = None) -> dict[str, Any]:
+    started = device_start()
+    say(f"To sign in, open {started['url']} and enter the code {started['user_code']}")
+    if started["page"] != started["url"]:
+        say(f"Or open: {started['page']}")
+    got = device_poll(started, wait_s)
+    if got is None:
+        raise need("the sign-in was not finished in time; run `kennet login` again", "login_expired", "kennet login")
+    return got
+
+
+PENDING = "device_pending"
+
+
+def pending() -> dict[str, Any] | None:
+    """The device sign-in an earlier run started and no one has finished, while its code still works."""
+    started = config.load().get(PENDING)
+    if isinstance(started, dict) and float(started.get("expires_at") or 0) > time.time():
+        return started
+    return None
+
+
+def pending_login(
+    wait_s: float = 10.0, scope: str | None = None, then: str | None = None
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Sign in with no one waiting at a terminal: finish the device sign-in started on an earlier run (its code
+    reused), or start one and keep it, with `then`, the command to run once it is approved. Answers (keys, the
+    sign-in) once approved, or (None, the sign-in to show) while it is pending."""
+    started = pending()
+    if started is not None and (scope is None or started.get("scope") == scope):
+        if then and started.get("then") != then:
+            started = {**started, "then": then}
+            config.save({**config.load(), PENDING: started})
+        try:
+            got = device_poll(started, wait_s, now=True)
+        except Error as e:
+            _forget_pending()
+            if e.code != "login_expired":
+                raise
+        else:
+            if got is None:
+                return None, started
+            _forget_pending()
+            return got, started
+    started = {**device_start(scope or (started or {}).get("scope")), **({"then": then} if then else {})}
+    config.save({**config.load(), PENDING: started})
+    return None, started
+
+
+def _forget_pending() -> None:
+    cfg = config.load()
+    if cfg.pop(PENDING, None) is not None:
+        config.save(cfg)
 
 
 def login(
