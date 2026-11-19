@@ -213,6 +213,7 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `sign_in_pending` | `kennet login --wait` is still waiting for the approval (exit 4): run `next_step` again. |
 | `toolchain_missing`, `test_command_missing` | `kennet codeval` needs the user (exit 6): tell them the message; on their answer run `next_step`. |
 | `environment` | `kennet codeval` needs the user (exit 6): the latest commit ended in this machine's environment (network, memory or disk, time, permissions); that was sent. Tell them the message; once it is fixed, run the same command. |
+| `profile_gone`, `key_mismatch`, `profile_mismatch` | `kennet codeval` acts on these itself: when a run cannot go on here (its filed commit is gone from the clone, or it was started on another machine) it sends a profile of the current tip with `restart` and says in one line that this replaces the earlier measurements. Nothing to do; if one reaches you, tell the user the message. |
 | `unreadable` | `kennet codeval`: git could not read a repository given. Tell the user; nothing was sent for it. |
 | `bad_wait` | `--wait` takes seconds, 0 or more. |
 | `schema_refused` | `kennet codeval` refused to send a value outside its schema, or to follow an instruction outside it (more than a batch can answer, or a blob id below the privacy floor); nothing was sent or run. Tell the user the message. |
