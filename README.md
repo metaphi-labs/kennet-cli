@@ -404,16 +404,17 @@ kept`.
 When it is done, it writes everything that could be sent to `./kennet-codeval/<run>/payload/`:
 
 - `profile.json.gz`: counts and ids for files, folders, commits and authors, and the shape of commit messages, never
-  their text, file names or source; repositories are `[repo:<n>]`, and it is searched for every known identifier as
-  the logs are;
+  their text, file names or source; repositories are `[repo:<n>]`; commit trailers keep only standard keys
+  (`co-authored-by`, `signed-off-by`, `fixes`, …, any other is `[key]`) and their email domains only when they are an
+  AI tool vendor's (any other is `d<n>.invalid`); and it is searched for every known identifier as the logs are;
 - `checks.json.gz`: each build and test (pass or fail, test counts, timings, error class, toolchain versions, the
   commands that ran) and the git blob ids of up to 64 source files, to tell whether the code is already public;
 - `logs.tar.gz`: every log of the run, whole (setup, build, each test run, each edit, the toolchain's versions),
   de-identified on this machine: authors become the profile's author ids; the
   user, home folder, machine name, paths, remotes, emails, phone numbers, street addresses, internal hosts and
   secrets become typed placeholders; a small local model, downloaded once and checked by sha256, finds names the rest
-  miss. The repository's name is replaced in paths and URLs, and as a bare word unless it names one of the
-  repository's own packages. For each past commit measured, `<n>/proof/<id>/` holds `head.txt` (`git rev-parse` of
+  miss. The repository's name is replaced in paths, URLs and host names, and as a bare word unless it names one of
+  the repository's own packages. For each past commit measured, `<n>/proof/<id>/` holds `head.txt` (`git rev-parse` of
   the commit measured) and `numstat.txt` (`git show --numstat` of it, each path replaced by `[file]`, its counts as
   git printed them). The packed bytes are then searched for every known identifier, and if one is left nothing is
   written. Its last member, `kennet-deid.json`, counts what was replaced in the logs and the checks, by kind, and

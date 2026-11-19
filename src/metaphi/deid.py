@@ -355,7 +355,8 @@ class Known:
 
     def segment(self, name: str, placeholder: str) -> None:
         """A name replaced wherever it is a whole segment after a `/` (`/dev/ledgerline`, `host/fin/ledgerline.git`),
-        not where it begins a longer one (`/Ledgerline.Core/`)."""
+        not where it begins a longer one (`/Ledgerline.Core/`), and anywhere inside a URL or host name, joined or not
+        (`ledgerline.halcyon-grid.com`, `.../ledgerline-protos`)."""
         if len(name) >= 3:
             self.segments.setdefault(name.lower(), placeholder)
             self._compiled.clear()
@@ -365,6 +366,20 @@ class Known:
             return None
         names = b"|".join(re.escape(n.encode()) for n in sorted(self.segments, key=len, reverse=True))
         return re.compile(rb"(?i)(?<=/)(" + names + rb")(?:\.git)?(?![A-Za-z0-9_.-])")
+
+    def _joined_pattern(self) -> re.Pattern[bytes]:
+        names = b"|".join(re.escape(n.encode()) for n in sorted(self.segments, key=len, reverse=True))
+        return re.compile(rb"(?i)(?<![A-Za-z0-9])(" + names + rb")(?![A-Za-z0-9])")
+
+    def _addresses(self, data: bytes) -> list[tuple[int, int]]:
+        """Where URLs and host names are in `data`."""
+        spans = [m.span() for m in URL.finditer(data)]
+        spans += [
+            m.span()
+            for m in HOST.finditer(data)
+            if _is_host(m.group(0)) and not any(a <= m.start() < b for a, b in spans)
+        ]
+        return spans
 
     def replace_segments(self, data: bytes, counts: collections.Counter) -> bytes:
         pattern = self._segment_pattern()
@@ -376,6 +391,9 @@ class Known:
             counts[_kind_of(placeholder.encode())] += 1
             return placeholder.encode()
 
+        joined = self._joined_pattern()
+        for a, b in sorted(self._addresses(data), reverse=True):
+            data = data[:a] + joined.sub(sub, data[a:b]) + data[b:]
         return pattern.sub(sub, data)
 
     def left(self, data: bytes) -> collections.Counter:
@@ -384,6 +402,11 @@ class Known:
         got = collections.Counter(_kind_of(to[m.group(0).lower()]) for m in pattern.finditer(data) if not m.group(1))
         if (segments := self._segment_pattern()) is not None:
             got.update(_kind_of(self.segments[m.group(1).decode().lower()].encode()) for m in segments.finditer(data))
+            joined = self._joined_pattern()
+            for a, b in self._addresses(data):
+                got.update(
+                    _kind_of(self.segments[m.group(1).decode().lower()].encode()) for m in joined.finditer(data[a:b])
+                )
         return got
 
 

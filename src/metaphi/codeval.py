@@ -431,6 +431,37 @@ def _commits(
 
 
 TRAILER_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+TRAILER_KEYS = frozenset(
+    [
+        "co-authored-by",
+        "signed-off-by",
+        "reviewed-by",
+        "acked-by",
+        "tested-by",
+        "reported-by",
+        "suggested-by",
+        "helped-by",
+        "requested-by",
+        "reviewed-on",
+        "approved-by",
+        "assisted-by",
+        "generated-by",
+        "original-author",
+        "cherry-picked-from",
+        "change-id",
+        "bug",
+        "issue",
+        "fixes",
+        "closes",
+        "resolves",
+        "refs",
+        "see-also",
+        "link",
+        "cc",
+        "breaking-change",
+    ]
+)
+"""Trailer keys the profile names as they are; any other (a project's own, `project-falcon`) becomes `[key]`."""
 
 
 def _trailers(block: str) -> list[dict[str, str]]:
@@ -440,7 +471,9 @@ def _trailers(block: str) -> list[dict[str, str]]:
         key = key.strip().lower()
         if sep and TRAILER_KEY.fullmatch(key):
             m = EMAIL_DOMAIN.search(value)
-            out.append({"key": key, "domain": m[1].lower().rstrip(".") if m else ""})
+            out.append(
+                {"key": key if key in TRAILER_KEYS else "[key]", "domain": m[1].lower().rstrip(".") if m else ""}
+            )
     return out
 
 

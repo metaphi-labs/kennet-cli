@@ -485,6 +485,8 @@ def test_the_repository_name_is_replaced_in_paths_always_and_bare_unless_declare
     assert _one(declared).text("/w/Ledgerline.Core/x.cs") == "/w/Ledgerline.Core/x.cs", "a longer segment is kept"
     namespace = {**plain, "declared": ["ledgerline-core"]}
     assert _one(namespace).text("ledgerline_core::tests ok") == "ledgerline_core::tests ok"
+    for line in ("pull https://ledgerline.halcyon-grid.com/v2/x", "fetch https://ghcr.io/acme/ledgerline-protos:1.2"):
+        assert "ledgerline" not in _one(declared).text(line), "inside a URL or host it is always replaced"
     common = {**plain, "name": "server", "remotes": [], "declared": []}
     assert _one(common).text("server started at /w/server") == "server started at /w/[repo:0]"
 

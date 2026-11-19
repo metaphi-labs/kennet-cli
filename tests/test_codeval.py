@@ -96,7 +96,7 @@ def test_document_has_no_content(repo):
     for word in SECRET:
         assert word not in sent, word
     r = doc["repos"][0]
-    assert r["name"] == "[repo:0]" and len(r["commits"]) == 3 and "falcon_core" not in sent
+    assert r["name"] == "[repo:0]" and len(r["commits"]) == 3 and "falcon" not in sent
 
 
 def test_compute(repo):
@@ -105,8 +105,7 @@ def test_compute(repo):
     assert (
         c1["parents"] == []
         and c2["parents"] == [1]
-        and c1["trailers"]
-        == [{"key": "signed-off-by", "domain": "d1.invalid"}, {"key": "project-falcon", "domain": ""}]
+        and c1["trailers"] == [{"key": "signed-off-by", "domain": "d1.invalid"}, {"key": "[key]", "domain": ""}]
     )
     assert c2["ticket_refs"] == 1 and c2["fix_word"] and not c1["fix_word"]
     assert (
@@ -1080,7 +1079,7 @@ def test_a_trailer_value_with_carriage_returns_is_one_trailer():
         "Signed-off-by: A <a@x.org>"
     )
     assert codeval._trailers(block) == [
-        {"key": "stacktrace", "domain": ""},
+        {"key": "[key]", "domain": ""},
         {"key": "signed-off-by", "domain": "x.org"},
     ]
 
