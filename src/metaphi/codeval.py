@@ -1212,7 +1212,15 @@ def picks(doc: dict[str, Any], kept: list[dict], sleep: Callable[[float], None] 
             for r, k in zip(doc["repos"], kept, strict=True)
         ],
     }
-    got = _call("POST", "/codeval/picks", sleep, json=body)
+    try:
+        got = _call("POST", "/codeval/picks", sleep, json=body)
+    except errors.MetaphiError as e:
+        if "not the one its commits were picked from" in str(e):
+            e.next_step = (
+                "its history was rewritten since the commits were picked; check out the history first measured "
+                "(before the force-push or rebase) and run the same command again"
+            )
+        raise
     repos = got.get("repos")
     if (
         not isinstance(got.get("pick_id"), str)

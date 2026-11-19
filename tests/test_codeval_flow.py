@@ -271,3 +271,18 @@ def test_linux_keeps_awake_with_systemd_inhibit_when_there(monkeypatch):
     command, kw = calls[0]
     assert command[0] == "/usr/bin/systemd-inhibit" and "--what=sleep:idle" in command and kw["start_new_session"]
     assert command[-1] == "while kill -0 42 2>/dev/null; do sleep 30; done"
+
+
+@respx.mock
+def test_a_rewritten_history_says_what_to_do(made, capsys):
+    got = _server()
+    message = "repository 1: its history is not the one its commits were picked from"
+    got["picks"].mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"type": "invalid_request_error", "code": "history_rewritten", "message": message}},
+        )
+    )
+    assert cli.main(["codeval", str(made), "--json"]) == cli.FAILED
+    err = json.loads(capsys.readouterr().out)["error"]
+    assert "force-push or rebase" in err["next_step"] and _left(got) == ["/v1/kennet/codeval/picks"]
