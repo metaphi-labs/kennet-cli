@@ -35,9 +35,13 @@ LOGS_PART = 64 << 20  # logs past this go in parts of exactly this many bytes, t
 LOGS_PARTS = 32
 MAX_LOGS = LOGS_PART * LOGS_PARTS  # 2 GiB gzipped: the most one run sends
 LOGS_DEID = "kennet-deid.json"  # the tar's last member: what was replaced, by kind
+PICKED_ON = (
+    "commit ids and times, each commit's counts (source files, lines, whether it touched tests, its build era) and "
+    "a sha256 of each repository's root commit ids"
+)
 NOTICE = (
-    "Runs on this machine. Before the owner says yes at a terminal, only commit ids and times leave it, to pick the"
-    " commits to test."
+    f"Runs on this machine. Before the owner says yes at a terminal, only {PICKED_ON} leave it, to pick the commits "
+    "to test."
 )
 MAX_BLOB = 2_000_000
 
@@ -913,6 +917,12 @@ RUNS = 3
 """Test runs at each past commit, after the change: what tells a flaky test from a broken one."""
 
 
+def shares_state(services: object, plan: codebase_checks.Plan) -> bool:
+    """Whether a repository's units would share state if run at once: the same service containers, or (a seller's
+    own command on this machine) the same tool caches and home directory."""
+    return services is not None or plan.test is not None
+
+
 def checked(
     kept: list[dict],
     picks: list[list[int]],
@@ -990,6 +1000,7 @@ def checked(
                     say(f"\u2717 {local['name']}'s services did not start ({logs / 'services.log'})")
                 elif services.shared:
                     codebase_setup.NETWORK[:] = ["--network", f"container:{services.shared}"]
+            mine = dataclasses.replace(mine, alone=shares_state(services, plan))
             try:
                 if plan.test is None:
                     say(f"Setting up {local['name']}\u2026")
@@ -1100,12 +1111,25 @@ def _undetected(local: dict, logs: Path, box: str | None) -> codebase_checks.Stu
     return codebase_checks.Stuck(said, code="test_command_missing", next_step=step)
 
 
+COMMAND_MOST = 4096  # the service's limit on a command, in characters
+TOOLCHAIN_MOST = 256  # and on a toolchain's version line
+CUT = " [cut]"
+
+
+def capped(text: str | None, most: int) -> str | None:
+    """`text` within the service's limit, cut with a marker that says so: what the owner says yes to is never
+    refused after."""
+    if not text or len(text) <= most:
+        return text or None
+    return text[: most - len(CUT)] + CUT
+
+
 def _commands(found: tuple | None, given: str | None) -> dict[str, str | None]:
     """The commands that ran, as they will be shown before sending."""
     if given is not None:
-        return {"setup": None, "build": None, "test": given}
+        return {"setup": None, "build": None, "test": capped(given, COMMAND_MOST)}
     recipe = found[0] if found else None
-    return {k: getattr(recipe, k, None) for k in ("setup", "build", "test")}
+    return {k: capped(getattr(recipe, k, None), COMMAND_MOST) for k in ("setup", "build", "test")}
 
 
 TOOLS = ("java", "mvn", "gradle", "go", "node", "npm", "python3", "cargo", "rustc", "gcc", "cmake", "dotnet", "make")
@@ -1116,7 +1140,7 @@ def _toolchain(found: tuple | None, given: str | None, log: Path) -> dict[str, s
     container, its image."""
     recipe = found[0] if found else None
     if recipe is not None and recipe.image and found[1]:
-        return {"image": recipe.image}
+        return {"image": capped(recipe.image, TOOLCHAIN_MOST)}
     words = set(re.findall(r"[\w.+-]+", " ".join(filter(None, _commands(found, given).values()))))
     out = {}
     for tool in TOOLS:
@@ -1138,7 +1162,7 @@ def _toolchain(found: tuple | None, given: str | None, log: Path) -> dict[str, s
             f.write(f"$ {tool} {'-version' if tool == 'java' else '--version'}\n{said}\n")
         line = next((x.strip() for x in said.splitlines() if x.strip()), "")
         if line:
-            out[tool] = line
+            out[tool] = capped(line, TOOLCHAIN_MOST)
     return out
 
 
@@ -1218,7 +1242,8 @@ def history(repo: dict, local: dict) -> list[dict[str, Any]]:
 
 
 def picks(doc: dict[str, Any], kept: list[dict], sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Ask which past commits to test. The one call before the owner sends: ids and times only."""
+    """Ask which past commits to test. The one call before the owner sends: root ids hashed, then commit ids, times
+    and counts, no names."""
     body = {
         "tool_version": __version__,
         "repos": [
@@ -1353,9 +1378,9 @@ def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[
         )
     logs_sha = sha256_of(logs)
     bundle = bundle_sha256(hashlib.sha256(checks).hexdigest(), logs_sha)
-    profile = packed({**doc, "pick_id": pick_id, "bundle_sha256": bundle})
+    profile, profile_said = profile_packed({**doc, "pick_id": pick_id, "bundle_sha256": bundle}, kept)
     files = []
-    for name, body, said in ((PROFILE, profile, None), (CHECKS, checks, checks_said)):
+    for name, body, said in ((PROFILE, profile, profile_said), (CHECKS, checks, checks_said)):
         (out / name).write_bytes(body)
         files.append(
             {
@@ -1365,7 +1390,15 @@ def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[
                 **({"deidentified": said["replaced"]} if said else {}),
             }
         )
-    files.append({"file": LOGS, "bytes": size, "sha256": logs_sha, "deidentified": logs_said["replaced"]})
+    files.append(
+        {
+            "file": LOGS,
+            "bytes": size,
+            "sha256": logs_sha,
+            "deidentified": logs_said["replaced"],
+            "unreadable": logs_said["unreadable"],
+        }
+    )
     manifest = {
         "pick_id": pick_id,
         "bundle_sha256": bundle,
@@ -1419,6 +1452,7 @@ def _logs_tar(root: Path, pick_id: str, kept: list[dict], packed_file: IO[bytes]
     scrubbers, said = _scrubbers(kept)
     left: collections.Counter = collections.Counter()
     counts: collections.Counter = collections.Counter()
+    unreadable: list[dict[str, str]] = []  # logs that could not be read: named, never skipped in silence
     with tarfile.open(fileobj=packed_file, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
 
         def add(name: str, size: int, body: IO[bytes]) -> None:
@@ -1438,7 +1472,8 @@ def _logs_tar(root: Path, pick_id: str, kept: list[dict], packed_file: IO[bytes]
                 with tempfile.TemporaryFile() as clean:
                     try:
                         _scrubbed(f, scrub, clean, left)
-                    except OSError:
+                    except OSError as e:
+                        unreadable.append({"file": name, "error": type(e).__name__})
                         continue
                     size = clean.tell()
                     clean.seek(0)
@@ -1447,10 +1482,40 @@ def _logs_tar(root: Path, pick_id: str, kept: list[dict], packed_file: IO[bytes]
         for scrub in scrubbers:
             counts.update(scrub.counts)
         replaced = deid.summary(counts, said)
-        told = {"logs": replaced["replaced"], "checks": (checks or {}).get("replaced", {}), "model_pass": said}
+        replaced["unreadable"] = unreadable
+        told = {
+            "logs": replaced["replaced"],
+            "checks": (checks or {}).get("replaced", {}),
+            "model_pass": said,
+            "unreadable": unreadable,
+        }
         body = json.dumps(told, sort_keys=True).encode()
         add(LOGS_DEID, len(body), io.BytesIO(body))
     return replaced
+
+
+def profile_packed(doc: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
+    """The profile with every name in it pseudonymized as the logs are (repositories as `[repo:<n>]`, trailer
+    domains as `[domain:<n>]` or `[host]`), then searched for every known identifier: `deid.Unsafe` if one is left."""
+    scrubbers = [deid.Scrubber(k) for k in deid.known(kept)]
+    counts: collections.Counter = collections.Counter()
+    repos = []
+    for n, repo in enumerate(doc.get("repos") or []):
+        scrub = scrubbers[n] if n < len(scrubbers) else deid.Scrubber(deid.Known())
+        commits = []
+        for c in repo.get("commits") or []:
+            trailers = [
+                {**t, "domain": scrub.text(t["domain"])} if t.get("domain") else t for t in c.get("trailers") or []
+            ]
+            commits.append({**c, "trailers": trailers} if c.get("trailers") else c)
+        counts["repo"] += 1
+        repos.append({**repo, "name": f"[repo:{n}]", "commits": commits})
+        counts.update(scrub.counts)
+    skipped = [{**k, "name": "[repo]"} for k in doc.get("skipped") or []]
+    counts["repo"] += len(skipped)
+    body = packed({**doc, "repos": repos, "skipped": skipped})
+    _unsafe(gzip.decompress(body), scrubbers, "the profile")
+    return body, deid.summary(counts, "not needed (no free text)")
 
 
 def checks_packed(report: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:

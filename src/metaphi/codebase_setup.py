@@ -129,30 +129,43 @@ def allowed(env: dict[str, str]) -> dict[str, str]:
 
 
 @functools.cache
-def limits(engine: str) -> tuple[str, ...]:
+def _info(engine: str) -> tuple[int | None, int | None]:
+    """The engine's CPUs and memory in bytes, as `<engine> info` reports them (a VM's on macOS, not the host's)."""
     try:
         got = subprocess.run([engine, "info", "--format", "{{json .}}"], capture_output=True, timeout=60, check=False)
         info = json.loads(got.stdout or b"{}")
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return ()
+        return None, None
     host = info.get("host") if isinstance(info.get("host"), dict) else {}
     cpus, memory = info.get("NCPU") or host.get("cpus"), info.get("MemTotal") or host.get("memTotal")
+    return (cpus if isinstance(cpus, int) else None), (memory if isinstance(memory, int) else None)
+
+
+def memory_budget(engine: str) -> int | None:
+    """What the containers of a run may hold together: three quarters of the engine's memory."""
+    memory = _info(engine)[1]
+    return memory * 3 // 4 if memory and memory > 1 << 30 else None
+
+
+def limits(engine: str, memory: int | None = None) -> tuple[str, ...]:
+    """CPU and memory limits for one container: all but one CPU, and `memory` bytes, or the whole budget."""
+    cpus = _info(engine)[0]
     out = []
-    if isinstance(cpus, int) and cpus > 1:
+    if cpus and cpus > 1:
         out.append(f"--cpus={cpus - 1}")
-    if isinstance(memory, int) and memory > 1 << 30:
-        out.append(f"--memory={memory * 3 // 4}")
+    if held := memory or memory_budget(engine):
+        out.append(f"--memory={held}")
     return tuple(out)
 
 
-def hardened(engine: str) -> list[str]:
+def hardened(engine: str, memory: int | None = None) -> list[str]:
     return [
         "--init",
         "--cap-drop=ALL",
         *(f"--cap-add={c}" for c in CAPS),
         "--security-opt=no-new-privileges",
         f"--pids-limit={PIDS}",
-        *limits(engine),
+        *limits(engine, memory),
     ]
 
 
@@ -169,7 +182,14 @@ def engine() -> str | None:
 
 class Shell:
     def __init__(
-        self, engine: str | None, image: str | None, src: Path, junit: Path, jobs: int = 0, cache: Path | None = None
+        self,
+        engine: str | None,
+        image: str | None,
+        src: Path,
+        junit: Path,
+        jobs: int = 0,
+        cache: Path | None = None,
+        memory: int | None = None,
     ):
         self.engine, self.image, self.src, self.junit, self.name = engine, image, src, junit, None
         self.extra: dict[str, str] = {}
@@ -184,7 +204,7 @@ class Shell:
                     "-d",
                     "--name",
                     name,
-                    *hardened(engine),
+                    *hardened(engine, memory),
                     "-v",
                     f"{src}:/work",
                     "-v",

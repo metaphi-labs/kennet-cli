@@ -150,12 +150,18 @@ def test_at_a_terminal_the_owner_sees_exactly_what_is_sent_and_yes_sends_those_b
     monkeypatch.setattr("builtins.input", lambda q: asked.append(q) or "n")
     assert cli.main(["codeval", str(made)]) == 0
     out = capsys.readouterr().out
-    assert asked == [cli.SEND_ASK] and "Nothing sent" in out and _left(got) == ["/v1/kennet/codeval/picks"]
+    assert asked == [cli.SEND_ASK_UNMODELLED] and "Nothing sent" in out and _left(got) == ["/v1/kennet/codeval/picks"]
     manifest = json.loads((_home(tmp_path) / codeval.PAYLOAD / "manifest.json").read_text())
     assert f"Bundle sha256: {manifest['bundle_sha256']}" in out and "Commands that ran:" in out
     assert "  falcon_made: test: make test\n" in out and "de-identified:" in out
 
     monkeypatch.setattr("builtins.input", lambda q: "y")
+    assert cli.main(["codeval", str(made)]) == 0
+    out = capsys.readouterr().out
+    assert "the model pass that finds people's names did not run" in out and "Nothing sent" in out
+    assert _left(got) == ["/v1/kennet/codeval/picks"], "with no model pass, y sends nothing"
+
+    monkeypatch.setattr("builtins.input", lambda q: cli.SEND_UNMODELLED)
     assert cli.main(["codeval", str(made)]) == 0
     assert capsys.readouterr().out.rstrip().endswith(cli.SENT)
     payload = _home(tmp_path) / codeval.PAYLOAD
@@ -175,7 +181,10 @@ def test_at_a_terminal_the_owner_sees_exactly_what_is_sent_and_yes_sends_those_b
             "logs",
             "checks",
             "model_pass",
+            "unreadable",
         }
+    profile = json.loads(gzip.decompress(got["profile"].calls[-1].request.content))
+    assert [r["name"] for r in profile["repos"]] == ["[repo:0]"] and "falcon" not in json.dumps(profile)
 
     assert cli.main(["codeval", str(made)]) == 0
     assert "Already sent, on " in capsys.readouterr().out and got["profile"].call_count == 1
@@ -185,7 +194,7 @@ def test_at_a_terminal_the_owner_sees_exactly_what_is_sent_and_yes_sends_those_b
 def test_a_send_cut_short_goes_on_where_it_stopped(made, capsys, monkeypatch):
     got = _server(checks=503)
     monkeypatch.setattr(cli, "_interactive", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda q: "y")
+    monkeypatch.setattr("builtins.input", lambda q: cli.SEND_UNMODELLED)
     monkeypatch.setattr(codeval.time, "sleep", lambda s: None)
     assert cli.main(["codeval", str(made)]) != 0
     assert got["profile"].call_count == 1 and not got["logs"].called
@@ -204,7 +213,7 @@ def _measured(made, tmp_path, monkeypatch, capsys, parts: int) -> bytes:
     monkeypatch.setattr(codeval, "LOGS_PART", -(-len(logs) // parts))
     assert -(-len(logs) // codeval.LOGS_PART) == parts
     monkeypatch.setattr(cli, "_interactive", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda q: "y")
+    monkeypatch.setattr("builtins.input", lambda q: cli.SEND_UNMODELLED)
     return logs
 
 

@@ -16,6 +16,7 @@ Before anything is sent, the packed bytes are searched for every known identifie
 from __future__ import annotations
 
 import collections
+import functools
 import getpass
 import json
 import math
@@ -47,19 +48,45 @@ SECRETS = (
     ("api_key", re.compile(rb"\bsk-[A-Za-z0-9_-]{20,}")),
     ("jwt", re.compile(rb"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("url_credentials", re.compile(rb"(?<=://)[^/\s:@\[]+:[^/\s@\[]+(?=@)")),
+    ("bearer", re.compile(rb"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{16,}")),
     (
         "assignment",
         re.compile(
-            rb"(?i)((?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH)[\"']?\s*[=:]\s*"
-            rb"[\"']?)(?!\[[a-z_]+(?::[A-Za-z0-9_]+)?\])[^\s\"',;]{4,}"
+            rb"(?i)((?:TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|(?:API|ACCESS|SECRET|PRIVATE|SIGNING)[_-]?KEY)"
+            rb"[\"']?\s*[=:]\s*[\"']?)(?!\[[a-z_]+(?::[A-Za-z0-9_]+)?\])[^\s\"',;]{4,}"
         ),
     ),
+    (
+        "keyword_token",
+        re.compile(
+            rb"(?i)(\b(?:token|bearer|auth|authorization|api[_-]?key|secret|password)\b[\s\"']+)[a-z0-9]{32,}\b"
+        ),
+    ),
+    ("ssn", re.compile(rb"(?<![\w-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\w-])")),
 )
 """Secret shapes, after gitleaks' rules and the keyword detector of detect-secrets. Each match becomes
 `[redacted:<kind>]`; a keyword assignment keeps its name."""
 
-NOT_A_VALUE = re.compile(rb"[a-z]+|[A-Z][a-z]+|(?i:true|false|null|none)|\$\{?\w+\}?|<[^>]*>?|\*+|%s|\{\{.*")
-"""What follows `password=` or `token:` and is no secret: a plain word, a variable, a placeholder or a mask."""
+NOT_A_VALUE = re.compile(
+    rb"(?i:true|false|null|none|nil|undefined|required|optional|redacted|changeme|placeholder|example|xxx+|\.\.\.)"
+    rb"|\$\{?\w+\}?|<[^>]*>?|\*+|%s|\{\{.*|\(.*|\[.*"
+)
+"""What follows `password=` or `token:` and is no secret: an obvious placeholder, a variable or a mask. Any other
+value is taken for a secret, plain words included (`password: correcthorse`)."""
+
+CARD = re.compile(rb"(?<![\w.-])(?:[3-6]\d{3}(?:[ -]?\d{4}){3}|3[47]\d{2}[ -]?\d{6}[ -]?\d{5})(?![\w-]|\.\d)")
+"""A payment card number, 15 or 16 digits, kept only when its Luhn check holds."""
+
+
+def _luhn(digits: bytes) -> bool:
+    total = 0
+    for i, c in enumerate(reversed(digits)):
+        d = c - 48
+        if i % 2:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
+
 
 ENTROPY_MIN_CHARS = 32
 ENTROPY_BITS = 4.5
@@ -258,6 +285,11 @@ def _public(host: str) -> bool:
     return any(host == h or host.endswith("." + h) for h in PUBLIC_HOSTS) or host.startswith("[")
 
 
+PLACEHOLDER_BYTES = rb"\[(?:redacted:)?[a-z_]+(?::[A-Za-z0-9_]+)?\]"
+"""What de-identification writes: a known value equal to a placeholder's kind (`author@acme.io` gives the word
+`author`) is never found inside one."""
+
+
 @dataclass
 class Known:
     """Identifiers known before the logs are read, each with the placeholder it becomes.
@@ -294,7 +326,8 @@ class Known:
 
             self._compiled[late] = (
                 re.compile(
-                    rb"(?i)(?:(?:" + alts(loose) + rb")|(?<![A-Za-z0-9_])(?:" + alts(bounded) + rb"))(?![A-Za-z0-9_])"
+                    rb"(?i)((?-i:" + PLACEHOLDER_BYTES + rb"))"
+                    rb"|(?:(?:" + alts(loose) + rb")|(?<![A-Za-z0-9_])(?:" + alts(bounded) + rb"))(?![A-Za-z0-9_])"
                 ),
                 to,
             )
@@ -304,6 +337,8 @@ class Known:
         pattern, to = self._pattern(late)
 
         def sub(m: re.Match[bytes]) -> bytes:
+            if m.group(1):
+                return m.group(0)
             placeholder = to[m.group(0).lower()]
             counts[_kind_of(placeholder)] += 1
             return placeholder
@@ -313,7 +348,7 @@ class Known:
     def left(self, data: bytes) -> collections.Counter:
         """Known identifiers still in `data`, counted by kind."""
         pattern, to = self._pattern(None)
-        return collections.Counter(_kind_of(to[m.group(0).lower()]) for m in pattern.finditer(data))
+        return collections.Counter(_kind_of(to[m.group(0).lower()]) for m in pattern.finditer(data) if not m.group(1))
 
 
 COMMON_WORDS = frozenset(
@@ -445,6 +480,46 @@ def name_forms(name: str) -> set[str]:
     return {" ".join(f.split()) for f in forms if f.strip()}
 
 
+NAME_PART_MIN = 4
+DICTIONARY = Path("/usr/share/dict/words")
+
+
+@functools.cache
+def _dictionary() -> frozenset[str]:
+    """Lower-case English words, where the system has a word list: a given name that is also a word (`Mark`,
+    `Grace`, `Hunter`) is not replaced alone, or ordinary text would be rewritten."""
+    try:
+        return frozenset(w.strip().lower() for w in DICTIONARY.read_text(errors="replace").splitlines())
+    except OSError:
+        return frozenset()
+
+
+def name_parts(name: str) -> set[str]:
+    """The given names and surnames of a person's name, each standing alone (`Reviewed by Natarajan`, `ping priya`):
+    4 letters or more, and neither a common word nor a dictionary one."""
+    out = set()
+    for word in re.split(r"[\s,]+", name):
+        word = word.strip(".")
+        if (
+            len(word) >= NAME_PART_MIN
+            and word.lower() not in PARTICLES
+            and word.lower() not in COMMON_WORDS
+            and word.lower() not in _dictionary()
+            and not re.search(r"\d", word)
+        ):
+            out |= {word, _folded(word)}
+            for mark in ("'", "’"):
+                if mark in word:
+                    out |= {word.replace(mark, other) for other in APOSTROPHES}
+    words = [_folded(w.strip(".")) for w in re.split(r"[\s,]+", name) if w and w.lower() not in PARTICLES]
+    if len(words) >= 2 and all(w.isalpha() for w in (words[0], words[-1])):
+        first, last = words[0], words[-1]
+        for joined in (first[0] + last, first + last, first + last[0], last + first[0]):
+            if len(joined) >= NAME_PART_MIN + 1:
+                out.add(joined)
+    return out
+
+
 def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
     """The known identifiers for each repository read by `codeval.profiled`, in its order. Each repository's
     authors become `[author:<id>]` with the profile's ids for that repository; what belongs to the machine is shared."""
@@ -485,6 +560,8 @@ def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
             if i is not None and "@" not in name:
                 for form in name_forms(name):
                     k.add(form, f"[author:{i}]", word=" " not in form)
+                for part in name_parts(name):
+                    k.add(part, f"[author:{i}]", word=True)
         urls = set(repo.get("remotes") or [])
         given = repo.get("given") or ""
         if re.match(r"^(?:[\w.+-]+://|[\w.-]+@[\w.-]+:)", given):
@@ -541,6 +618,15 @@ def _secrets(data: bytes, counts: collections.Counter) -> bytes:
             return (m.group(1) if m.re.groups else b"") + tag
 
         data = pattern.sub(sub, data)
+
+    def card(m: re.Match[bytes]) -> bytes:
+        digits = re.sub(rb"\D", b"", m.group(0))
+        if len(set(digits)) < 2 or not _luhn(digits):
+            return m.group(0)
+        counts["card"] += 1
+        return b"[redacted:card]"
+
+    data = CARD.sub(card, data)
 
     def high(m: re.Match[bytes]) -> bytes:
         token = m.group(0)
@@ -731,20 +817,55 @@ def _unescaped(line: str) -> tuple[str, list[int]]:
 PLACEHOLDER = re.compile(r"\[[a-z_]+(?::[A-Za-z0-9_]+)?\]")
 
 
+MODEL_WORDS = 256
+MODEL_OVERLAP = 32
+WORDS = re.compile(r"\w+(?:[-_]\w+)*|\S")
+MODEL_EVERY_LINE = False
+"""Whether the model reads every line with a letter in it, or only those `CANDIDATE` finds. Measured on the
+labelled logs: every line costs six times the model time (about a minute a MiB on a laptop) and catches no name the
+candidate lines miss, at lower precision; the known authors' names and their parts are found without the model."""
+
+
+def _windows(line: str) -> list[tuple[int, int]]:
+    """A line as the model reads it: whole when short, else windows of MODEL_WORDS words that overlap by
+    MODEL_OVERLAP, so a name across a window's edge is still read whole in one of them."""
+    spans = [m.span() for m in WORDS.finditer(line)]
+    if len(spans) <= MODEL_WORDS:
+        return [(0, len(line))]
+    out, step = [], MODEL_WORDS - MODEL_OVERLAP
+    for i in range(0, len(spans), step):
+        part = spans[i : i + MODEL_WORDS]
+        out.append((part[0][0], part[-1][1]))
+        if i + MODEL_WORDS >= len(spans):
+            break
+    return out
+
+
+def _read(line: str) -> bool:
+    bare = PLACEHOLDER.sub(" ", line)
+    return bool(re.search(r"[^\W\d_]{2}", bare)) if MODEL_EVERY_LINE else bool(CANDIDATE.search(bare))
+
+
 def _modelled(data: bytes, model: Model, counts: collections.Counter) -> bytes:
     text = data.decode("utf-8", "surrogateescape")
     lines = text.split("\n")
     wanted: dict[str, list[int]] = {}
     for i, line in enumerate(lines):
-        if len(line) <= 2000 and CANDIDATE.search(PLACEHOLDER.sub(" ", line)):
+        if _read(line):
             wanted.setdefault(line, []).append(i)
     if not wanted:
         return data
     unique = list(wanted)
-    shown = [_unescaped(line) for line in unique]
-    for line, (_read, where), spans in zip(unique, shown, model([r for r, _w in shown]), strict=True):
+    pieces: list[tuple[int, int, int]] = []  # (line, start, end) of each window read
+    for n, line in enumerate(unique):
+        pieces += [(n, a, b) for a, b in _windows(line)]
+    shown = [_unescaped(unique[n][a:b]) for n, a, b in pieces]
+    found: dict[int, list[tuple[int, int, str]]] = collections.defaultdict(list)
+    for (n, a, _b), (_read_, where), spans in zip(pieces, shown, model([r for r, _w in shown]), strict=True):
+        found[n] += [(a + where[s], a + where[e], k) for s, e, k in spans]
+    for n, line in enumerate(unique):
         out, at = [], 0
-        for start, end, kind in sorted((where[a], where[b], k) for a, b, k in spans):
+        for start, end, kind in sorted(set(found[n])):
             if start < at or PLACEHOLDER.fullmatch(line[start:end]) or PLACEHOLDER.search(line[start:end]):
                 continue
             out += [line[at:start], f"[{kind}]"]

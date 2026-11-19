@@ -152,5 +152,11 @@ def engine(tmp_path, monkeypatch):
     path.write_text(f"#!{sys.executable}\nSTATE = {str(state)!r}\n" + FAKE_ENGINE)
     path.chmod(0o755)
     monkeypatch.setattr(codebase_setup, "engine", lambda: str(path))
-    codebase_setup.limits.cache_clear()
+    codebase_setup._info.cache_clear()
     return path
+
+
+@pytest.fixture(autouse=True)
+def _writes_under_tmp(tmp_path, monkeypatch):
+    """Tests write only under tmp_path: a run's default folders are relative to the working directory."""
+    monkeypatch.chdir(tmp_path)

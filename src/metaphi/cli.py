@@ -343,6 +343,8 @@ def cmd_twin(a: argparse.Namespace) -> None:
 
 CODEVAL_HOME = "kennet-codeval"
 SEND_ASK = "Send to Metaphi AI for commercial diligence? [y/N] "
+SEND_UNMODELLED = "send without model"
+SEND_ASK_UNMODELLED = f"Type `{SEND_UNMODELLED}` to send anyway; anything else sends nothing: "
 SENT = "Sent. Metaphi AI will reach out if there is a commercial fit."
 
 
@@ -424,13 +426,28 @@ def _send_screen(home: Path, manifest: dict) -> list[str]:
             else ""
         )
         lines.append(f"  {f['file']:<16} {_size(f['bytes']):>8}  sha256 {f['sha256'][:16]}{said}")
+        for gone in f.get("unreadable") or []:
+            lines.append(f"    not readable, so not in it: {gone['file']} ({gone['error']})")
     lines.append(f"  Model pass: {manifest['model_pass']}")
+    if not _modelled(manifest):
+        lines += [
+            "",
+            (
+                "  WARNING: the model pass that finds people's names did not run. Names of people who are not "
+                "authors of these repositories may be left in the logs."
+            ),
+            "",
+        ]
     lines.append("Commands that ran:")
     for c in manifest["commands"]:
         ran = [f"{k}: {c[k]}" for k in ("setup", "build", "test") if c.get(k) not in (None, "", "true")]
         lines.append(f"  {c['repo']}: " + ("; ".join(ran) or "none"))
     lines.append(f"Bundle sha256: {manifest['bundle_sha256']}")
     return lines
+
+
+def _modelled(manifest: dict) -> bool:
+    return str(manifest.get("model_pass", "")).startswith("ran")
 
 
 def _payload(home: Path) -> dict | None:
@@ -600,7 +617,13 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
             codeval.payload(home, doc, report, kept, picked["pick_id"])
             shutil.rmtree(home / "cache", ignore_errors=True)
             held = _payload(home)
-            assert held is not None
+            if held is None:
+                raise errors.MetaphiError(
+                    f"the payload written to {home / codeval.PAYLOAD} does not match its manifest",
+                    code="payload_changed",
+                    next_step=f"remove {home / codeval.PAYLOAD} and run `{_codeval_line(a)}` again; finished "
+                    "commits are kept",
+                )
             for local, got in zip(kept, report["repos"], strict=True):
                 say(_result_line(local["name"], got))
     manifest = held
@@ -614,7 +637,7 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
             "",
             *screen,
             "",
-            "Only commit ids and times have left this machine. To send, the owner runs in a terminal: "
+            f"Only {codeval.PICKED_ON} have left this machine. To send, the owner runs in a terminal: "
             + _codeval_line(a),
         )
         return NEEDS_PERSON
@@ -622,13 +645,15 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
         print(f"Going on with the send already said yes to: bundle sha256 {manifest['bundle_sha256']}, unchanged.")
     else:
         print("\n".join(["", *screen, ""]))
+        modelled = _modelled(manifest)
         try:
-            said = input(SEND_ASK).strip().lower()
+            said = input(SEND_ASK if modelled else SEND_ASK_UNMODELLED).strip().lower()
         except EOFError:
             said = ""
-        if said not in ("y", "yes"):
+        if (said not in ("y", "yes")) if modelled else (said != SEND_UNMODELLED):
             print(f"Nothing sent. The payload stays in {home / codeval.PAYLOAD}")
             return 0
+    codeval_runs.awake(os.getpid())
     _upload(home, manifest, say)
     print(SENT)
     return 0
@@ -1539,7 +1564,8 @@ exit status: 0 done, 1 failed, 2 usage, 3 sign-in or key needed, 4 try the same 
 """
 
 CODEVAL_EPILOG = """\
-Measures on this machine; the only call before sending asks which past commits to test (commit ids and times).
+Measures on this machine; the only call before sending asks which past commits to test (commit ids, times and
+per-commit counts, and a hash of the root commit ids).
 Run it again and it goes on where it stopped. When it is done, the same command at a terminal shows exactly what
 would be sent and asks the owner; nothing is sent any other way.
 

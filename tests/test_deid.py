@@ -174,6 +174,7 @@ def test_logs_are_de_identified_and_counted(tmp_path, seller):
     assert cleared == {
         "replaced": {"author": 1, "home": 1, "hostname": 1, "ipv4": 1},
         "model": "not run (KENNET_DEID_MODEL=off)",
+        "unreadable": [],
     }
 
 
@@ -342,3 +343,130 @@ def test_the_model_reads_escaped_apostrophes_and_its_spans_map_back():
     scrub = deid.Scrubber(deid.Known(), model)
     assert scrub.text("for Siobhan O&#39;Connor> but was Ann Lee") == "for [name]> but was Ann Lee"
     assert scrub.text("for Siobhan O&apos;Connor and Siobhan O'Connor") == "for [name] and [name]"
+
+
+def _one(kept: dict) -> deid.Scrubber:
+    (k,) = deid.known([kept])
+    return deid.Scrubber(k)
+
+
+PRIYA = {
+    "name": "core",
+    "path": "/w/core",
+    "authors": {"priya.natarajan@acme-corp.com": 3},
+    "domains": {"acme-corp.com": 1},
+    "people": [["Priya Natarajan", "priya.natarajan@acme-corp.com"]],
+    "remotes": [],
+}
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Reviewed by Natarajan", "Priya fixed it", "assigned to priya", "PNatarajan wrote this", "ping pnatarajan"],
+)
+def test_an_authors_given_name_or_surname_alone_is_their_author_id(line):
+    scrub = _one(PRIYA)
+    said = scrub.text(line)
+    assert "[author:3]" in said and not re.search("(?i)priya|natarajan", said)
+    assert not scrub.known.left(said.encode())
+    assert scrub.known.left(line.encode()), "the fail-closed check finds it too"
+
+
+def test_a_name_part_that_is_a_word_is_left_alone():
+    scrub = _one({**PRIYA, "people": [["Mark Natarajan", "priya.natarajan@acme-corp.com"]]})
+    if not deid._dictionary():
+        pytest.skip("no word list on this machine")
+    assert scrub.text("mark the build as done") == "mark the build as done"
+
+
+def test_a_known_value_that_is_a_placeholders_kind_does_not_trip_the_check():
+    scrub = _one(
+        {
+            "name": "core",
+            "path": "/w/core",
+            "authors": {"author@acme.io": 1, "kim@acme.io": 2},
+            "domains": {"acme.io": 1},
+            "people": [["Kim Lee", "kim@acme.io"]],
+            "remotes": ["git@github.com:email/core.git"],
+        }
+    )
+    said = scrub.bytes(b"commit by author@acme.io and Kim Lee, mail kim@acme.io url https://intra.acme.io/x x@y.com\n")
+    assert said == b"commit by [author:1] and [author:2], mail [author:2] url [url] [email]\n"
+    assert not scrub.known.left(said)
+
+
+@pytest.mark.parametrize(
+    ("line", "said"),
+    [
+        ("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345", "Authorization: Bearer [redacted:bearer]"),
+        ("password: correcthorse", "password: [redacted:assignment]"),
+        ("DB_PASSWORD=Summer", "DB_PASSWORD=[redacted:assignment]"),
+        ("api_key=hunter22", "api_key=[redacted:assignment]"),
+        ("password: ${DB_PASSWORD}", "password: ${DB_PASSWORD}"),
+        ("password=<required>", "password=<required>"),
+        ("token abcdefghijklmnopqrstuvwxyz0123456789", "token [redacted:keyword_token]"),
+        ("card 4111 1111 1111 1111 ok", "card [redacted:card] ok"),
+        ("amex 378282246310005", "amex [redacted:card]"),
+        ("not a card 4111 1111 1111 1112", "not a card 4111 1111 1111 1112"),
+        ("ssn 123-45-6789", "ssn [redacted:ssn]"),
+    ],
+)
+def test_secrets_by_shape(line, said):
+    assert _one(PRIYA).text(line) == said
+
+
+def test_a_long_line_is_read_by_the_model_in_overlapping_windows():
+    seen: list[str] = []
+
+    def model(texts):
+        seen.extend(texts)
+        return [[(m.start(), m.end(), "name")] if (m := re.search("Jane Doe", t)) else [] for t in texts]
+
+    words = ["word"] * (deid.MODEL_WORDS * 2) + ["Reviewed", "by", "Jane", "Doe"] + ["word"] * 50
+    said = deid.Scrubber(deid.Known(), model).text(" ".join(words))
+    assert len(seen) >= 3 and all(len(deid.WORDS.findall(t)) <= deid.MODEL_WORDS for t in seen)
+    assert "Jane" not in said and "Reviewed by [name] word" in said
+
+
+def test_the_profile_names_no_repository_or_domain_and_is_checked(tmp_path, seller):
+    doc = {
+        "repos": [
+            {
+                "name": "falcon_core",
+                "commits": [{"commit": 0, "trailers": [{"key": "signed-off-by", "domain": "acme-corp.com"}]}],
+            }
+        ],
+        "skipped": [{"name": "falcon_secret", "reason": "no commits"}],
+    }
+    body, said = codeval.profile_packed(doc, [SELLER])
+    text = gzip.decompress(body).decode()
+    assert "falcon" not in text and "acme-corp" not in text
+    got = json.loads(text)
+    assert got["repos"][0]["name"] == "[repo:0]" and got["skipped"][0]["name"] == "[repo]"
+    assert said["replaced"]["repo"] == 2
+    with pytest.raises(deid.Unsafe):
+        codeval.profile_packed({"repos": [{"name": "x", "note": "mail sam.seller@acme-corp.com"}]}, [SELLER])
+
+
+def test_a_log_that_cannot_be_read_is_named_not_skipped(tmp_path, seller, monkeypatch):
+    real = codeval._scrubbed
+
+    def scrubbed(f, scrub, clean, left):
+        if "test-2" in getattr(f, "name", ""):
+            raise PermissionError
+        return real(f, scrub, clean, left)
+
+    monkeypatch.setattr(codeval, "_scrubbed", scrubbed)
+    root = tmp_path / "logs"
+    (root / "falcon_core").mkdir(parents=True)
+    (root / "falcon_core" / "tip.test-1.log").write_text("ok\n")
+    (root / "falcon_core" / "tip.test-2.log").write_text("ok\n")
+    _body, said = codeval.logs_packed(root, "", [SELLER])
+    assert said["unreadable"] == [{"file": "0/tip.test-2.log", "error": "PermissionError"}]
+
+
+def test_commands_and_tool_versions_over_the_services_limit_are_cut_and_say_so():
+    long = "x" * 5000
+    got = codeval._commands(None, long)["test"]
+    assert len(got) == codeval.COMMAND_MOST and got.endswith(codeval.CUT)
+    assert codeval.capped("java 21", codeval.TOOLCHAIN_MOST) == "java 21"

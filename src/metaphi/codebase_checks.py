@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import dataclasses
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -19,7 +21,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from metaphi import codebase_reading as reading
-from metaphi import errors, live
+from metaphi import codebase_setup, errors, live
 from metaphi.codebase_setup import Recipe, Shell, allowed
 from metaphi.steps import NONE, Steps
 
@@ -38,6 +40,8 @@ class Plan:
     cache: Path | None = None
     steps: Steps = NONE
     ledger: Any = None
+    alone: bool = False  # one unit at a time: services are shared, or the seller's command shares this machine's caches
+    memory: int | None = None  # bytes each container may hold
 
 
 class Tree(dict):
@@ -179,7 +183,10 @@ def outcomes(cases: dict[str, str] | None) -> dict[str, str]:
     return {hashlib.sha256(SALT + k.encode()).hexdigest()[:16]: v for k, v in (cases or {}).items()}
 
 
-def _run(command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[bytes]) -> tuple[int | None, float]:
+def _run(
+    command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[bytes], peaks: list[int] | None = None
+) -> tuple[int | None, float]:
+    """Run `command` in its own process group; with `peaks`, append the most its whole tree held at once."""
     started = time.monotonic()
     p = subprocess.Popen(
         command,
@@ -191,10 +198,13 @@ def _run(command: str, cwd: Path, env: dict[str, str], seconds: float, log: IO[b
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    sampler = TreePeak(p.pid) if peaks is not None and os.name == "posix" else None
     try:
         code: int | None = p.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
         code = None
+    if sampler is not None and peaks is not None:
+        peaks.append(sampler.close())
     if os.name == "posix":
         try:
             os.killpg(p.pid, 9)
@@ -325,6 +335,7 @@ def _side(
     jobs: int = 1,
     edit: Callable[[Path], None] | None = None,
     measure: dict[int, str] | None = None,
+    peaks: list[int] | None = None,
 ) -> dict[str, Any]:
     _write(repo, tree, into / "src")
     if edit:
@@ -332,9 +343,11 @@ def _side(
     junit = into / "junit"
     junit.mkdir()
     recipe, engine = found or (None, None)
-    shell = Shell(engine, recipe.image if recipe else None, into / "src", junit, jobs=jobs, cache=plan.cache)
+    shell = Shell(
+        engine, recipe.image if recipe else None, into / "src", junit, jobs=jobs, cache=plan.cache, memory=plan.memory
+    )
     try:
-        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe, measure)
+        return _ran_side(shell, plan, {**env, "KENNET_JOBS": str(jobs)}, runs, logs, label, say, recipe, measure, peaks)
     finally:
         shell.close()
 
@@ -349,8 +362,10 @@ def _ran_side(
     say: Callable[[str], None],
     recipe: Recipe | None,
     measure: dict[int, str] | None = None,
+    peaks: list[int] | None = None,
 ) -> dict[str, Any]:
     junit = shell.junit
+    peaks = peaks if peaks is not None and not shell.name else None  # in a container, its cgroup counts instead
     if not recipe:
         build = None
     elif recipe.image:
@@ -380,6 +395,7 @@ def _ran_side(
                 shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
+                peaks,
             )
         side["build"] = {**_ran(code, took), "error": reading.error_class(code, path)}
         shown("build", code, path)
@@ -404,6 +420,7 @@ def _ran_side(
                 shell.env(tests) if recipe else {**env, "KENNET_JUNIT": str(junit), **shell.extra},
                 seconds,
                 log,
+                peaks,
             )
         try:
             shutil.copytree(
@@ -513,7 +530,9 @@ def _commit(
         src, junit = Path(scratch) / "src", Path(scratch) / "junit"
         _write(repo, pre_tree, src)
         junit.mkdir()
-        shell = Shell(engine, recipe.image if recipe else None, src, junit, jobs=jobs, cache=plan.cache)
+        shell = Shell(
+            engine, recipe.image if recipe else None, src, junit, jobs=jobs, cache=plan.cache, memory=plan.memory
+        )
         try:
             pre = _ran_side(shell, plan, env, 1, logs, f"{label}.pre", say, recipe)
             if recipe is None:
@@ -554,24 +573,51 @@ def free_memory() -> int | None:
     return None
 
 
-def host_peak() -> int | None:
-    """The largest resident size of any process this one has waited for, in bytes (a build's biggest process)."""
+def _tree_rss(pgid: int) -> int:
+    """Bytes resident in every process of a process group: a build's whole tree, compilers and test JVMs together."""
     try:
-        import resource
+        said = subprocess.run(
+            ["ps", "-A", "-o", "pgid=,rss="], capture_output=True, text=True, timeout=10, check=False
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    total = 0
+    for line in said.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == str(pgid) and parts[1].isdigit():
+            total += int(parts[1]) * 1024
+    return total
 
-        got = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    except (ImportError, OSError):
-        return None
-    return (got if sys.platform == "darwin" else got * 1024) or None
+
+class TreePeak:
+    """The most a process group held at once, sampled every `every` seconds while it runs."""
+
+    def __init__(self, pgid: int, every: float = 1.0) -> None:
+        self.pgid, self.every, self.peak = pgid, every, 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def _loop(self) -> None:
+        while not self.stop.is_set():
+            self.peak = max(self.peak, _tree_rss(self.pgid))
+            self.stop.wait(self.every)
+
+    def close(self) -> int:
+        self.stop.set()
+        self.thread.join(5)
+        return self.peak
 
 
-def workers(n: int, peak: int | None = None) -> tuple[int, int]:
-    """(units at once, jobs each): half the cores' worth of units, no more than free memory holds at the tip's peak
-    each, nor than KENNET_CODEVAL_AT_ONCE; the cores shared out among them."""
+def workers(n: int, peak: int | None = None, budget: int | None = None) -> tuple[int, int]:
+    """(units at once, jobs each): half the cores' worth of units, no more than the memory budget holds at the tip's
+    peak each (the container engine's budget, or 80% of the host's free memory), nor than KENNET_CODEVAL_AT_ONCE; the
+    cores shared out among them."""
     cores = os.cpu_count() or 2
     at_once = max(1, min(n, cores // 2))
-    if peak and (free := free_memory()):
-        at_once = min(at_once, max(1, int(free * MEMORY_SHARE // peak)))
+    budget = budget or ((free * MEMORY_SHARE) if (free := free_memory()) else None)
+    if peak and budget:
+        at_once = min(at_once, max(1, int(budget // peak)))
     try:
         at_once = min(at_once, max(1, int(os.environ.get(AT_ONCE_ENV) or at_once)))
     except ValueError:
@@ -623,47 +669,21 @@ class Gate:
             return self.most.pop(key, 1)
 
 
-CONTENTION = re.compile(
-    rb"address already in use|EADDRINUSE|bind: address|port \d+ (?:is )?(?:already )?in use|database is locked"
-    rb"|could not (?:obtain|acquire) (?:a |the )?lock|lock(?:ed)? by another process|Text file busy"
-    rb"|Too many open files|Resource temporarily unavailable|LockObtainFailed",
-    re.IGNORECASE,
-)
-
-
-def _contended(logs: Path, label: str) -> bool:
-    """Whether a log of this unit shows units getting in each other's way: ports, locks, files held."""
-    for f in logs.glob(f"{label}.*.log"):
-        try:
-            with f.open("rb") as r:
-                tail = b""
-                while chunk := r.read(8 << 20):
-                    if CONTENTION.search(tail + chunk):
-                        return True
-                    tail = chunk[-256:]
-        except OSError:
-            continue
-    return False
-
-
 def _runs(side: dict | None) -> list[dict]:
     if not side:
         return []
     return [r for r in (side.get("build"), *side.get("tests", []), side.get("offline")) if r]
 
 
-def _suspect(row: dict, tip: dict | None, logs: Path, label: str, edit: bool) -> bool:
-    """Whether a unit run beside others must run again alone before it counts: it timed out, its logs show
-    contention, or (a past commit) it built or tested worse than the tip did alone."""
+def _suspect(row: dict, tip: dict | None) -> bool:
+    """Whether a unit run beside others must run again alone before it counts: any build or test run of it failed
+    (an edit's, a past commit's before or after side, killed for memory or time included), or reported fewer tests
+    than the tip did alone. What it shows may be the others' doing; alone, it is its own."""
     runs = [r for k in ("pre", "post") for r in _runs(row.get(k))]
-    if all(r["exit"] == 0 for r in runs):
-        return False
-    if any(r["exit"] is None for r in runs) or _contended(logs, label):
+    if any(r.get("exit") != 0 for r in runs):
         return True
-    if edit or not tip:
-        return False
-    alone_ok = (tip.get("build") or {}).get("exit", 0) == 0 and bool(tip.get("tests")) and tip["tests"][0]["exit"] == 0
-    return alone_ok and any(r["exit"] != 0 for r in _runs(row.get("post")))
+    most = max((t.get("reported") or 0 for t in (tip or {}).get("tests", [])), default=0)
+    return any((t.get("reported") or 0) < most for k in ("pre", "post") for t in (row.get(k) or {}).get("tests", []))
 
 
 def _stamped(row: dict, at_once: int) -> dict:
@@ -839,6 +859,7 @@ def _checks(
     ledger = plan.ledger
     kept_tip = ledger.get(name, "tip") if ledger else None
     peak: int | None = None
+    tip_peaks: list[int] = []
     if kept_tip:
         out["tip"], tip_s, peak = kept_tip["tip"], kept_tip["seconds"], kept_tip.get("peak")
         say(f"{name}: the latest commit was run before; using that result")
@@ -862,6 +883,7 @@ def _checks(
                     found,
                     jobs,
                     measure=paths or {},
+                    peaks=tip_peaks,
                 )
             tip_s = time.monotonic() - began
         except Exception as e:  # noqa: BLE001
@@ -874,7 +896,7 @@ def _checks(
             )
             for r in _runs(out["tip"]):
                 r.setdefault("concurrency", 1)
-            peak = out["tip"].get("memory_peak_bytes") or host_peak()
+            peak = out["tip"].get("memory_peak_bytes") or max(tip_peaks, default=0) or None
             if ledger:
                 ledger.put(name, "tip", "", {"tip": out["tip"], "seconds": tip_s, "peak": peak})
             said = out["tip"]
@@ -906,7 +928,13 @@ def _checks(
     )
     if before:
         say(f"{name}: {before} of {len(targets) + len(edits)} past commits and edits were run before; running the rest")
-    at_once, jobs = workers(len(targets) + len(edits) - before, peak)
+    box = found[1] if found else None
+    budget = codebase_setup.memory_budget(box) if box else None
+    at_once, jobs = (
+        (1, os.cpu_count() or 1) if plan.alone else workers(len(targets) + len(edits) - before, peak, budget)
+    )
+    if box and budget:
+        plan = dataclasses.replace(plan, memory=max(budget // at_once, 1 << 30))
     eta = Eta(len(targets) + len(edits) - before, at_once, tip_s, deadline)
     if targets or edits:
         work = " and ".join(
@@ -924,14 +952,20 @@ def _checks(
     gate = Gate()
     tip_side = out.get("tip")
 
-    def measured(key: object, label: str, attempt: Callable[[str], dict], edit: bool) -> tuple[dict, float]:
+    def measured(key: object, label: str, attempt: Callable[[str], dict]) -> tuple[dict, float]:
         """A unit run beside the others, and run again alone when what it shows may be the others' doing."""
         began = time.monotonic()
         with gate.shared(key):
             row = attempt(label)
         took = time.monotonic() - began
-        if at_once > 1 and _suspect(row, tip_side, logs.root, label, edit):
+        if at_once > 1 and _suspect(row, tip_side):
             board.say(f"    {name}: {label} ran again alone, to rule out the others getting in its way")
+            shared = {**_stamped(row, gate.concurrency(key)), "wall_s": round(took, 3)}
+            try:
+                logs.root.mkdir(parents=True, exist_ok=True)
+                (logs.root / f"{label}.shared.json").write_text(json.dumps(shared, indent=1))
+            except OSError:
+                pass
             began = time.monotonic()
             with gate.solo(key):
                 row = attempt(f"{label}.alone")
@@ -954,7 +988,7 @@ def _checks(
             def attempt(at: str) -> dict:
                 return _commit(repo, plan, runs, logs, at, parent, shas[i], lambda _s: None, found, jobs)
 
-            got, _took = measured(("commit", i), label, attempt, False)
+            got, _took = measured(("commit", i), label, attempt)
             row = {"commit": i, "id": shas[i], **got}
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
@@ -988,7 +1022,7 @@ def _checks(
             def attempt(at: str) -> dict:
                 return _edited(repo, tip_tree, plan, runs, logs, at, where[b["file"]], b["op"], b["nth"], found, jobs)
 
-            got, took = measured(("edit", n), label, attempt, True)
+            got, took = measured(("edit", n), label, attempt)
             row = {**b, **got, "concurrency": _concurrency(got), "wall_s": round(took, 3)}
         except Exception as e:  # noqa: BLE001
             board.end(label, False, f"{name}: {label} could not run ({type(e).__name__})", eta.end(n, 0.0, False))

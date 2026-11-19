@@ -257,6 +257,7 @@ but for the last:
 | `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
 | `confirmation_required` | `kennet keys revoke` away from a terminal, or under `--json`, without `--yes` | the same command with `--yes`, by id |
 | `test_command_missing`, `toolchain_missing` | `kennet codeval` found no build or test, or a tool it needs is missing (exit 1); finished commits are kept | install the tool, or the same command with `-- '<build and test command>'` |
+| `payload_changed` | a `kennet codeval` run's payload on disk no longer matches the manifest written with it; nothing was sent | remove the payload folder the message names and run `kennet codeval` again; finished commits are kept |
 | `logs_too_large` | one `kennet codeval` run's logs come to more than 2 GiB gzipped; nothing was sent | `kennet codeval` on fewer repositories at a time |
 | `no_key`, `ambiguous_key` | `kennet keys revoke` names no live key, or a name several live keys share | `kennet keys list`; the revoke of one by id |
 | `secret_destination_required` | `kennet keys create --json` without `--show-secret`: nothing is made | the pipe form |
@@ -368,7 +369,7 @@ kennet codeval ./core ./billing https://github.com/acme/ledger.git
 ```
 
 That is the whole of it. It signs you in if needed (a link and a short code, which work over SSH), reads each
-repository's history, asks Metaphi AI which past commits to test (it sends commit ids and times, nothing else), then
+repository's history, asks Metaphi AI which past commits to test, then
 builds and tests the latest commit, those commits and a few single-operator edits at the latest commit, in temporary
 copies on this machine, in Docker or Podman when one is running. It finds how to build and test from the repository's
 CI configuration and build files. When it cannot, it stops and says so; give the command after `--`:
@@ -377,21 +378,28 @@ CI configuration and build files. When it cannot, it stops and says so; give the
 kennet codeval ./core -- 'make && make test'
 ```
 
+To pick the commits, `/codeval/picks` is sent, for each repository, the sha256 of its root commit ids and, for each
+first-parent commit, its id, its author time, how many source files and lines it changed, whether it changed test
+code and its build era. Nothing else leaves the machine before you say yes.
+
 On a large repository this takes hours. Every finished commit is kept in `./kennet-codeval/<run>/checks.jsonl`, and
 the machine is kept awake while it runs (`caffeinate` on macOS, `systemd-inhibit` on Linux). If it stops (the machine
 slept, a toolchain is missing, the process was stopped), run the same command again: it goes on where it stopped and
-never runs a finished commit twice. Past commits and edits run several at once, each in its own copy: half the
-cores' worth, no more than free memory holds at the latest commit's peak, and at most `KENNET_CODEVAL_AT_ONCE` when
-set. Every copy shares one dependency cache, so nothing is downloaded twice. One that fails beside the others with
-signs of getting in their way (a port or lock already held, a timeout), or worse than the latest commit did alone,
-runs again alone before it counts; each run records `concurrency` and `wall_s`. When it is stuck it exits 1 with one sentence and a `next_step`, such as
+never runs a finished commit twice. In Docker or Podman, past commits and edits run several at once, each in its own
+copy: half the cores' worth, no more than the engine's memory holds at the latest commit's peak (each container is
+limited to its share), and at most `KENNET_CODEVAL_AT_ONCE` when set; the copies share one dependency cache, so
+nothing is downloaded twice. A run that fails beside the others, or reports fewer tests than the latest commit did
+alone, runs again alone before it counts; each run records `concurrency` and `wall_s`. A repository with services,
+or a command given after `--` (it runs on this machine, with your own tool caches and home folder), runs one commit
+at a time. When it is stuck it exits 1 with one sentence and a `next_step`, such as
 `commit 3: JDK 8 is missing on this machine` / `install JDK 8, then run the same command again; finished commits are
 kept`.
 
 When it is done, it writes everything that could be sent to `./kennet-codeval/<run>/payload/`:
 
 - `profile.json.gz`: counts and ids for files, folders, commits and authors, and the shape of commit messages, never
-  their text, file names or source;
+  their text, file names or source; repositories are `[repo:<n>]`, and it is searched for every known identifier as
+  the logs are;
 - `checks.json.gz`: each build and test (pass or fail, test counts, timings, error class, toolchain versions, the
   commands that ran) and the git blob ids of up to 64 source files, to tell whether the code is already public;
 - `logs.tar.gz`: every log of the run, whole (setup, build, each test run, each edit, the toolchain's versions),
@@ -399,17 +407,20 @@ When it is done, it writes everything that could be sent to `./kennet-codeval/<r
   user, home folder, machine name, paths, remotes, emails, phone numbers, street addresses, internal hosts and
   secrets become typed placeholders; a small local model, downloaded once and checked by sha256, finds names the rest
   miss. The packed bytes are then searched for every known identifier, and if one is left nothing is written. Its
-  last member, `kennet-deid.json`, counts what was replaced in the logs and the checks, by kind. One run sends up to
+  last member, `kennet-deid.json`, counts what was replaced in the logs and the checks, by kind, and names any log
+that could not be read (it is left out, and the send screen says so). One run sends up to
   2 GiB of logs gzipped; past that it says so and sends nothing;
 - `manifest.json`: each file's size and sha256, what was de-identified in it by kind (never the values), whether the
   model ran, and the bundle's sha256.
 
 Nothing is sent until you say so. Run the same command in a terminal: it shows each file, its size and what was
 de-identified, the commands that ran and the bundle sha256, and asks `Send to Metaphi AI for commercial diligence?
-[y/N]`. Yes sends those exact bytes and prints `Sent. Metaphi AI will reach out if there is a commercial fit.` Away
+[y/N]`. If the model did not run (it could not be downloaded, or `KENNET_DEID_MODEL=off`), the screen says so and
+only typing `send without model` sends. A command over 4096 characters, or a tool's version line over 256, is cut to
+fit and ends `[cut]`. Yes sends those exact bytes and prints `Sent. Metaphi AI will reach out if there is a commercial fit.` Away
 from a terminal (a coding agent, or `--json`) it never sends: it exits 6 with `next_step`, the command for you to run.
-If a send is cut short, run the same command again: it goes on with the same bytes, checked against the bundle
-sha256, without asking again. Run again after sending, it says when it was sent.
+If a send is cut short, run the same command again in a terminal: it goes on with the same bytes, checked against the
+bundle sha256, without asking again (away from a terminal it never sends, a resumed send included). Run again after sending, it says when it was sent.
 
 Builds and tests run with a fixed set of environment variables (`PATH`, `HOME`, locale and the like), never your
 keys or cloud credentials. Containers run with all but a few file-ownership capabilities dropped, no new privileges,

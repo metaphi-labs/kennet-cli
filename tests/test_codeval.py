@@ -436,7 +436,7 @@ def test_logs_packed(tmp_path):
     checks = {"replaced": {"email": 2}, "model": "x"}
     body, cleared = codeval.logs_packed(root, "cv_" + "5" * 16, [{"name": "secret-name"}], checks)
     names, said = _unpacked(body)
-    assert cleared == {"replaced": {"github_token": 1}, "model": "not run (KENNET_DEID_MODEL=off)"}
+    assert cleared == {"replaced": {"github_token": 1}, "model": "not run (KENNET_DEID_MODEL=off)", "unreadable": []}
     assert b"ghp_" not in said["0/setup/turns.jsonl"]
     assert sorted(names) == [
         "0/big.log",
@@ -451,6 +451,7 @@ def test_logs_packed(tmp_path):
         "logs": {"github_token": 1},
         "checks": {"email": 2},
         "model_pass": "not run (KENNET_DEID_MODEL=off)",
+        "unreadable": [],
     }
     assert said["0/big.log"] == b"A" * (1 << 20) + b"B" * (5 << 20) + b"Z", "every log goes in whole"
     assert said["kennet-logs.json"]["schema"] == codeval.LOGS_SCHEMA
@@ -1137,16 +1138,28 @@ def test_units_at_once_follow_cores_free_memory_and_the_cap(monkeypatch):
 
 
 def _at_once(monkeypatch, n=2):
-    monkeypatch.setattr(codebase_checks, "workers", lambda units, peak=None: (n, 1))
+    monkeypatch.setattr(codebase_checks, "workers", lambda units, peak=None, budget=None: (n, 1))
+    monkeypatch.setattr(codeval, "shares_state", lambda services, plan: False)
+
+
+def test_a_sellers_own_command_on_this_machine_runs_one_unit_at_a_time(tested, monkeypatch):
+    monkeypatch.setattr(codebase_checks, "workers", lambda units, peak=None, budget=None: (2, 1))
+    got = _checked(tested, test=PYTEST.format(py=sys.executable))[1]["repos"][0]
+    runs = [r for c in got["commits"] for r in (*c["pre"]["tests"], *c["post"]["tests"])]
+    assert runs and {r["concurrency"] for r in runs} == {1}, "its caches and home are shared, so nothing runs beside it"
 
 
 def test_units_run_at_once_and_each_run_says_how_many_ran_with_it(tested, monkeypatch):
     _at_once(monkeypatch)
     got = _checked(tested, test="sleep 1; " + PYTEST.format(py=sys.executable))[1]["repos"][0]
     assert [t["concurrency"] for t in got["tip"]["tests"]] == [1]
+    clean = [c for c in got["commits"] if all(r["exit"] == 0 for r in (*c["pre"]["tests"], *c["post"]["tests"]))]
+    assert clean, "some past commit passed on both sides"
     for c in got["commits"]:
         runs = [*c["pre"]["tests"], *c["post"]["tests"]]
-        assert {r["concurrency"] for r in runs} == {2} and all(r["wall_s"] >= 1 for r in runs)
+        failed = any(r["exit"] != 0 for r in runs)
+        assert {r["concurrency"] for r in runs} == ({1} if failed else {2}), "a failure beside others reruns alone"
+        assert all(r["wall_s"] >= 1 for r in runs)
 
 
 def test_a_unit_that_collided_with_another_runs_again_alone_before_it_counts(tested, monkeypatch, tmp_path):
@@ -1169,9 +1182,12 @@ def test_a_unit_that_collided_with_another_runs_again_alone_before_it_counts(tes
     assert any("ran again alone" in line for line in lines)
 
 
-def test_an_edit_that_fails_its_tests_alone_is_not_run_again():
-    row = {"post": {"build": {"exit": 0}, "tests": [{"exit": 1}]}}
-    tip = {"tests": [{"exit": 0}]}
-    assert not codebase_checks._suspect(row, tip, Path("/nonexistent"), "001-tip", edit=True)
-    assert codebase_checks._suspect(row, tip, Path("/nonexistent"), "001-abc", edit=False)
-    assert codebase_checks._suspect({"post": {"tests": [{"exit": None}]}}, tip, Path("/x"), "001-tip", edit=True)
+def test_beside_others_any_failure_or_fewer_tests_runs_again_alone():
+    tip = {"tests": [{"exit": 0, "reported": 10}]}
+    passed = {"pre": {"tests": [{"exit": 0, "reported": 10}]}, "post": {"tests": [{"exit": 0, "reported": 10}]}}
+    assert not codebase_checks._suspect(passed, tip)
+    assert codebase_checks._suspect({"post": {"tests": [{"exit": 1, "reported": 10}]}}, tip), "an edit's failure"
+    assert codebase_checks._suspect({"pre": {"tests": [{"exit": 1, "reported": 10}]}}, tip), "a pre side's failure"
+    assert codebase_checks._suspect({"post": {"build": {"exit": 137}, "tests": []}}, tip), "killed for memory"
+    assert codebase_checks._suspect({"post": {"tests": [{"exit": None}]}}, tip), "stopped for time"
+    assert codebase_checks._suspect({"post": {"tests": [{"exit": 0, "reported": 7}]}}, tip), "a test went missing"

@@ -1,0 +1,7 @@
+# The de-identification fixtures are made-up logs: their tokens are there to be found and replaced.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "made-up secrets in de-identification fixtures"
+paths = ['''^tests/deid/[^/]+\.log$''']
