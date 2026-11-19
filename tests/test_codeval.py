@@ -932,7 +932,7 @@ def test_a_signed_in_run_with_no_terminal_goes_end_to_end(tested, tmp_path, caps
     for word in ("hunter2", "test_mul", "calc.py", "falcon_calc", str(tmp_path), "pytest", "PYTHONPATH", "assert "):
         assert word not in wire, word
     assert (local.home / "sent" / "results-1.json").read_text() == wire
-    assert (local.home / "sent" / "profile.json").read_bytes() == gzip.decompress(posted.calls[0].request.content)
+    assert (local.home / "sent" / "profile-1.json").read_bytes() == gzip.decompress(posted.calls[0].request.content)
     env = (tmp_path / "env.txt").read_text()
     assert "AWS_SECRET_ACCESS_KEY" not in env and "hunter2" not in env and "METAPHI_API_KEY" not in env
 
@@ -1444,3 +1444,48 @@ def test_a_client_too_old_for_the_service_says_so(tested, capsys):
     )
     assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 5
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "upgrade_required"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "cls, word",
+    [("env_network", "network"), ("env_resource", "memory"), ("env_timeout", "time"), ("env_permission", "permission")],
+)
+def test_a_tip_that_ends_in_the_environment_is_sent_once_then_stops_and_a_rerun_measures_again(
+    tested, tmp_path, capsys, monkeypatch, cls, word
+):
+    ran = []
+    ended = {"build": {"exit": 1, "seconds": 3, "step": "dep_resolve", "class": cls}, "tests": []}
+    monkeypatch.setattr(codebase_checks, "_side", lambda *a, **k: ran.append(1) or json.loads(json.dumps(ended)))
+    _signed_in()
+    _, local = _profile(tested)
+    asked = _next(local.kept["paths"], commits=[], mutants=[], blobs=[])
+    respx.post(f"{API}/codeval").respond(json={"run": "cv_11", "object": "codeval", "next": asked})
+    respx.get(f"{API}/codeval/cv_11").respond(json={"state": "measuring", "next": asked})
+    results = respx.post(f"{API}/codeval/cv_11/results").respond(json={"run": "cv_11", "next": asked})
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 6, "the server asks again; the CLI stops"
+    said = json.loads(capsys.readouterr().out)["error"]
+    assert said["code"] == "environment" and cls in said["message"] and word in said["message"] + said["next_step"]
+    assert results.call_count == 1 and _bodies(results)[0]["tip"] == {"tests": [], "error": cls}
+    assert codeval_runs.Run(local.home).get("falcon_calc", "tip") is None, "an environment's end is never kept"
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 6
+    assert len(ran) == 2 and results.call_count == 2, "a rerun measures the tip again"
+
+
+@respx.mock
+def test_every_body_sent_is_kept_under_its_own_name_and_a_kept_profile_is_filed_before_head(tested, tmp_path, capsys):
+    _signed_in()
+    _, local = _profile(tested)
+    filed = local.tip
+    codeval.file(local)
+    (tested / "money.py").write_text("RATE = 0\n" * 200)
+    git(tested, "commit", "-qam", "moved on")
+    posted = respx.post(f"{API}/codeval").respond(json={"run": "cv_12", "object": "codeval", "done": True})
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 0
+    assert codeval_runs.run_state(local.home)["run"] == "cv_12"
+    (profile,) = _bodies(posted)
+    assert profile["tip"] == filed and posted.call_count == 1, "the profile kept here is filed, not HEAD's"
+    for n in (1, 2, 3):
+        assert codeval_runs.sent(local.home, "results", b"{}").name == f"results-{n}.json"
+    assert (local.home / "sent" / "profile-1.json").exists()
+    assert codeval_runs.sent(local.home, "profile", b"{}").name == "profile-2.json"

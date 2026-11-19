@@ -1274,16 +1274,22 @@ def filed_tip(e: errors.MetaphiError) -> str | None:
     return m[1] if m else None
 
 
+def _held(local: Local, tip: str | None) -> bool:
+    return bool(tip) and _ask(local.path, "cat-file", "-t", tip) == "commit"
+
+
 def send_filed(local: Local, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Profile and file the repository. When the server already holds an open run for it at another tip
+    """Profile and file the repository: at the tip a profile was filed at before on this machine, when one was and
+    this clone still holds it, else at HEAD. When the server holds an open run for it at another tip
     (`profile_mismatch`), profile that tip instead, if this clone holds it, and file again: the run goes on where it
     stopped."""
-    doc = profile(local)
+    before = (codeval_runs.kept_profile(local.home) or {}).get("tip")
+    doc = profile(local, before if _held(local, before) else "HEAD")
     try:
         got, _path = send_profile(local, doc, sleep)
     except errors.MetaphiError as e:
         tip = filed_tip(e) if e.code == "profile_mismatch" else None
-        if tip is None or _ask(local.path, "cat-file", "-t", tip) != "commit":
+        if tip is None or tip == local.tip or not _held(local, tip):
             raise
         local.kept = {}
         got, _path = send_profile(local, profile(local, tip), sleep)
@@ -1368,14 +1374,14 @@ def revealable(local: Local, ids: list[int]) -> None:
 def send_profile(
     local: Local, doc: dict[str, Any], sleep: Callable[[float], None] = time.sleep
 ) -> tuple[dict[str, Any], Path]:
-    body, path = _sent(local, "profile.json", "Profile", doc)
+    body, path = _sent(local, "profile", "Profile", doc)
     return _answer(_call("POST", "/codeval", sleep, content=body, headers=GZIP)), path
 
 
 def send_results(
     local: Local, run: str, doc: dict[str, Any], sleep: Callable[[float], None] = time.sleep
 ) -> tuple[dict[str, Any], Path]:
-    body, path = _sent(local, f"results-{doc['batch']}.json", "Results", doc)
+    body, path = _sent(local, "results", "Results", doc)
     return _answer(_call("POST", f"/codeval/{run}/results", sleep, content=body, headers=GZIP)), path
 
 
@@ -1502,6 +1508,31 @@ def _unit(raw: dict[str, Any] | None, key: bytes, sides: tuple[str, ...], runs: 
         return {"error": "unknown"}
     out = {k: side(raw[k], key, "Pre" if k == "pre" else "Side") for k in sides}
     return out if _complete(out["post"], runs) else {"error": "unknown"}
+
+
+ENVIRONMENT = {
+    "env_network": ("the network failed", "check this machine reaches the internet and the services the build needs"),
+    "env_resource": ("this machine ran out of memory or disk", "free memory and disk, or use a larger machine"),
+    "env_timeout": ("it ran out of time", "give it a machine that runs the tests faster, or more time"),
+    "env_permission": ("it was refused permission", "let this user read and write the clone and run the tools"),
+}
+
+
+def environment(local: Local, results: dict[str, Any]) -> errors.MetaphiError | None:
+    """Why to stop once a batch whose tip ended in this machine's environment has been sent: the server would ask for
+    the tip again, and this machine would end the same way. None when the tip did not. A rerun measures it again."""
+    sent = results.get("tip") or {}
+    classes = [sent.get("error"), *(r.get("class") for r in (sent.get("build"), *sent.get("tests", [])) if r)]
+    cls = next((c for c in classes if isinstance(c, str) and c.startswith("env_")), None)
+    if cls is None:
+        return None
+    what, fix = ENVIRONMENT.get(cls, ("something on this machine failed", "fix this machine"))
+    return errors.MetaphiError(
+        f"{local.name}: the latest commit could not be measured here because {what} ({cls}); that was sent, and "
+        "nothing more is run until it is fixed",
+        code="environment",
+        next_step=f"{fix}, then run the same command again; it measures the latest commit again",
+    )
 
 
 OS = {"linux": "linux", "darwin": "darwin", "windows": "windows"}

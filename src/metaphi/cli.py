@@ -24,8 +24,10 @@ import httpx
 from metaphi import __version__, accounts, agents, config, errors, palette, skill, update
 
 FAILED, AUTH, LATER, UPGRADE, NEEDS_PERSON = 1, 3, 4, 5, 6
-# kennet codeval: install a tool, give a command, bring back the commit the run was filed at, or go to its machine
-PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing", "profile_gone", "key_mismatch"])
+# kennet codeval: install a tool, give a command, fix the machine the tip ended on, or go to the run's machine
+PERSON_MUST_ACT = frozenset(
+    ["toolchain_missing", "test_command_missing", "environment", "profile_gone", "key_mismatch"]
+)
 
 
 def status(error: errors.MetaphiError) -> int:
@@ -545,6 +547,8 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                     results = codeval.measured(local, bench, nxt, say)
                     got, _path = codeval.send_results(local, run, results)
                     got.setdefault("run", run)
+                    if stop := codeval.environment(local, results):
+                        raise stop
             except codebase_checks.Stuck as e:
                 e.next_step = e.next_step or _codeval_line(a)
                 raise

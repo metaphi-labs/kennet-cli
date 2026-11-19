@@ -460,14 +460,17 @@ def _row(
     }
 
 
+FLAKY_FROM = ("test_assertion", "test_error")
+
+
 def flaky(rows: list[dict[str, Any]]) -> None:
-    """Mark a side's failed runs `test_flaky` when another run of the same side passed: the same code, the same image,
-    and a different end. Passed is exit 0 and failed is any other exit; a run stopped at run_minutes has no exit and
-    keeps its class. Nothing else makes a run flaky."""
+    """Mark a side's failed test runs `test_flaky` when another run of the same side passed (exit 0): the same code,
+    the same image, and a different end. Only a test's own failure (`test_assertion`, `test_error`) can be flaky; a run
+    that ended in the environment, was cancelled, timed out or did not compile keeps its class."""
     if not any(r.get("exit") == 0 for r in rows):
         return
     for r in rows:
-        if r.get("exit") not in (0, None):
+        if r.get("exit") != 0 and r.get("class") in FLAKY_FROM:
             r.update({"class": "test_flaky", "compile_kind": None})
 
 

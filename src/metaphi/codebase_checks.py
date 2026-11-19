@@ -703,7 +703,13 @@ def _suspect(row: dict, tip: dict | None) -> bool:
     return any((t.get("reported") or 0) < most for t in (row.get("post") or {}).get("tests", []))
 
 
-KILLED = 137
+KILLED = 137  # build mechanics: the exit code of a run killed by SIGKILL (128 + 9), as when out of memory
+
+
+def _env_ended(*sides: dict | None) -> bool:
+    """Whether a run of these sides ended in the environment (network, memory, time, permissions): what this machine
+    did, not the code, so it is never kept in the ledger and a rerun measures it again."""
+    return any(str(r.get("class") or "").startswith("env_") for s in sides for r in _runs(s))
 
 
 def _spent(row: dict | None) -> float:
@@ -873,6 +879,8 @@ def _checks(
     tip_s: float | None = None
     ledger = plan.ledger
     kept_tip = ledger.get(name, "tip") if ledger else None
+    if kept_tip and _env_ended(kept_tip.get("tip")):
+        kept_tip = None
     peak: int | None = None
     tip_peaks: list[int] = []
     if kept_tip:
@@ -910,7 +918,7 @@ def _checks(
                 {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
             )
             peak = out["tip"].get("memory_peak_bytes") or max(tip_peaks, default=0) or None
-            if ledger:
+            if ledger and not _env_ended(out["tip"]):
                 ledger.put(name, "tip", "", {"tip": out["tip"], "seconds": tip_s, "peak": peak})
             said = out["tip"]
             built = "build" not in said or said["build"]["exit"] == 0
@@ -996,7 +1004,11 @@ def _checks(
         return row, took
 
     def one(n: int, i: int) -> dict | None:
-        if ledger and (kept := ledger.get(name, "commit", i)) is not None:
+        if (
+            ledger
+            and (kept := ledger.get(name, "commit", i)) is not None
+            and not _env_ended(kept.get("pre"), kept.get("post"))
+        ):
             spend(kept)
             return kept
         if over() or halt:
@@ -1025,7 +1037,7 @@ def _checks(
         b = (row["post"].get("build") or {}).get("exit", 0)
         line = f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})"
         board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
-        if ledger:
+        if ledger and not _env_ended(row.get("pre"), row.get("post")):
             ledger.put(name, "commit", i, row)
         spend(row)
         return row
@@ -1034,7 +1046,7 @@ def _checks(
 
     def edited(n: int, b: dict) -> dict | None:
         key = [b.get("file"), b.get("op"), b.get("nth")]
-        if ledger and (kept := ledger.get(name, "edit", key)) is not None:
+        if ledger and (kept := ledger.get(name, "edit", key)) is not None and not _env_ended(kept.get("post")):
             spend(kept)
             return kept
         if over() or halt:
@@ -1056,7 +1068,7 @@ def _checks(
         built = (row["post"].get("build") or {}).get("exit", 0)
         line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)})"
         board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
-        if ledger:
+        if ledger and not _env_ended(row.get("post")):
             ledger.put(name, "edit", key, row)
         spend(row)
         return row

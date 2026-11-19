@@ -206,9 +206,21 @@ def test_a_duration_is_sent_as_its_bucket(seconds, want):
 
 
 def test_flaky_is_a_pass_and_a_fail_of_the_same_side_and_nothing_else():
-    rows = [{"class": "compile_test", "compile_kind": "syntax", "exit": 2}, {"class": "ok", "exit": 0}]
+    rows = [{"class": "test_error", "exit": 2}, {"class": "ok", "exit": 0}]
     extract.flaky(rows)
     assert rows[0] == {"class": "test_flaky", "compile_kind": None, "exit": 2}
+    for kept in (
+        "env_network",
+        "env_resource",
+        "env_timeout",
+        "env_permission",
+        "cancelled",
+        "test_timeout",
+        "compile_test",
+    ):
+        rows = [{"class": kept, "exit": 1}, {"class": "ok", "exit": 0}]
+        extract.flaky(rows)
+        assert rows[0]["class"] == kept, f"{kept} is never relabelled flaky"
     rows = [{"class": "test_assertion", "exit": 1}, {"class": "test_error", "exit": 1}]
     extract.flaky(rows)
     assert [r["class"] for r in rows] == ["test_assertion", "test_error"], "a test_ class alone is never flaky"
@@ -228,10 +240,20 @@ def test_codeval_holds_no_numeric_thresholds_but_documented_mechanics():
 
     mechanics = {"GIT_FLOOR", "TZ_MOST", "MAX_BLOB", "REVEAL_FLOOR", "TAIL", "TEMPLATE_LINES"}
     src = Path(codeval.__file__).parent
-    for path in sorted(src.glob("codeval*.py")):
-        text = path.read_text()
+    scanned = [(p, ast.parse(p.read_text())) for p in sorted(src.glob("codeval*.py"))]
+    checks = src / "codebase_checks.py"
+    # what decides a rerun alone is build mechanics: a build or run that failed, was killed or timed out, or reported
+    # fewer tests than its own base; nothing scored
+    scanned += [
+        (checks, f)
+        for f in ast.parse(checks.read_text()).body
+        if isinstance(f, ast.FunctionDef) and f.name in ("_suspect", "_env_ended")
+    ]
+    assert len(scanned) == len(list(src.glob("codeval*.py"))) + 2
+    for path, tree in scanned:
+        text = ast.unparse(tree)
         assert not re.search(r"(?i)\b\w*(weight|score|threshold|confidence)\w*\s*=", text), path.name
-        for node in ast.walk(ast.parse(text)):
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Compare) or not any(
                 isinstance(o, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for o in node.ops
             ):

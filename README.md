@@ -419,12 +419,17 @@ The results, one per batch:
 A duration is sent as the index of the last bound at or below it in the schema's list (`x-bounds-ms`: 0, then 100 ms
 growing by 10% a step), never the duration itself.
 
-Everything sent is kept, byte for byte, in the repository's state directory under `sent/`; the done line names it.
+Everything sent is kept, byte for byte, in the repository's state directory under `sent/`, each body under its own
+name (`profile-1.json`, `results-1.json`, `results-2.json`, ...), never overwritten; the done line names the folder.
 
 A run is bound to the profile it was filed with. Run again after the tip has moved and it goes on measuring the filed
 tip, commits and file numbers, never a new profile; if that tip is no longer in the clone (a history rewrite), it stops
 with exit 6 (`profile_gone`). The profile and every Results body carry `key_id`, a keyed hash of a fixed label under the
 repository's key, so a run goes on only on the machine that started it.
+
+A tip that ends in this machine's environment (the network, memory or disk, time, permissions) is sent once, and
+CodeVal then stops with exit 6 (`environment`) naming what to fix; such an end is never kept, so the next run measures
+the tip again.
 
 Why a build or test failed is read here, by rules shipped with this release. CodeVal turns on the toolchain's
 structured output where the command names the tool (`go test -json`, cargo `--message-format=json`, pytest JUnit XML,

@@ -8,7 +8,7 @@ its root commits. It holds:
     profile.json   what the filed profile bound the run to: its tip, commit order and ids (never re-read from git)
     checks.jsonl   each finished unit (the tip, a commit, a mutant), written and synced before the next starts
     logs/          every build and test log, whole; only each log's sha256 is sent
-    sent/          every body sent, exactly as sent (before gzip)
+    sent/          every body sent, exactly as sent (before gzip): profile-N.json, results-N.json, never overwritten
 """
 
 from __future__ import annotations
@@ -103,11 +103,24 @@ def kept_profile(at: Path) -> dict[str, Any] | None:
     return got if isinstance(got, dict) and isinstance(got.get("tip"), str) else None
 
 
-def sent(at: Path, name: str, body: bytes) -> Path:
-    """Keep a body exactly as it is sent; answers where."""
-    path = at / "sent" / name
-    _kept(path, body)
-    return path
+def sent(at: Path, kind: str, body: bytes) -> Path:
+    """Keep a body exactly as it is sent, under the next free name of its kind (`profile-1.json`, `profile-2.json`,
+    `results-1.json`, ...), never over an earlier one; answers where."""
+    folder = at / "sent"
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    n = 1 + sum(1 for _ in folder.glob(f"{kind}-*.json"))
+    while True:
+        path = folder / f"{kind}-{n}.json"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            n += 1
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        return path
 
 
 class Run:
