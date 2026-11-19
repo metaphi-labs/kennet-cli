@@ -1374,6 +1374,9 @@ def test_away_from_a_terminal_nothing_is_sent_without_yes(made, capsys, tmp_path
 
 
 def test_dry_run_writes_what_would_be_sent(made, capsys, tmp_path, monkeypatch):
+    from metaphi import codebase_setup
+
+    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
     monkeypatch.delenv("METAPHI_API_KEY")
     monkeypatch.setattr(codeval, "post", lambda *a: pytest.fail("sent"))
     assert cli.main(["codeval", str(made), "--dry-run", "--json"]) in (0, None)
