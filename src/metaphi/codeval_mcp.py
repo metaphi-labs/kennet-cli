@@ -48,8 +48,8 @@ Nothing leaves the machine until the person approves codeval_send. The procedure
    they choose.
 5. When status has `preview`, show the person all of it: what would leave the machine, the sizes, and the folder
    where the exact files are.
-6. Only after the person has seen the preview, call codeval_send. It asks the person to approve, and signs them in
-   in the browser if needed. Never call it to find out whether they agree; ask them first.
+6. Once the person has seen the whole preview, call codeval_send. Its approval prompt is the person's one yes or
+   no; do not ask them separately. It signs them in through the browser when needed.
 7. codeval_status again until the state is `sent` or `accepted`. It goes on in the background for hours; the
    person can close the session and ask again later.
 8. Tell the person that Metaphi AI will reach out if there is a commercial fit. There is never a score or a price
@@ -134,8 +134,8 @@ TOOLS = [
         "title": "Send to Metaphi AI",
         "description": "Send a measured run's no-code assessment to Metaphi AI, then build and test the past "
         "commits Metaphi AI names here and send those results, in the background. The person approves every "
-        "call. Call it only after the person has seen the preview from codeval_status. Signs in through the "
-        "browser when needed. Returns at once.",
+        "call: that approval is their yes, so call it right after showing them the whole preview from "
+        "codeval_status, never before. Signs in through the browser when needed. Returns at once.",
         "inputSchema": {
             "type": "object",
             "properties": {"run": {"type": "string", "description": "The run id from codeval_start."}},

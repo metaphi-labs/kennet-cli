@@ -7,5 +7,5 @@ description: CodeVal is a tool that helps data owners to monetize their private 
 
 Use the `metaphi` MCP server's tools, `codeval_start`, `codeval_status` and `codeval_send`, and follow its
 instructions. In short: read the repositories, start, poll status, relay any question word for word, show the
-preview in full, send only after the person has seen it, and poll until done. Then tell the person that Metaphi AI
+preview in full, then send (its approval prompt is the person's one yes), and poll until done. Then tell the person that Metaphi AI
 will reach out if there is a commercial fit; there is never a score or a price.
