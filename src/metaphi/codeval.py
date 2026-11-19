@@ -17,7 +17,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, Any
 
 import httpx
@@ -37,7 +37,7 @@ MAX_LOGS = LOGS_PART * LOGS_PARTS  # 2 GiB gzipped: the most one run sends
 LOGS_DEID = "kennet-deid.json"  # the tar's last member: what was replaced, by kind
 PICKED_ON = (
     "commit ids and times, each commit's counts (source files, lines, whether it touched tests, its build era) and "
-    "a sha256 of each repository's root commit ids"
+    "a sha256 of each repository's profile, which fixes it"
 )
 NOTICE = (
     f"Runs on this machine. Before the owner says yes at a terminal, only {PICKED_ON} leave it, to pick the commits "
@@ -765,6 +765,7 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
             domains=dict(domains),
             people=_people(repo),
             remotes=sorted(set(_text(repo, "remote", "-v").split()[1::3])),
+            declared=_declared(repo, tree),
         )
     return {
         "name": name,
@@ -784,6 +785,65 @@ def compute(repo: Path, name: str, keep: dict | None = None) -> dict[str, Any]:
         "commits": commits,
         "files": sorted(rows.values(), key=lambda r: r["file"]),
     }
+
+
+BUILD_FILES = frozenset(
+    [
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "pyproject.toml",
+        "setup.cfg",
+        "setup.py",
+        "pom.xml",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "build.gradle",
+        "build.gradle.kts",
+        "MODULE.bazel",
+        "WORKSPACE",
+        "WORKSPACE.bazel",
+        "build.sbt",
+        "mix.exs",
+        "composer.json",
+        "CMakeLists.txt",
+        "meson.build",
+    ]
+)
+DECLARED = re.compile(
+    r"\"name\"\s*:\s*\"([^\"]+)\""  # package.json, composer.json
+    r"|^\s*name\s*=\s*[\"']([^\"']+)[\"']"  # Cargo.toml, pyproject.toml, build.sbt
+    r"|^\s*name\s*=\s*([\w.-]+)\s*$"  # setup.cfg
+    r"|^module\s+(\S+)"  # go.mod
+    r"|<artifactId>([^<]+)</artifactId>"  # pom.xml
+    r"|rootProject\.name\s*=\s*[\"']([^\"']+)"  # settings.gradle
+    r"|\b(?:module|workspace)\(\s*name\s*=\s*[\"']([^\"']+)"  # MODULE.bazel, WORKSPACE
+    r"|\bname\s*=\s*[\"']([^\"']+)[\"']"  # setup.py
+    r"|\bproject\(\s*([\w.-]+)"  # CMake, meson
+    r"|\bapp:\s*:([\w]+)",  # mix.exs
+    re.MULTILINE,
+)
+DECLARED_FILES = 64
+PROJECT_SUFFIXES = frozenset([".csproj", ".fsproj", ".vbproj", ".nuspec", ".gemspec", ".cabal", ".podspec"])
+"""Project files named for what they build (`Orbit.Contracts.csproj`)."""
+
+
+def _declared(repo: Path, tree: dict) -> list[str]:
+    """The package and module names the repository's build files at its tip declare, folded (`Ledger_Line` and
+    `ledger-line` alike): a repository named as one of its own packages keeps that name as a bare word in logs."""
+    found = sorted(p for p in tree if PurePosixPath(p).name in BUILD_FILES and p.count("/") <= 2)[:DECLARED_FILES]
+    out: set[str] = {_folded_name(PurePosixPath(p).stem) for p in tree if PurePosixPath(p).suffix in PROJECT_SUFFIXES}
+    for _sha, body in _blobs(repo, [tree[p][1] for p in found]):
+        for m in DECLARED.finditer(body.decode("utf-8", "replace")[:200_000]):
+            value = next(g for g in m.groups() if g)
+            for part in re.split(r"[/@:]", value):
+                if part:
+                    out.add(_folded_name(part))
+    return sorted(out)
+
+
+def _folded_name(name: str) -> str:
+    return re.sub(r"[-_.\s]+", "-", name.strip().lower())
 
 
 def _people(repo: Path) -> list[list[str]]:
@@ -878,7 +938,8 @@ def profiled(paths: list[str], say: Callable[[str], None] = print) -> Iterator[t
             except (Unreadable, ValueError, OSError):
                 say(f"\u2717 Skipped {name}: {SKIPPED_FIX['unreadable']}")
                 skipped.append({"name": name, "reason": "unreadable"})
-        yield {"schema": SCHEMA, "tool_version": __version__, "repos": repos, "skipped": skipped}, kept
+        doc = {"schema": SCHEMA, "tool_version": __version__, "repos": repos, "skipped": skipped}
+        yield pseudonymized(doc, kept), kept
 
 
 CHMOD_IMAGE = "busybox:1.37"
@@ -909,8 +970,8 @@ def _key(pairs: list[list[str]]) -> str:
     return "run_" + hashlib.sha256(json.dumps(pairs).encode()).hexdigest()[:16]
 
 
-def run_id(doc: dict[str, Any]) -> str:
-    return _key([[r["name"], r["tip"]] for r in doc["repos"]])
+def run_id(doc: dict[str, Any], kept: list[dict]) -> str:
+    return _key([[k["name"], r["tip"]] for k, r in zip(kept, doc["repos"], strict=True)])
 
 
 RUNS = 3
@@ -930,6 +991,7 @@ def checked(
     plan: codebase_checks.Plan,
     say: Callable[[str], None] = print,
     steps: Steps | None = None,
+    seeds: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build and test each repository's tip and its picked past commits. Raises `codebase_checks.Stuck` when a
     person must act; every unit finished before it is kept in the plan's ledger."""
@@ -1000,7 +1062,9 @@ def checked(
                     say(f"\u2717 {local['name']}'s services did not start ({logs / 'services.log'})")
                 elif services.shared:
                     codebase_setup.NETWORK[:] = ["--network", f"container:{services.shared}"]
-            mine = dataclasses.replace(mine, alone=shares_state(services, plan))
+            mine = dataclasses.replace(
+                mine, alone=shares_state(services, plan), seed=seeds[n] if seeds and n < len(seeds) else None
+            )
             try:
                 if plan.test is None:
                     say(f"Setting up {local['name']}\u2026")
@@ -1224,9 +1288,9 @@ def post(body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, 
     )
 
 
-def fingerprint(roots: list[str]) -> str:
-    """A repository's name for the service: the sha256 of its root commit ids, sorted, one per line."""
-    return hashlib.sha256("\n".join(sorted(roots)).encode()).hexdigest()
+def fingerprint(root: str) -> str:
+    """A repository's name at the service: the sha256 of its first-parent line's root, the service computes."""
+    return hashlib.sha256(root.encode()).hexdigest()
 
 
 def history(repo: dict, local: dict) -> list[dict[str, Any]]:
@@ -1241,31 +1305,53 @@ def history(repo: dict, local: dict) -> list[dict[str, Any]]:
     ]
 
 
+PICK_REFUSALS = (
+    (
+        "picked for another profile",
+        (
+            "this repository was measured before, from a profile it no longer gives (CodeVal measures a repository "
+            "once); nothing more to send for it: leave it out and run the same command again"
+        ),
+    ),
+    (
+        "is not the one its commits were picked from",
+        (
+            "its history was rewritten since the commits were picked; check out the history first measured (before "
+            "the force-push or rebase) and run the same command again"
+        ),
+    ),
+    (
+        "already picked as another repository",
+        (
+            "this history was already measured as another repository (a fork or a near copy of one sent before); "
+            "leave it out and run the same command again"
+        ),
+    ),
+)
+
+
 def picks(doc: dict[str, Any], kept: list[dict], sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Ask which past commits to test. The one call before the owner sends: root ids hashed, then commit ids, times
-    and counts, no names."""
+    """Ask which past commits to test. The one call before the owner sends: each repository's first-parent line as
+    commit ids, times and counts, oldest first from its root, and the sha256 of its profile entry, fixed from here."""
     body = {
         "tool_version": __version__,
         "repos": [
-            {"fingerprint": fingerprint(r["roots"]), "commits": history(r, k)}
+            {"commits": history(r, k), "profile_sha256": entry_sha256(r)}
             for r, k in zip(doc["repos"], kept, strict=True)
         ],
     }
     try:
         got = _call("POST", "/codeval/picks", sleep, json=body)
     except errors.MetaphiError as e:
-        if "not the one its commits were picked from" in str(e):
-            e.next_step = (
-                "its history was rewritten since the commits were picked; check out the history first measured "
-                "(before the force-push or rebase) and run the same command again"
-            )
+        if step := next((s for said, s in PICK_REFUSALS if said in str(e)), None):
+            e.next_step = step
         raise
     repos = got.get("repos")
     if (
         not isinstance(got.get("pick_id"), str)
         or not isinstance(repos, list)
         or [r.get("fingerprint") if isinstance(r, dict) else None for r in repos]
-        != [r["fingerprint"] for r in body["repos"]]
+        != [fingerprint(r["commits"][0]["id"]) for r in body["repos"]]
         or not all(isinstance(r.get("seed"), str) and re.fullmatch(r"(?:[0-9a-f]{2})+", r["seed"]) for r in repos)
     ):
         raise errors.APIError("the service sent no usable picks; run the same command again", code="unavailable")
@@ -1302,15 +1388,46 @@ def post_logs_part(ref: str, n: int, body: bytes, sleep: Callable[[float], None]
     return _call("POST", f"/codeval/{ref}/logs/parts/{n}", sleep, content=body, headers=headers)
 
 
-def complete_logs(ref: str, parts: list[str], sleep: Callable[[float], None] = time.sleep) -> list[int]:
-    """Join the parts sent: [] once the logs are received, else the parts the service names as not received."""
-    try:
-        _call("POST", f"/codeval/{ref}/logs/complete", sleep, json={"parts": parts})
-    except errors.MetaphiError as e:
-        if m := re.search(r"parts ([\d, ]+) were not received", str(e)):
-            return [int(n) for n in m.group(1).split(",")]
-        raise
-    return []
+COMPLETE_WAIT = (5.0, 30.0)  # seconds between asks while the joined logs are checked: first, and most
+COMPLETE_FOR = 30 * 60.0  # and how long to keep asking before saying so
+
+
+def complete_logs(
+    ref: str,
+    parts: list[str],
+    sleep: Callable[[float], None] = time.sleep,
+    started: Callable[[], None] = lambda: None,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[int]:
+    """Join the parts sent: [] once the logs are received, else the parts the service names as not received. The
+    service checks the joined logs off the request (202 `checking`): asked again with the same parts, backing off,
+    until it answers `received`. `started` is called once the check is under way: no part may be sent after it."""
+    wait, began, told = COMPLETE_WAIT[0], clock(), False
+    while True:
+        try:
+            got = _call("POST", f"/codeval/{ref}/logs/complete", sleep, json={"parts": parts})
+        except errors.MetaphiError as e:
+            if m := re.search(r"parts ([\d, ]+) were not received", str(e)):
+                return [int(n) for n in m.group(1).split(",")]
+            raise
+        if got.get("state") != "checking":
+            return []
+        if not told:
+            started()
+            if say:
+                say("Checking the logs\u2026")
+            told = True
+        if clock() - began > COMPLETE_FOR:
+            raise errors.MetaphiError(
+                "the service is still checking the logs",
+                code="unavailable",
+                retryable=True,
+                next_step=(
+                    "run `kennet codeval` again in a terminal later: it asks where the check is and sends nothing again"
+                ),
+            )
+        sleep(wait)
+        wait = min(wait * 2, COMPLETE_WAIT[1])
 
 
 def post_checks(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
@@ -1363,7 +1480,7 @@ def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[
     logs = out / LOGS
     with tempfile.NamedTemporaryFile(dir=out, delete=False) as tmp:
         try:
-            logs_said = _logs_tar(home / "logs", pick_id, kept, tmp, checks_said)
+            logs_said = _logs_tar(home / "logs", pick_id, kept, tmp, checks_said, report)
         except BaseException:
             Path(tmp.name).unlink(missing_ok=True)
             raise
@@ -1437,15 +1554,44 @@ def _scrubbers(kept: list[dict]) -> tuple[list[deid.Scrubber], str]:
     return [deid.Scrubber(k, model) for k in deid.known(kept)], said
 
 
-def logs_packed(root: Path, pick_id: str, kept: list[dict], checks: dict | None = None) -> tuple[bytes, dict]:
+def logs_packed(
+    root: Path, pick_id: str, kept: list[dict], checks: dict | None = None, report: dict | None = None
+) -> tuple[bytes, dict]:
     """`_logs_tar` as bytes."""
     with tempfile.TemporaryFile() as f:
-        said = _logs_tar(root, pick_id, kept, f, checks)
+        said = _logs_tar(root, pick_id, kept, f, checks, report)
         f.seek(0)
         return f.read(), said
 
 
-def _logs_tar(root: Path, pick_id: str, kept: list[dict], packed_file: IO[bytes], checks: dict | None) -> dict:
+def proof(repo: Path, sha: str) -> tuple[bytes, bytes]:
+    """A measured commit's proof, as the service reads it: `git rev-parse` of the commit whose tree was measured, and
+    `git show -M --diff-merges=first-parent --numstat --format=` of it with each path replaced by `[file]` (a path can
+    name a person), its counts as git printed them."""
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", f"{sha}^{{commit}}"],
+        capture_output=True,
+        timeout=60,
+        check=True,
+    ).stdout
+    stat = subprocess.run(
+        ["git", "-C", str(repo), "show", "-M", "--diff-merges=first-parent", "--numstat", "--format=", sha],
+        capture_output=True,
+        timeout=300,
+        check=True,
+    ).stdout
+    lines = [b"\t".join([*line.split(b"\t", 2)[:2], b"[file]"]) for line in stat.split(b"\n") if line.count(b"\t") >= 2]
+    return head, b"".join(x + b"\n" for x in lines)
+
+
+def _logs_tar(
+    root: Path,
+    pick_id: str,
+    kept: list[dict],
+    packed_file: IO[bytes],
+    checks: dict | None,
+    report: dict | None = None,
+) -> dict:
     """Every log of the run, whole, as a tar.gz written to `packed_file`, de-identified here; returns what was
     replaced by kind. Its last member, LOGS_DEID, counts what was replaced in the logs and in the checks. Raises
     `deid.Unsafe`, and nothing is sent, when a known identifier is still in what would be packed."""
@@ -1478,6 +1624,13 @@ def _logs_tar(root: Path, pick_id: str, kept: list[dict], packed_file: IO[bytes]
                     size = clean.tell()
                     clean.seek(0)
                     add(name, size, clean)
+        for n, (local, got) in enumerate(zip(kept, (report or {}).get("repos") or [], strict=False)):
+            for row in got.get("commits") or []:
+                if row.get("broke") or not row.get("id"):
+                    continue
+                for what, body in zip(("head", "numstat"), proof(local["path"], row["id"]), strict=True):
+                    left |= scrubbers[n].known.left(body)
+                    add(f"{n}/proof/{row['id']}/{what}.txt", len(body), io.BytesIO(body))
         deid.check(left, "the logs")
         for scrub in scrubbers:
             counts.update(scrub.counts)
@@ -1494,28 +1647,72 @@ def _logs_tar(root: Path, pick_id: str, kept: list[dict], packed_file: IO[bytes]
     return replaced
 
 
-def profile_packed(doc: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
-    """The profile with every name in it pseudonymized as the logs are (repositories as `[repo:<n>]`, trailer
-    domains as `[domain:<n>]` or `[host]`), then searched for every known identifier: `deid.Unsafe` if one is left."""
-    scrubbers = [deid.Scrubber(k) for k in deid.known(kept)]
-    counts: collections.Counter = collections.Counter()
+AI_VENDOR_DOMAINS = (
+    "anthropic.com",
+    "openai.com",
+    "cursor.com",
+    "cursor.sh",
+    "aider.chat",
+    "cognition.ai",
+    "codeium.com",
+    "windsurf.com",
+    "all-hands.dev",
+    "factory.ai",
+    "sweep.dev",
+    "coderabbit.ai",
+)  # a trailer's domain kept as it is: a coding assistant's or its vendor's, which the service reads as a tool signing
+
+
+def _trailer_domain(domain: str, local: dict) -> str:
+    """A trailer's email domain as the profile carries it: an AI vendor's (`AI_VENDOR_DOMAINS`, or under one) as it
+    is; the seller's own as `d<id>.invalid`, its id the profile's; any other as `other.invalid`."""
+    d = domain.lower()
+    if not d or any(d == x or d.endswith("." + x) for x in AI_VENDOR_DOMAINS):
+        return domain
+    own = (local.get("domains") or {}).get(d)
+    return f"d{own}.invalid" if own else "other.invalid"
+
+
+def pseudonymized(doc: dict[str, Any], kept: list[dict]) -> dict[str, Any]:
+    """The profile as it is committed to at /picks and filed: repositories as `[repo:<n>]` (skipped ones `[repo]`),
+    trailer domains by `_trailer_domain`. Made once, before /picks, and never changed after."""
     repos = []
     for n, repo in enumerate(doc.get("repos") or []):
-        scrub = scrubbers[n] if n < len(scrubbers) else deid.Scrubber(deid.Known())
-        commits = []
-        for c in repo.get("commits") or []:
-            trailers = [
-                {**t, "domain": scrub.text(t["domain"])} if t.get("domain") else t for t in c.get("trailers") or []
-            ]
-            commits.append({**c, "trailers": trailers} if c.get("trailers") else c)
-        counts["repo"] += 1
+        local = kept[n] if n < len(kept) else {}
+        commits = [
+            {**c, "trailers": [{**t, "domain": _trailer_domain(t["domain"], local)} for t in c["trailers"]]}
+            if c.get("trailers")
+            else c
+            for c in repo.get("commits") or []
+        ]
         repos.append({**repo, "name": f"[repo:{n}]", "commits": commits})
-        counts.update(scrub.counts)
     skipped = [{**k, "name": "[repo]"} for k in doc.get("skipped") or []]
-    counts["repo"] += len(skipped)
-    body = packed({**doc, "repos": repos, "skipped": skipped})
+    return {**doc, "repos": repos, "skipped": skipped}
+
+
+def entry_sha256(entry: dict[str, Any]) -> str:
+    """The commitment to one repository's profile entry, sent to /picks before the profile: sha256 of the entry as
+    UTF-8 JSON, keys sorted at every level, no whitespace, non-ASCII as itself."""
+    return hashlib.sha256(
+        json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def profile_packed(doc: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
+    """The profile as committed to (`pseudonymized` already), searched for every known identifier: `deid.Unsafe` if
+    one is left. Its counts are of what was pseudonymized."""
+    scrubbers = [deid.Scrubber(k) for k in deid.known(kept)]
+    counts: collections.Counter = collections.Counter()
+    counts["repo"] = len(doc.get("repos") or []) + len(doc.get("skipped") or [])
+    counts["domain"] = sum(
+        t.get("domain", "").endswith(".invalid")
+        for r in doc.get("repos") or []
+        for c in r.get("commits") or []
+        for t in c.get("trailers") or []
+    )
+    body = packed(doc)
     _unsafe(gzip.decompress(body), scrubbers, "the profile")
-    return body, deid.summary(counts, "not needed (no free text)")
+    return body, deid.summary(+counts, "not needed (no free text)")
 
 
 def checks_packed(report: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:

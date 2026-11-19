@@ -509,13 +509,20 @@ def _send_parts(got: dict, logs: Path, size: int, keep: Callable[[], None], say:
             done[0] += len(body)
             say(f"Sending the logs: {_size(done[0])} of {_size(size)}")
 
+    def started() -> None:
+        got["completing"] = True
+        keep()
+
+    # the service is checking the joined parts: it takes no part now, only the ask again
+    if got.get("completing") and not codeval.complete_logs(got["id"], shas, started=started):
+        return
     missing: list[int] = []
     for _ in range(3):
         left = [n for n in range(count) if n not in sent]
         with concurrent.futures.ThreadPoolExecutor(min(UPLOADS_AT_ONCE, max(1, len(left)))) as pool:
             for f in [pool.submit(one, n) for n in left]:
                 f.result()
-        missing = codeval.complete_logs(got["id"], shas)
+        missing = codeval.complete_logs(got["id"], shas, started=started)
         if not missing:
             return
         sent -= set(missing)
@@ -555,6 +562,7 @@ def _upload(home: Path, manifest: dict, say: Callable[[str], None]) -> str:
         _send_parts(got, logs, size, keep, say)
     if codeval.LOGS not in got["files"]:
         got.pop("parts_sent", None)
+        got.pop("completing", None)
         got["files"].append(codeval.LOGS)
     got["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     keep()
@@ -585,7 +593,7 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
     with codeval.profiled(codeval.repositories(a.paths or ["."]), say) as (doc, kept):
         if not doc["repos"]:
             raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
-        name = codeval.run_id(doc)
+        name = codeval.run_id(doc, kept)
         home = Path.cwd() / CODEVAL_HOME / name
         run = codeval_runs.Run(home)
         if sent := _sent_before(home):
@@ -610,7 +618,8 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                 (home / "picks.json").write_text(json.dumps(picked, indent=1))
             edits, revealed = codeval_draws.drawn(doc, [r["seed"] for r in picked["repos"]])
             plan = codebase_checks.Plan(test=a.run_command, logs=home / "logs", ledger=run)
-            report = codeval.checked(kept, codeval.targets(kept, picked), edits, plan, say, Steps())
+            seeds = [r["seed"] for r in picked["repos"]]
+            report = codeval.checked(kept, codeval.targets(kept, picked), edits, plan, say, Steps(), seeds)
             for local, got, ids in zip(kept, report["repos"], revealed, strict=True):
                 got["blobs"] = codeval.blobs(local, ids)
             (home / "checks.json").write_text(json.dumps(report, indent=1))
@@ -1565,7 +1574,7 @@ exit status: 0 done, 1 failed, 2 usage, 3 sign-in or key needed, 4 try the same 
 
 CODEVAL_EPILOG = """\
 Measures on this machine; the only call before sending asks which past commits to test (commit ids, times and
-per-commit counts, and a hash of the root commit ids).
+per-commit counts, and a sha256 of each repository's profile).
 Run it again and it goes on where it stopped. When it is done, the same command at a terminal shows exactly what
 would be sent and asks the owner; nothing is sent any other way.
 

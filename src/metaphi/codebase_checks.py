@@ -4,8 +4,9 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import hashlib
-import json
+import math
 import os
+import random
 import re
 import secrets
 import shutil
@@ -42,6 +43,7 @@ class Plan:
     ledger: Any = None
     alone: bool = False  # one unit at a time: services are shared, or the seller's command shares this machine's caches
     memory: int | None = None  # bytes each container may hold
+    seed: str | None = None  # the repository's pick seed, hex: draws the units rerun alone for audit
 
 
 class Tree(dict):
@@ -676,14 +678,39 @@ def _runs(side: dict | None) -> list[dict]:
 
 
 def _suspect(row: dict, tip: dict | None) -> bool:
-    """Whether a unit run beside others must run again alone before it counts: any build or test run of it failed
-    (an edit's, a past commit's before or after side, killed for memory or time included), or reported fewer tests
-    than the tip did alone. What it shows may be the others' doing; alone, it is its own."""
+    """Whether a unit run beside others must run again alone before it counts: a build failed, its post side failed,
+    a run was killed (exit 137, out of memory) or stopped for time, or it reported fewer tests than the tip did alone.
+    A before side's tests failing is expected (the commit's new tests, over its parent) and is no sign."""
     runs = [r for k in ("pre", "post") for r in _runs(row.get(k))]
-    if any(r.get("exit") != 0 for r in runs):
+    if any(r.get("exit") is None or r.get("exit") == KILLED for r in runs):
+        return True
+    if any((row.get(k) or {}).get("build", {}).get("exit", 0) != 0 for k in ("pre", "post")):
+        return True
+    if any(r.get("exit") != 0 for r in _runs(row.get("post"))):
         return True
     most = max((t.get("reported") or 0 for t in (tip or {}).get("tests", [])), default=0)
     return any((t.get("reported") or 0) < most for k in ("pre", "post") for t in (row.get(k) or {}).get("tests", []))
+
+
+KILLED = 137
+AUDIT_SHARE = 0.1
+"""Of the units run beside others, this share (at least one) runs again alone whatever it showed, drawn from the
+repository's pick seed: how often a shared run and an alone one disagree is then measured, not assumed."""
+
+
+def audited(seed: str | None, units: int) -> set[int]:
+    """The units (0-based, in run order) rerun alone for audit."""
+    if not units:
+        return set()
+    rng = random.Random(bytes.fromhex(seed or "") + b"audit")
+    return set(rng.sample(range(units), max(1, math.ceil(units * AUDIT_SHARE))))
+
+
+def _spent(row: dict | None) -> float:
+    """A unit's runs' own seconds, as the service sums them against the hours."""
+    if not row:
+        return 0.0
+    return float(sum(r.get("seconds") or 0 for k in ("pre", "post") for r in _runs(row.get(k))))
 
 
 def _stamped(row: dict, at_once: int) -> dict:
@@ -839,7 +866,6 @@ def _checks(
 ) -> dict[str, Any]:
     shas = {i: sha for sha, i in order.items()}
     by_id = {c["commit"]: c for c in commits}
-    deadline = time.monotonic() + plan.hours * 3600
     logs = _Logs((plan.logs or Path.cwd() / "kennet-test-logs") / name)
     given = plan.test is not None
     out: dict[str, Any] = {
@@ -935,7 +961,7 @@ def _checks(
     )
     if box and budget:
         plan = dataclasses.replace(plan, memory=max(budget // at_once, 1 << 30))
-    eta = Eta(len(targets) + len(edits) - before, at_once, tip_s, deadline)
+    eta = Eta(len(targets) + len(edits) - before, at_once, tip_s, time.monotonic() + plan.hours * 3600 / at_once)
     if targets or edits:
         work = " and ".join(
             f"{k} {what}{'s' if k != 1 else ''}"
@@ -946,36 +972,54 @@ def _checks(
         say(
             f"{name}: building and testing {work}"
             + (f", {took}" if took else "")
-            + f"; it stops after {plan.hours:g} h"
+            + f"; it stops after {plan.hours:g} h of build and test time"
         )
     halt: list[Stuck] = []
     gate = Gate()
     tip_side = out.get("tip")
+    audit = audited(plan.seed, len(targets) + len(edits)) if at_once > 1 else set()
+    spent = [0.0]
+    budget = plan.hours * 3600
+    lock = threading.Lock()
 
-    def measured(key: object, label: str, attempt: Callable[[str], dict]) -> tuple[dict, float]:
-        """A unit run beside the others, and run again alone when what it shows may be the others' doing."""
+    def spend(row: dict | None) -> None:
+        with lock:
+            spent[0] += _spent(row)
+
+    def over() -> bool:
+        """The hours are the past commits' and edits' own run seconds, summed as the service sums them (the shared
+        attempt of a unit rerun alone not counted): what is claimed as stopped for its hours always spent them."""
+        with lock:
+            return spent[0] >= budget
+
+    def measured(key: object, label: str, attempt: Callable[[str], dict], audit: bool) -> tuple[dict, float]:
+        """A unit run beside the others, and run again alone when what it shows may be the others' doing, or when it
+        is drawn for audit; the shared attempt is kept beside the rerun as `shared`."""
         began = time.monotonic()
         with gate.shared(key):
             row = attempt(label)
         took = time.monotonic() - began
-        if at_once > 1 and _suspect(row, tip_side):
-            board.say(f"    {name}: {label} ran again alone, to rule out the others getting in its way")
-            shared = {**_stamped(row, gate.concurrency(key)), "wall_s": round(took, 3)}
-            try:
-                logs.root.mkdir(parents=True, exist_ok=True)
-                (logs.root / f"{label}.shared.json").write_text(json.dumps(shared, indent=1))
-            except OSError:
-                pass
+        if at_once > 1 and (audit or _suspect(row, tip_side)):
+            why = "drawn for audit" if audit and not _suspect(row, tip_side) else "to rule out the others' doing"
+            board.say(f"    {name}: {label} ran again alone, {why}")
+            first = _stamped(row, gate.concurrency(key))
+            shared = {
+                **{k: first[k] for k in ("pre", "post") if first.get(k) is not None},
+                "concurrency": _concurrency(first),
+                "wall_s": round(took, 3),
+            }
             began = time.monotonic()
             with gate.solo(key):
                 row = attempt(f"{label}.alone")
             took = time.monotonic() - began
+            return {**_stamped(row, gate.concurrency(key)), "shared": shared}, took
         return _stamped(row, gate.concurrency(key)), took
 
     def one(n: int, i: int) -> dict | None:
         if ledger and (kept := ledger.get(name, "commit", i)) is not None:
+            spend(kept)
             return kept
-        if time.monotonic() > deadline or halt:
+        if over() or halt:
             return None
         label = f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
         began = time.monotonic()
@@ -988,7 +1032,7 @@ def _checks(
             def attempt(at: str) -> dict:
                 return _commit(repo, plan, runs, logs, at, parent, shas[i], lambda _s: None, found, jobs)
 
-            got, _took = measured(("commit", i), label, attempt)
+            got, _took = measured(("commit", i), label, attempt, n - 1 in audit)
             row = {"commit": i, "id": shas[i], **got}
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
@@ -1003,6 +1047,7 @@ def _checks(
         board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
         if ledger:
             ledger.put(name, "commit", i, row)
+        spend(row)
         return row
 
     tip_tree, where = _tree(repo, tip), paths or {}
@@ -1010,8 +1055,9 @@ def _checks(
     def edited(n: int, b: dict) -> dict | None:
         key = [b.get("file"), b.get("op"), b.get("nth")]
         if ledger and (kept := ledger.get(name, "edit", key)) is not None:
+            spend(kept)
             return kept
-        if time.monotonic() > deadline or halt:
+        if over() or halt:
             return None
         label = f"{n:03d}-tip"
         began = time.monotonic()
@@ -1022,7 +1068,7 @@ def _checks(
             def attempt(at: str) -> dict:
                 return _edited(repo, tip_tree, plan, runs, logs, at, where[b["file"]], b["op"], b["nth"], found, jobs)
 
-            got, took = measured(("edit", n), label, attempt)
+            got, took = measured(("edit", n), label, attempt, n - 1 in audit)
             row = {**b, **got, "concurrency": _concurrency(got), "wall_s": round(took, 3)}
         except Exception as e:  # noqa: BLE001
             board.end(label, False, f"{name}: {label} could not run ({type(e).__name__})", eta.end(n, 0.0, False))
@@ -1032,6 +1078,7 @@ def _checks(
         board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
         if ledger:
             ledger.put(name, "edit", key, row)
+        spend(row)
         return row
 
     units = [(one, n, i) for n, i in enumerate(targets, 1)] + [

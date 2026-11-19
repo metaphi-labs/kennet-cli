@@ -1,0 +1,294 @@
+{
+ "about": "One repository's profile entry and the sha256 of its canonical form: the entry as UTF-8 JSON, keys sorted at every level, separators ',' and ':' with no whitespace, non-ASCII characters as themselves (not \\u escapes); no floats occur. kennet/api/codeval.py entry_sha256; the CLI sends it to /picks as profile_sha256.",
+ "canonical": "{\"authors\":[{\"author\":1,\"bot\":false,\"domain\":1}],\"commits\":[{\"author\":1,\"authored_at\":1236600000,\"body_lines\":0,\"commit\":1,\"committed_at\":1236600000,\"committer\":1,\"files\":[{\"added\":1,\"deleted\":0,\"file\":1,\"hunks\":1,\"status\":\"A\"}],\"first_parent\":true,\"fix_word\":false,\"msg_chars\":3,\"msg_lines\":1,\"parents\":[],\"path_terms\":0,\"pr_merge\":false,\"prefixed\":false,\"revert\":false,\"reverts\":null,\"subject_chars\":3,\"subject_key\":\"0000000000000000\",\"ticket_refs\":0,\"trailers\":[],\"tz\":\"-0500\"},{\"author\":1,\"authored_at\":1236600000,\"body_lines\":0,\"commit\":2,\"committed_at\":1236600000,\"committer\":1,\"files\":[{\"added\":10,\"deleted\":0,\"file\":1,\"hunks\":1,\"status\":\"M\"},{\"added\":10,\"deleted\":0,\"file\":2,\"hunks\":1,\"status\":\"M\"}],\"first_parent\":true,\"fix_word\":false,\"msg_chars\":3,\"msg_lines\":1,\"parents\":[1],\"path_terms\":0,\"pr_merge\":false,\"prefixed\":false,\"revert\":false,\"reverts\":null,\"subject_chars\":3,\"subject_key\":\"0000000000000000\",\"ticket_refs\":0,\"trailers\":[],\"tz\":\"-0500\"},{\"author\":1,\"authored_at\":1236600000,\"body_lines\":0,\"commit\":3,\"committed_at\":1236600000,\"committer\":1,\"files\":[{\"added\":10,\"deleted\":0,\"file\":1,\"hunks\":1,\"status\":\"M\"},{\"added\":10,\"deleted\":0,\"file\":2,\"hunks\":1,\"status\":\"M\"},{\"added\":10,\"deleted\":0,\"file\":3,\"hunks\":1,\"status\":\"M\"},{\"added\":10,\"deleted\":0,\"file\":4,\"hunks\":1,\"status\":\"M\"}],\"first_parent\":true,\"fix_word\":false,\"msg_chars\":3,\"msg_lines\":1,\"parents\":[2],\"path_terms\":0,\"pr_merge\":false,\"prefixed\":false,\"revert\":false,\"reverts\":null,\"subject_chars\":3,\"subject_key\":\"0000000000000000\",\"ticket_refs\":0,\"trailers\":[],\"tz\":\"-0500\"},{\"author\":1,\"authored_at\":1236600000,\"body_lines\":0,\"commit\":4,\"committed_at\":1236600000,\"committer\":1,\"files\":[{\"added\":10,\"deleted\":0,\"file\":1,\"hunks\":1,\"status\":\"M\"},{\"added\":10,\"deleted\":0,\"file\":2,\"hunks\":1,\"status\":\"M\"},{\"added\":10,\"deleted\":0,\"file\":3,\"hunks\":1,\"status\":\"M\"},{\"added\":10,\"deleted\":0,\"file\":4,\"hunks\":1,\"status\":\"M\"}],\"first_parent\":true,\"fix_word\":false,\"msg_chars\":3,\"msg_lines\":1,\"parents\":[3],\"path_terms\":0,\"pr_merge\":false,\"prefixed\":false,\"revert\":false,\"reverts\":null,\"subject_chars\":3,\"subject_key\":\"0000000000000000\",\"ticket_refs\":0,\"trailers\":[],\"tz\":\"-0500\"}],\"dirs\":[{\"dir\":1,\"parent\":0}],\"env\":{\"ci\":[],\"ci_files\":0,\"ci_services\":0,\"compose_built\":0,\"compose_files\":1,\"compose_services\":3,\"devcontainer\":false,\"dockerfiles\":1,\"other_images\":2,\"service_images\":[\"postgres\"]},\"files\":[{\"at_tip\":true,\"blob\":\"aaaaaaaaaaaaaaaa\",\"bytes\":2,\"depth\":0,\"dir\":1,\"ext\":\"c\",\"file\":1,\"kind\":\"source\",\"known_name\":null,\"lines\":1},{\"at_tip\":true,\"depth\":1,\"dir\":1,\"ext\":\"c\",\"file\":2,\"kind\":\"test\",\"known_name\":null},{\"at_tip\":true,\"depth\":0,\"dir\":1,\"ext\":\"c\",\"file\":3,\"kind\":\"source\",\"known_name\":null},{\"at_tip\":true,\"depth\":0,\"dir\":1,\"ext\":\"c\",\"file\":4,\"kind\":\"source\",\"known_name\":null},{\"at_tip\":true,\"depth\":0,\"dir\":1,\"ext\":\"yaml\",\"file\":5,\"kind\":\"test\",\"known_name\":null},{\"at_tip\":true,\"depth\":0,\"dir\":1,\"ext\":\"mod\",\"file\":6,\"kind\":\"config\",\"known_name\":\"go.mod\"}],\"git\":{\"branches\":1,\"lfs\":false,\"pack_bytes\":10,\"submodules\":0,\"tag_refs\":[]},\"licenses\":[\"MIT\",\"Apache-2.0\"],\"name\":\"café-core\",\"roots\":[\"0000000000000000000000000000000000000001\"],\"tip\":\"0000000000000000000000000000000000000004\"}",
+ "entry": {
+  "name": "café-core",
+  "tip": "0000000000000000000000000000000000000004",
+  "roots": [
+   "0000000000000000000000000000000000000001"
+  ],
+  "licenses": [
+   "MIT",
+   "Apache-2.0"
+  ],
+  "git": {
+   "branches": 1,
+   "tag_refs": [],
+   "submodules": 0,
+   "lfs": false,
+   "pack_bytes": 10
+  },
+  "env": {
+   "ci": [],
+   "ci_files": 0,
+   "ci_services": 0,
+   "compose_files": 1,
+   "compose_services": 3,
+   "compose_built": 0,
+   "service_images": [
+    "postgres"
+   ],
+   "other_images": 2,
+   "dockerfiles": 1,
+   "devcontainer": false
+  },
+  "authors": [
+   {
+    "author": 1,
+    "domain": 1,
+    "bot": false
+   }
+  ],
+  "dirs": [
+   {
+    "dir": 1,
+    "parent": 0
+   }
+  ],
+  "commits": [
+   {
+    "commit": 1,
+    "parents": [],
+    "first_parent": true,
+    "author": 1,
+    "committer": 1,
+    "authored_at": 1236600000,
+    "committed_at": 1236600000,
+    "tz": "-0500",
+    "msg_chars": 3,
+    "msg_lines": 1,
+    "ticket_refs": 0,
+    "pr_merge": false,
+    "fix_word": false,
+    "revert": false,
+    "reverts": null,
+    "trailers": [],
+    "subject_chars": 3,
+    "body_lines": 0,
+    "prefixed": false,
+    "path_terms": 0,
+    "subject_key": "0000000000000000",
+    "files": [
+     {
+      "file": 1,
+      "status": "A",
+      "added": 1,
+      "deleted": 0,
+      "hunks": 1
+     }
+    ]
+   },
+   {
+    "commit": 2,
+    "parents": [
+     1
+    ],
+    "first_parent": true,
+    "author": 1,
+    "committer": 1,
+    "authored_at": 1236600000,
+    "committed_at": 1236600000,
+    "tz": "-0500",
+    "msg_chars": 3,
+    "msg_lines": 1,
+    "ticket_refs": 0,
+    "pr_merge": false,
+    "fix_word": false,
+    "revert": false,
+    "reverts": null,
+    "trailers": [],
+    "subject_chars": 3,
+    "body_lines": 0,
+    "prefixed": false,
+    "path_terms": 0,
+    "subject_key": "0000000000000000",
+    "files": [
+     {
+      "file": 1,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     },
+     {
+      "file": 2,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     }
+    ]
+   },
+   {
+    "commit": 3,
+    "parents": [
+     2
+    ],
+    "first_parent": true,
+    "author": 1,
+    "committer": 1,
+    "authored_at": 1236600000,
+    "committed_at": 1236600000,
+    "tz": "-0500",
+    "msg_chars": 3,
+    "msg_lines": 1,
+    "ticket_refs": 0,
+    "pr_merge": false,
+    "fix_word": false,
+    "revert": false,
+    "reverts": null,
+    "trailers": [],
+    "subject_chars": 3,
+    "body_lines": 0,
+    "prefixed": false,
+    "path_terms": 0,
+    "subject_key": "0000000000000000",
+    "files": [
+     {
+      "file": 1,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     },
+     {
+      "file": 2,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     },
+     {
+      "file": 3,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     },
+     {
+      "file": 4,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     }
+    ]
+   },
+   {
+    "commit": 4,
+    "parents": [
+     3
+    ],
+    "first_parent": true,
+    "author": 1,
+    "committer": 1,
+    "authored_at": 1236600000,
+    "committed_at": 1236600000,
+    "tz": "-0500",
+    "msg_chars": 3,
+    "msg_lines": 1,
+    "ticket_refs": 0,
+    "pr_merge": false,
+    "fix_word": false,
+    "revert": false,
+    "reverts": null,
+    "trailers": [],
+    "subject_chars": 3,
+    "body_lines": 0,
+    "prefixed": false,
+    "path_terms": 0,
+    "subject_key": "0000000000000000",
+    "files": [
+     {
+      "file": 1,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     },
+     {
+      "file": 2,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     },
+     {
+      "file": 3,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     },
+     {
+      "file": 4,
+      "status": "M",
+      "added": 10,
+      "deleted": 0,
+      "hunks": 1
+     }
+    ]
+   }
+  ],
+  "files": [
+   {
+    "file": 1,
+    "dir": 1,
+    "depth": 0,
+    "ext": "c",
+    "kind": "source",
+    "known_name": null,
+    "at_tip": true,
+    "blob": "aaaaaaaaaaaaaaaa",
+    "bytes": 2,
+    "lines": 1
+   },
+   {
+    "file": 2,
+    "dir": 1,
+    "depth": 1,
+    "ext": "c",
+    "kind": "test",
+    "known_name": null,
+    "at_tip": true
+   },
+   {
+    "file": 3,
+    "dir": 1,
+    "depth": 0,
+    "ext": "c",
+    "kind": "source",
+    "known_name": null,
+    "at_tip": true
+   },
+   {
+    "file": 4,
+    "dir": 1,
+    "depth": 0,
+    "ext": "c",
+    "kind": "source",
+    "known_name": null,
+    "at_tip": true
+   },
+   {
+    "file": 5,
+    "dir": 1,
+    "depth": 0,
+    "ext": "yaml",
+    "kind": "test",
+    "known_name": null,
+    "at_tip": true
+   },
+   {
+    "file": 6,
+    "dir": 1,
+    "depth": 0,
+    "ext": "mod",
+    "kind": "config",
+    "known_name": "go.mod",
+    "at_tip": true
+   }
+  ]
+ },
+ "sha256": "90cc29668f85a3cd9dbf1015dd1a31fde873f6cc9d1ad34acdf1573b9b886bb6"
+}

@@ -92,11 +92,11 @@ def home(tmp_path, monkeypatch):
 
 def test_document_has_no_content(repo):
     doc = _document([str(repo)], say=lambda s: None)
-    sent = json.dumps(doc).replace('"falcon_core"', "")
+    sent = json.dumps(doc)
     for word in SECRET:
         assert word not in sent, word
     r = doc["repos"][0]
-    assert r["name"] == "falcon_core" and len(r["commits"]) == 3
+    assert r["name"] == "[repo:0]" and len(r["commits"]) == 3 and "falcon_core" not in sent
 
 
 def test_compute(repo):
@@ -105,7 +105,8 @@ def test_compute(repo):
     assert (
         c1["parents"] == []
         and c2["parents"] == [1]
-        and c1["trailers"] == [{"key": "signed-off-by", "domain": "acme.test"}, {"key": "project-falcon", "domain": ""}]
+        and c1["trailers"]
+        == [{"key": "signed-off-by", "domain": "d1.invalid"}, {"key": "project-falcon", "domain": ""}]
     )
     assert c2["ticket_refs"] == 1 and c2["fix_word"] and not c1["fix_word"]
     assert (
@@ -166,7 +167,7 @@ def test_url_clone(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(codeval.tempfile, "TemporaryDirectory", lambda **k: made.append(real(**k)) or made[-1])
     said = []
     doc = _document([f"file://{origin}"], say=said.append)
-    assert [r["name"] for r in doc["repos"]] == ["falcon_core"] and doc["skipped"] == []
+    assert [r["name"] for r in doc["repos"]] == ["[repo:0]"] and doc["skipped"] == []
     assert said == ["Cloning falcon_core…"]
     local = _document([str(repo)], say=lambda s: None)["repos"][0]
     assert _comparable(doc["repos"][0]["commits"]) == _comparable(local["commits"])
@@ -177,8 +178,8 @@ def test_url_clone(repo, tmp_path, monkeypatch):
 def test_url_clone_fails(repo, tmp_path):
     said = []
     doc = _document([f"file://{tmp_path}/missing.git", str(repo)], say=said.append)
-    assert doc["skipped"] == [{"name": "missing", "reason": "clone_failed"}]
-    assert [r["name"] for r in doc["repos"]] == ["falcon_core"]
+    assert doc["skipped"] == [{"name": "[repo]", "reason": "clone_failed"}]
+    assert [r["name"] for r in doc["repos"]] == ["[repo:0]"]
     assert any(s.startswith("✗ Skipped missing: clone failed (") and s.endswith("in this terminal") for s in said)
 
 
@@ -1140,6 +1141,7 @@ def test_units_at_once_follow_cores_free_memory_and_the_cap(monkeypatch):
 def _at_once(monkeypatch, n=2):
     monkeypatch.setattr(codebase_checks, "workers", lambda units, peak=None, budget=None: (n, 1))
     monkeypatch.setattr(codeval, "shares_state", lambda services, plan: False)
+    monkeypatch.setattr(codebase_checks, "audited", lambda seed, units: set())
 
 
 def test_a_sellers_own_command_on_this_machine_runs_one_unit_at_a_time(tested, monkeypatch):
@@ -1153,13 +1155,22 @@ def test_units_run_at_once_and_each_run_says_how_many_ran_with_it(tested, monkey
     _at_once(monkeypatch)
     got = _checked(tested, test="sleep 1; " + PYTEST.format(py=sys.executable))[1]["repos"][0]
     assert [t["concurrency"] for t in got["tip"]["tests"]] == [1]
-    clean = [c for c in got["commits"] if all(r["exit"] == 0 for r in (*c["pre"]["tests"], *c["post"]["tests"]))]
-    assert clean, "some past commit passed on both sides"
+    assert any("shared" not in c for c in got["commits"]), "some past commit counted as run beside another"
     for c in got["commits"]:
         runs = [*c["pre"]["tests"], *c["post"]["tests"]]
-        failed = any(r["exit"] != 0 for r in runs)
-        assert {r["concurrency"] for r in runs} == ({1} if failed else {2}), "a failure beside others reruns alone"
+        assert {r["concurrency"] for r in runs} == ({1} if "shared" in c else {2})
         assert all(r["wall_s"] >= 1 for r in runs)
+        if "shared" in c:
+            assert c["shared"]["concurrency"] == 2 and c["shared"]["wall_s"] >= 1 and c["shared"]["post"]
+
+
+def test_a_unit_drawn_for_audit_runs_again_alone_and_keeps_its_shared_run(tested, monkeypatch):
+    _at_once(monkeypatch)
+    monkeypatch.setattr(codebase_checks, "audited", lambda seed, units: {0})
+    got = _checked(tested, test=PYTEST.format(py=sys.executable))[1]["repos"][0]
+    first = got["commits"][0]
+    assert {r["concurrency"] for r in first["post"]["tests"]} == {1}
+    assert first["shared"]["concurrency"] == 2 and set(first["shared"]) >= {"pre", "post", "wall_s"}
 
 
 def test_a_unit_that_collided_with_another_runs_again_alone_before_it_counts(tested, monkeypatch, tmp_path):
@@ -1182,12 +1193,30 @@ def test_a_unit_that_collided_with_another_runs_again_alone_before_it_counts(tes
     assert any("ran again alone" in line for line in lines)
 
 
-def test_beside_others_any_failure_or_fewer_tests_runs_again_alone():
+def test_beside_others_a_failure_that_may_be_the_others_doing_runs_again_alone():
     tip = {"tests": [{"exit": 0, "reported": 10}]}
     passed = {"pre": {"tests": [{"exit": 0, "reported": 10}]}, "post": {"tests": [{"exit": 0, "reported": 10}]}}
     assert not codebase_checks._suspect(passed, tip)
-    assert codebase_checks._suspect({"post": {"tests": [{"exit": 1, "reported": 10}]}}, tip), "an edit's failure"
-    assert codebase_checks._suspect({"pre": {"tests": [{"exit": 1, "reported": 10}]}}, tip), "a pre side's failure"
-    assert codebase_checks._suspect({"post": {"build": {"exit": 137}, "tests": []}}, tip), "killed for memory"
+    pre_failed = {"pre": {"tests": [{"exit": 1, "reported": 10}]}, "post": {"tests": [{"exit": 0, "reported": 10}]}}
+    assert not codebase_checks._suspect(pre_failed, tip), "a before side failing its new tests is expected"
+    assert codebase_checks._suspect({"post": {"tests": [{"exit": 1, "reported": 10}]}}, tip), "the post side failed"
+    assert codebase_checks._suspect({"pre": {"build": {"exit": 2}, "tests": []}}, tip), "a build failed"
+    assert codebase_checks._suspect({"pre": {"tests": [{"exit": 137, "reported": 10}]}}, tip), "killed for memory"
     assert codebase_checks._suspect({"post": {"tests": [{"exit": None}]}}, tip), "stopped for time"
     assert codebase_checks._suspect({"post": {"tests": [{"exit": 0, "reported": 7}]}}, tip), "a test went missing"
+
+
+def test_the_audit_draw_is_a_tenth_at_least_one_and_follows_the_seed():
+    assert len(codebase_checks.audited("ab" * 16, 3)) == 1
+    assert len(codebase_checks.audited("ab" * 16, 41)) == 5
+    assert codebase_checks.audited("ab" * 16, 41) == codebase_checks.audited("ab" * 16, 41)
+    assert codebase_checks.audited("ab" * 16, 41) != codebase_checks.audited("cd" * 16, 41)
+    assert codebase_checks.audited("ab" * 16, 0) == set()
+
+
+def test_the_hours_are_the_runs_own_seconds_and_stopping_for_them_spent_them(tested):
+    got = _checked(tested, runs=1, test="sleep 1; " + PYTEST.format(py=sys.executable), hours=1 / 3600)[1]
+    repo = got["repos"][0]
+    assert repo["stopped"] == "hours" and len(repo["commits"]) == 1, "the first commit spent the hour's budget"
+    spent = sum(r["seconds"] for c in repo["commits"] for k in ("pre", "post") for r in c[k]["tests"])
+    assert spent >= 1

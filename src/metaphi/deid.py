@@ -52,7 +52,8 @@ SECRETS = (
     (
         "assignment",
         re.compile(
-            rb"(?i)((?:TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|(?:API|ACCESS|SECRET|PRIVATE|SIGNING)[_-]?KEY)"
+            rb"(?i)((?:TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|SESSION(?:[_-]?ID)?|"
+            rb"(?:API|ACCESS|SECRET|PRIVATE|SIGNING)[_-]?KEY)"
             rb"[\"']?\s*[=:]\s*[\"']?)(?!\[[a-z_]+(?::[A-Za-z0-9_]+)?\])[^\s\"',;]{4,}"
         ),
     ),
@@ -60,6 +61,12 @@ SECRETS = (
         "keyword_token",
         re.compile(
             rb"(?i)(\b(?:token|bearer|auth|authorization|api[_-]?key|secret|password)\b[\s\"']+)[a-z0-9]{32,}\b"
+        ),
+    ),
+    (
+        "prefixed_token",
+        re.compile(
+            rb"\b[a-z][a-z0-9]{1,9}_(?=[A-Za-z0-9]*[0-9])(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*[a-z])[A-Za-z0-9]{20,}\b"
         ),
     ),
     ("ssn", re.compile(rb"(?<![\w-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\w-])")),
@@ -299,6 +306,7 @@ class Known:
     known domain is still found whole."""
 
     values: dict[str, tuple[str, bool, bool]] = field(default_factory=dict)
+    segments: dict[str, str] = field(default_factory=dict)  # a name replaced as a whole path or URL segment
     _compiled: dict[bool, tuple[re.Pattern[bytes], dict[bytes, bytes]]] = field(default_factory=dict)
 
     def add(self, value: str | None, placeholder: str, word: bool = False, late: bool = False) -> None:
@@ -345,10 +353,38 @@ class Known:
 
         return pattern.sub(sub, data)
 
+    def segment(self, name: str, placeholder: str) -> None:
+        """A name replaced wherever it is a whole segment after a `/` (`/dev/ledgerline`, `host/fin/ledgerline.git`),
+        not where it begins a longer one (`/Ledgerline.Core/`)."""
+        if len(name) >= 3:
+            self.segments.setdefault(name.lower(), placeholder)
+            self._compiled.clear()
+
+    def _segment_pattern(self) -> re.Pattern[bytes] | None:
+        if not self.segments:
+            return None
+        names = b"|".join(re.escape(n.encode()) for n in sorted(self.segments, key=len, reverse=True))
+        return re.compile(rb"(?i)(?<=/)(" + names + rb")(?:\.git)?(?![A-Za-z0-9_.-])")
+
+    def replace_segments(self, data: bytes, counts: collections.Counter) -> bytes:
+        pattern = self._segment_pattern()
+        if pattern is None:
+            return data
+
+        def sub(m: re.Match[bytes]) -> bytes:
+            placeholder = self.segments[m.group(1).decode().lower()]
+            counts[_kind_of(placeholder.encode())] += 1
+            return placeholder.encode()
+
+        return pattern.sub(sub, data)
+
     def left(self, data: bytes) -> collections.Counter:
         """Known identifiers still in `data`, counted by kind."""
         pattern, to = self._pattern(None)
-        return collections.Counter(_kind_of(to[m.group(0).lower()]) for m in pattern.finditer(data) if not m.group(1))
+        got = collections.Counter(_kind_of(to[m.group(0).lower()]) for m in pattern.finditer(data) if not m.group(1))
+        if (segments := self._segment_pattern()) is not None:
+            got.update(_kind_of(self.segments[m.group(1).decode().lower()].encode()) for m in segments.finditer(data))
+        return got
 
 
 COMMON_WORDS = frozenset(
@@ -481,17 +517,14 @@ def name_forms(name: str) -> set[str]:
 
 
 NAME_PART_MIN = 4
-DICTIONARY = Path("/usr/share/dict/words")
+WORDS_FILE = Path(__file__).parent / "data" / "common_words.txt"
 
 
 @functools.cache
 def _dictionary() -> frozenset[str]:
-    """Lower-case English words, where the system has a word list: a given name that is also a word (`Mark`,
-    `Grace`, `Hunter`) is not replaced alone, or ordinary text would be rewritten."""
-    try:
-        return frozenset(w.strip().lower() for w in DICTIONARY.read_text(errors="replace").splitlines())
-    except OSError:
-        return frozenset()
+    """Common English words, from the list this package carries (the same on every machine): a given name or surname
+    that is also one (`Mark`, `Grace`, `Hunter`) is not replaced alone, or ordinary text would be rewritten."""
+    return frozenset(w.strip().lower() for w in WORDS_FILE.read_text().splitlines() if w.strip())
 
 
 def name_parts(name: str) -> set[str]:
@@ -517,7 +550,33 @@ def name_parts(name: str) -> set[str]:
         for joined in (first[0] + last, first + last, first + last[0], last + first[0]):
             if len(joined) >= NAME_PART_MIN + 1:
                 out.add(joined)
+        for initial in (f"{first[0]}. {last}", f"{first[0]}.{last}", f"{first[0]} {last}"):
+            out.add(initial)
     return out
+
+
+def _url_names(repo: dict[str, Any]) -> set[str]:
+    """The repository's name as its remotes give it (`git@host:fin/ledgerline.git`: `ledgerline`)."""
+    out = set()
+    for url in [*(repo.get("remotes") or []), repo.get("given") or ""]:
+        if re.match(r"^(?:[\w.+-]+://|[\w.-]+@[\w.-]+:)", url):
+            tail = re.split(r"[/:]", url.rstrip("/"))[-1]
+            out.add(re.sub(r"\.git$", "", tail))
+    return out
+
+
+def _repo_name(k: Known, name: str, n: int, declared: list[str]) -> None:
+    """The repository's name is an identifier: always replaced in a path or URL (`/ledgerline`), and as a bare word
+    too unless the repository declares a package or module of that name or under it (`ledgerline-core`), or it is a
+    common word (`api`, `server`).
+    Replaced after the patterns, so a URL that holds it is still found whole."""
+    if len(name) < 4:
+        return
+    k.segment(name, f"[repo:{n}]")
+    folded = re.sub(r"[-_.\s]+", "-", name.lower())
+    namespace = any(d == folded or d.startswith(folded + "-") for d in declared)
+    if not namespace and name.lower() not in COMMON_WORDS and name.lower() not in _dictionary():
+        k.add(name, f"[repo:{n}]", word=True, late=True)
 
 
 def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
@@ -545,6 +604,8 @@ def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
         if path:
             k.add(str(path), f"[repo:{n}]")
             k.add(os.path.realpath(path), f"[repo:{n}]")
+        for name in {repo.get("name") or "", *_url_names(repo)}:
+            _repo_name(k, name, n, repo.get("declared") or [])
         authors: dict[str, int] = repo.get("authors") or {}
         domains: dict[str, int] = repo.get("domains") or {}
         for email, i in authors.items():
@@ -576,6 +637,8 @@ def known(repos: Iterable[dict[str, Any]]) -> list[Known]:
         out.append(k)
     for k in out:
         for other in out:
+            for name in other.segments if other is not k else ():
+                k.segment(name, "[repo]")
             for value, (placeholder, word, late) in other.values.items():
                 k.add(value, re.sub(r"^\[(author|domain):\d+\]$", r"[\1]", placeholder), word, late)
     return out
@@ -718,10 +781,17 @@ _LEADS = (
     r"(?i:rue|avenue|av\.|boulevard|bd|chemin|impasse|all[ée]e|quai|place|via|viale|piazza|corso|calle|carrer"
     r"|avenida|rua|travessa|plaza|paseo|ulica|ul\.)"
 )
-_UNIT = r"(?:Apt|Apartment|Suite|Ste|Unit|Flat|Floor|Fl|Bldg|Building|Room|Rm)\.?[ \t]*#?[\w-]+|#[\w-]+"
+_UNIT = (
+    r"(?:Apt|Apartment|Suite|Ste|Unit|Flat|Floor|Fl|Bldg|Building|Room|Rm|Office|Villa)\b\.?[ \t]*#?[\w-]+|#[\w-]+"
+    r"|\d{1,3}(?:st|nd|rd|th)[ \t]+(?:Floor|Fl)\.?"
+)
+_UK_POSTCODE = r"[A-Z]{1,2}\d[A-Z\d]?[ \t]+\d[A-Z]{2}"
+_BUILDINGS = r"Tower|Towers|Building|House|Centre|Center|Plaza|Complex|Court|Mall|Park"
 _PART = (
     rf"{_UNIT}"
     rf"|\d{{4,6}}(?:-\d{{3,4}})?(?:[ \t]+{_CAP}){{1,3}}"
+    rf"|{_CAP}(?:[ \t]+{_CAP}){{0,2}}[ \t]+{_UK_POSTCODE}"
+    rf"|{_UK_POSTCODE}"
     rf"|{_CAP}(?:[ \t]+{_CAP}){{0,2}}(?:[ \t]+[A-Z]{{2}})?(?:[ \t]+\d{{3,6}}(?:-\d{{3,4}})?)?"
     rf"|[A-Z]{{2}}[ \t]+\d{{5}}(?:-\d{{4}})?"
 )
@@ -729,7 +799,9 @@ ADDRESS = re.compile(
     r"(?<![\w.:/#-])(?:"
     rf"\d{{1,6}}[A-Za-z]?(?:[ \t]+{_CAP}){{1,4}}[ \t]+(?:{_TYPES})\b\.?"
     rf"|\d{{1,5}}[A-Za-z]?,?[ \t]+{_LEADS}(?:[ \t]+(?:{_JOINS}[ \t]+)*{_CAP}){{1,4}}"
-    rf"|{_UP}[^\W\d_]*(?:stra(?:ss|ß)e|str\.|weg|gasse|platz|allee|straat|gracht|laan|kade|vej|gatan|gata|veien)"
+    rf"|(?:Office|Suite|Unit|Flat|Villa|Apt)\.?[ \t]*\d{{1,5}}[A-Za-z]?,[ \t]*(?:{_CAP}[ \t]+){{1,3}}(?:{_BUILDINGS})\b"
+    rf"|{_UP}[^\W\d_]*(?:stra(?:ss|ß)e|str\.|weg|gasse|platz|allee|straat|gracht|laan|kade|vej|gade|gatan|gata|veien"
+    r"|v[äa]gen|torget|katu|tie|utca|ulica)"
     r"[ \t]+\d{1,4}[a-z]?\b"
     rf"|\d{{1,2}}-\d{{1,2}}(?:-\d{{1,3}})?[ \t]+{_CAP}(?=,)"
     rf")(?:,?[ \t]+(?:{_UNIT}))?(?:,[ \t]*(?:{_PART})){{0,3}}"
@@ -742,10 +814,31 @@ PHONES = (
     re.compile(rb"(?<![\w+/.=-])\+[1-9]\d{0,2}(?:[ .-]?\(?\d{1,5}\)?){1,6}(?![\w.:/-]|\.\d)"),
     re.compile(rb"(?<![\w./:-])\(\d{3}\)[ ]?\d{3}[-.]\d{4}(?![\w.:/-])"),
     re.compile(rb"(?<![\w./:-])(?:\d{3}-\d{3}-\d{4}|0\d{1,4}-\d{6,8}|0\d{1,4} \d{3,4} \d{3,4})(?![\w.:/-])"),
-    re.compile(rb"(?i)(\b(?:phone|tel|telephone|mobile|cell|fax)[ \t]?[:=#][ \t]?)(\(?\d[\d ().-]{5,}\d)"),
+    re.compile(rb"(?i)(\b(?:phone|tel|telephone|mobile|cell|fax)[ \t]?[:=#][ \t]*[\"']?)(\(?\d[\d ().-]{5,}\d)"),
 )
 """Phone numbers: international (`+44 20 7946 0958`, 8 to 15 digits), North American (`(208) 555-0143`,
 `208-555-0143`), trunk-prefixed national (`020-79460958`, `020 7946 0958`), and digits after `phone:` or `tel=`."""
+
+
+PHONE_WORD = re.compile(rb"(?i)phone|\btel\b|mobile|contact|\bcell\b|\bfax\b")
+BARE_PHONE = re.compile(rb"(?<![\w.:/+-])\+?\d{10,15}(?![\w.:/-])")
+"""A bare run of 10 to 15 digits, a phone number on a line that names one (`normalisesPhone ... was: <4155550172>`);
+elsewhere a run like it is an id or a time."""
+
+
+def _bare_phones(data: bytes, counts: collections.Counter) -> bytes:
+    if not PHONE_WORD.search(data):
+        return data
+    lines = data.split(b"\n")
+    for i, line in enumerate(lines):
+        if PHONE_WORD.search(line):
+
+            def sub(m: re.Match[bytes]) -> bytes:
+                counts["phone"] += 1
+                return b"[phone]"
+
+            lines[i] = BARE_PHONE.sub(sub, line)
+    return b"\n".join(lines)
 
 
 def _phones(data: bytes, counts: collections.Counter) -> bytes:
@@ -763,7 +856,7 @@ def _phones(data: bytes, counts: collections.Counter) -> bytes:
 
     for pattern in PHONES:
         data = pattern.sub(sub, data)
-    return data
+    return _bare_phones(data, counts)
 
 
 def _addresses(data: bytes, counts: collections.Counter) -> bytes:
@@ -891,6 +984,7 @@ class Scrubber:
         data = self.known.replace(data, self.counts)
         data = _patterns(data, self.counts)
         data = self.known.replace(data, self.counts, late=True)
+        data = self.known.replace_segments(data, self.counts)
         if self.model is not None:
             data = _modelled(data, self.model, self.counts)
         return data

@@ -71,7 +71,7 @@ def _server(picked=(2,), checks=200, logs=200):
                 "pick_id": "cvp_" + "1" * 16,
                 "repos": [
                     {
-                        "fingerprint": r["fingerprint"],
+                        "fingerprint": codeval.fingerprint(r["commits"][0]["id"]),
                         "seed": SEED,
                         "commits": [r["commits"][i - 1]["id"] for i in picked],
                     }
@@ -462,3 +462,88 @@ def test_not_signed_in_with_no_terminal_it_prints_the_code_at_once_and_the_rerun
     out = capsys.readouterr()
     assert json.loads(out.out)["state"] == "measured" and "Signed in as owner@example.com" in out.err
     assert start.call_count == 1 and got["picks"].called and "device_pending" not in config.load()
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("message", "said"),
+    [
+        ("ab12: it was picked for another profile of it; CodeVal measures a repository once", "measured before"),
+        ("ab12: this history was already picked as another repository", "a fork or a near copy"),
+    ],
+)
+def test_a_repository_measured_before_says_what_to_do(made, capsys, message, said):
+    got = _server()
+    got["picks"].mock(
+        return_value=httpx.Response(
+            400, json={"error": {"type": "invalid_request_error", "code": "bad_parameter", "message": message}}
+        )
+    )
+    assert cli.main(["codeval", str(made), "--json"]) == cli.FAILED
+    assert said in json.loads(capsys.readouterr().out)["error"]["next_step"]
+
+
+@respx.mock
+def test_picks_commit_to_the_profile_filed_and_send_the_line_from_its_root(made, capsys, tmp_path):
+    got = _server()
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    capsys.readouterr()
+    sent = json.loads(got["picks"].calls[0].request.content)
+    (repo,) = sent["repos"]
+    assert set(repo) == {"commits", "profile_sha256"}, "no fingerprint or roots: the service computes its own"
+    assert [c["has_parent"] for c in repo["commits"]] == [False, True, True]
+    assert set(repo["commits"][0]) == {"id", "at", "has_parent", "source_files", "source_lines", "test_code", "era"}
+    profile = json.loads(gzip.decompress((_home(tmp_path) / codeval.PAYLOAD / codeval.PROFILE).read_bytes()))
+    assert codeval.entry_sha256(profile["repos"][0]) == repo["profile_sha256"], "the entry filed is the one committed"
+    assert profile["repos"][0]["tip"] == repo["commits"][-1]["id"]
+
+
+@respx.mock
+def test_each_measured_commit_carries_its_proof_in_the_logs(made, capsys, tmp_path):
+    _server()
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    capsys.readouterr()
+    out = _home(tmp_path) / codeval.PAYLOAD
+    checks = json.loads(gzip.decompress((out / codeval.CHECKS).read_bytes()))
+    profile = json.loads(gzip.decompress((out / codeval.PROFILE).read_bytes()))
+    with tarfile.open(out / codeval.LOGS, "r:gz") as tar:
+        names = tar.getnames()
+        for row in checks["repos"][0]["commits"]:
+            head = tar.extractfile(f"0/proof/{row['id']}/head.txt").read()
+            stat = tar.extractfile(f"0/proof/{row['id']}/numstat.txt").read().decode()
+            assert head.decode().strip() == row["id"]
+            lines = [x.split("\t") for x in stat.splitlines()]
+            assert all(x[2] == "[file]" for x in lines)
+            files = next(c for c in profile["repos"][0]["commits"] if c["commit"] == row["commit"])["files"]
+            assert sorted((int(a), int(d)) for a, d, _ in lines) == sorted((f["added"], f["deleted"]) for f in files)
+    assert names[-1] == codeval.LOGS_DEID
+
+
+@respx.mock
+def test_joined_logs_are_asked_after_while_the_service_checks_them_and_no_part_goes_again(
+    made, capsys, tmp_path, monkeypatch
+):
+    got = _server()
+    _measured(made, tmp_path, monkeypatch, capsys, parts=2)
+    monkeypatch.setattr(codeval.time, "sleep", lambda s: None)
+    answers = iter([{"state": "checking"}, {"state": "checking"}, {"state": "received"}])
+    got["complete"].side_effect = lambda request: httpx.Response(
+        200 if (a := next(answers))["state"] == "received" else 202, json={"object": "codeval_logs", **a}
+    )
+    assert cli.main(["codeval", str(made)]) == 0
+    assert got["complete"].call_count == 3 and got["part"].call_count == 2
+    assert "Checking the logs" in capsys.readouterr().out
+
+
+@respx.mock
+def test_a_send_cut_short_while_the_logs_are_checked_only_asks_again(made, capsys, tmp_path, monkeypatch):
+    got = _server()
+    _measured(made, tmp_path, monkeypatch, capsys, parts=2)
+    monkeypatch.setattr(codeval.time, "sleep", lambda s: None)
+    monkeypatch.setattr(codeval, "COMPLETE_FOR", -1.0)
+    got["complete"].mock(return_value=httpx.Response(202, json={"object": "codeval_logs", "state": "checking"}))
+    assert cli.main(["codeval", str(made)]) != 0
+    assert got["part"].call_count == 2
+    got["complete"].mock(return_value=httpx.Response(200, json={"object": "codeval_logs", "state": "received"}))
+    assert cli.main(["codeval", str(made)]) == 0
+    assert got["part"].call_count == 2, "after the check began, no part is sent again"

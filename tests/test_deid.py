@@ -409,6 +409,10 @@ def test_a_known_value_that_is_a_placeholders_kind_does_not_trip_the_check():
         ("amex 378282246310005", "amex [redacted:card]"),
         ("not a card 4111 1111 1111 1112", "not a card 4111 1111 1111 1112"),
         ("ssn 123-45-6789", "ssn [redacted:ssn]"),
+        ("--remote_header=x bzl_Rk4Tn8Vw2Lp6Qx0Zc3Hm", "--remote_header=x [redacted:prefixed_token]"),
+        ("test_retry_on_service_unavailable_twice", "test_retry_on_service_unavailable_twice"),
+        ("cookie: session=7f3b9c2e1a8d4f6b0c5e", "cookie: session=[redacted:assignment]"),
+        ("DB=postgres://ledger_rw:Xk9!pQ2mZr7@db01:5432/x", "DB=postgres://[redacted:url_credentials]@db01:5432/x"),
     ],
 )
 def test_secrets_by_shape(line, said):
@@ -428,24 +432,61 @@ def test_a_long_line_is_read_by_the_model_in_overlapping_windows():
     assert "Jane" not in said and "Reviewed by [name] word" in said
 
 
-def test_the_profile_names_no_repository_or_domain_and_is_checked(tmp_path, seller):
+def test_the_profile_names_no_repository_and_keeps_only_ai_vendor_domains(tmp_path, seller):
     doc = {
         "repos": [
             {
                 "name": "falcon_core",
-                "commits": [{"commit": 0, "trailers": [{"key": "signed-off-by", "domain": "acme-corp.com"}]}],
+                "commits": [
+                    {
+                        "commit": 1,
+                        "trailers": [
+                            {"key": "signed-off-by", "domain": "acme-corp.com"},
+                            {"key": "co-authored-by", "domain": "anthropic.com"},
+                            {"key": "co-authored-by", "domain": "noreply.anthropic.com"},
+                            {"key": "co-authored-by", "domain": "gmail.com"},
+                            {"key": "fixes", "domain": ""},
+                        ],
+                    }
+                ],
             }
         ],
-        "skipped": [{"name": "falcon_secret", "reason": "no commits"}],
+        "skipped": [{"name": "falcon_secret", "reason": "unreadable"}],
     }
-    body, said = codeval.profile_packed(doc, [SELLER])
+    got = codeval.pseudonymized(doc, [SELLER])
+    assert [t["domain"] for t in got["repos"][0]["commits"][0]["trailers"]] == [
+        "d1.invalid",
+        "anthropic.com",
+        "noreply.anthropic.com",
+        "other.invalid",
+        "",
+    ]
+    body, said = codeval.profile_packed(got, [SELLER])
     text = gzip.decompress(body).decode()
     assert "falcon" not in text and "acme-corp" not in text
-    got = json.loads(text)
-    assert got["repos"][0]["name"] == "[repo:0]" and got["skipped"][0]["name"] == "[repo]"
-    assert said["replaced"]["repo"] == 2
+    assert json.loads(text)["repos"][0]["name"] == "[repo:0]" and json.loads(text)["skipped"][0]["name"] == "[repo]"
+    assert said["replaced"] == {"domain": 2, "repo": 2}
     with pytest.raises(deid.Unsafe):
         codeval.profile_packed({"repos": [{"name": "x", "note": "mail sam.seller@acme-corp.com"}]}, [SELLER])
+
+
+def test_a_profile_entry_hashes_as_the_service_does():
+    vector = json.loads((Path(__file__).parent / "data" / "codeval_entry.json").read_text())
+    assert codeval.entry_sha256(vector["entry"]) == vector["sha256"]
+
+
+def test_the_repository_name_is_replaced_in_paths_always_and_bare_unless_declared():
+    plain = {**SELLER, "name": "ledgerline", "remotes": ["git@git.halcyon.test:fin/ledgerline.git"], "declared": []}
+    said = _one(plain).text("cd /home/x/dev/ledgerline && ledgerline ok; see halcyon.test/fin/ledgerline/x")
+    assert "ledgerline" not in said and "[repo:0]" in said
+    declared = {**plain, "declared": ["ledgerline"]}
+    said = _one(declared).text("cd /home/x/dev/ledgerline && import ledgerline.http")
+    assert "/dev/[repo:0] &&" in said and "import ledgerline.http" in said
+    assert _one(declared).text("/w/Ledgerline.Core/x.cs") == "/w/Ledgerline.Core/x.cs", "a longer segment is kept"
+    namespace = {**plain, "declared": ["ledgerline-core"]}
+    assert _one(namespace).text("ledgerline_core::tests ok") == "ledgerline_core::tests ok"
+    common = {**plain, "name": "server", "remotes": [], "declared": []}
+    assert _one(common).text("server started at /w/server") == "server started at /w/[repo:0]"
 
 
 def test_a_log_that_cannot_be_read_is_named_not_skipped(tmp_path, seller, monkeypatch):
@@ -470,3 +511,27 @@ def test_commands_and_tool_versions_over_the_services_limit_are_cut_and_say_so()
     got = codeval._commands(None, long)["test"]
     assert len(got) == codeval.COMMAND_MOST and got.endswith(codeval.CUT)
     assert codeval.capped("java 21", codeval.TOOLCHAIN_MOST) == "java 21"
+
+
+@pytest.mark.parametrize(
+    ("line", "said"),
+    [
+        ('phone: "2125550148" }', 'phone: "[phone]" }'),
+        (
+            "normalisesPhone:93 expected: <x> but was: <4155550172>",
+            "normalisesPhone:93 expected: <x> but was: <[phone]>",
+        ),
+        ("build 20240101123456 took 12s", "build 20240101123456 took 12s"),
+        ("billing = Nørrebrogade 118, 2200 København N, Denmark", "billing = [address]"),
+        ("x | 14 Quillfeather Lane, Bristol BS8 1TH, United Kingdom", "x | [address]"),
+        ("at Office 1204, Al Fahidi Tower, Sheikh Zayed Road, Dubai", "at [address]"),
+        ("<address>350 Fifth Avenue, 21st Floor, New York, NY 10118</address>", "<address>[address]</address>"),
+    ],
+)
+def test_phones_and_addresses_by_shape(line, said):
+    assert _one(PRIYA).text(line) == said
+
+
+def test_an_authors_initial_and_surname_and_lowercase_given_name_are_their_id():
+    scrub = _one({**PRIYA, "people": [["Rohan Kapoor", "priya.natarajan@acme-corp.com"]]})
+    assert scrub.text("signed R. Kapoor, ping rohan") == "signed [author:3], ping [author:3]"

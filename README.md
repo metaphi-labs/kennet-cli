@@ -378,9 +378,12 @@ CI configuration and build files. When it cannot, it stops and says so; give the
 kennet codeval ./core -- 'make && make test'
 ```
 
-To pick the commits, `/codeval/picks` is sent, for each repository, the sha256 of its root commit ids and, for each
-first-parent commit, its id, its author time, how many source files and lines it changed, whether it changed test
-code and its build era. Nothing else leaves the machine before you say yes.
+To pick the commits, `/codeval/picks` is sent, for each repository, its first-parent commits from the root, oldest
+first: each one's id, author time, whether it has a parent, how many source files and lines it changed, whether it
+changed test code and its build era; and the sha256 of the repository's entry in the profile, which is made before
+and never changes after, so what is measured is what was committed to. Nothing else leaves the machine before you say
+yes. A repository is measured once: one already sent, a history rewritten since its commits were picked, or a fork
+of one already measured is refused, with what to do.
 
 On a large repository this takes hours. Every finished commit is kept in `./kennet-codeval/<run>/checks.jsonl`, and
 the machine is kept awake while it runs (`caffeinate` on macOS, `systemd-inhibit` on Linux). If it stops (the machine
@@ -388,8 +391,11 @@ slept, a toolchain is missing, the process was stopped), run the same command ag
 never runs a finished commit twice. In Docker or Podman, past commits and edits run several at once, each in its own
 copy: half the cores' worth, no more than the engine's memory holds at the latest commit's peak (each container is
 limited to its share), and at most `KENNET_CODEVAL_AT_ONCE` when set; the copies share one dependency cache, so
-nothing is downloaded twice. A run that fails beside the others, or reports fewer tests than the latest commit did
-alone, runs again alone before it counts; each run records `concurrency` and `wall_s`. A repository with services,
+nothing is downloaded twice. A commit or edit whose build fails, whose tests after the change fail, that is killed or
+stopped for time, or that reports fewer tests than the latest commit did alone, runs again alone before it counts,
+and so does a tenth of the rest (at least one, drawn from the pick's seed) to measure how often running together
+changes a result; the run beside the others is kept as `shared`. Each run records `concurrency` and `wall_s`. The
+12 hours are the builds' and tests' own time, summed. A repository with services,
 or a command given after `--` (it runs on this machine, with your own tool caches and home folder), runs one commit
 at a time. When it is stuck it exits 1 with one sentence and a `next_step`, such as
 `commit 3: JDK 8 is missing on this machine` / `install JDK 8, then run the same command again; finished commits are
@@ -406,10 +412,14 @@ When it is done, it writes everything that could be sent to `./kennet-codeval/<r
   de-identified on this machine: authors become the profile's author ids; the
   user, home folder, machine name, paths, remotes, emails, phone numbers, street addresses, internal hosts and
   secrets become typed placeholders; a small local model, downloaded once and checked by sha256, finds names the rest
-  miss. The packed bytes are then searched for every known identifier, and if one is left nothing is written. Its
-  last member, `kennet-deid.json`, counts what was replaced in the logs and the checks, by kind, and names any log
-that could not be read (it is left out, and the send screen says so). One run sends up to
-  2 GiB of logs gzipped; past that it says so and sends nothing;
+  miss. The repository's name is replaced in paths and URLs, and as a bare word unless it names one of the
+  repository's own packages. For each past commit measured, `<n>/proof/<id>/` holds `head.txt` (`git rev-parse` of
+  the commit measured) and `numstat.txt` (`git show --numstat` of it, each path replaced by `[file]`, its counts as
+  git printed them). The packed bytes are then searched for every known identifier, and if one is left nothing is
+  written. Its last member, `kennet-deid.json`, counts what was replaced in the logs and the checks, by kind, and
+  names any log that could not be read (it is left out, and the send screen says so). One run sends up to 2 GiB of
+  logs gzipped; past that it says so and sends nothing. Logs sent in parts are then checked by the service, which
+  can take minutes: it prints `Checking the logs…` and asks again until they are received;
 - `manifest.json`: each file's size and sha256, what was de-identified in it by kind (never the values), whether the
   model ran, and the bundle's sha256.
 
