@@ -31,7 +31,8 @@ def _found(name: str) -> extract.Found:
         ("ld-undefined.log", "build", 1, ("compile", "link", None)),
         ("cmake-config.log", "build", 1, ("setup", "build_config", None)),
         ("network.log", "build", 128, ("compile", "env_network", None)),
-        ("eslint.log", "test", 1, ("lint", "quality_gate", None)),
+        ("eslint.log", "test", 1, ("test", "quality_gate", None)),
+        ("eslint.log", "build", 1, ("lint", "quality_gate", None)),
         ("tsc.log", "build", 2, ("compile", "compile_source", "missing_symbol")),
         ("javac.log", "build", 1, ("compile", "compile_source", "missing_symbol")),
         ("pytest-assert.log", "test", 1, ("test", "test_assertion", None)),
@@ -102,10 +103,13 @@ def test_environmental_ends_come_from_how_the_process_ended_not_its_text(code, s
 
 
 def test_a_run_that_passes_once_and_fails_once_is_flaky():
-    rows = [{"class": "test_assertion"}, {"class": "ok"}]
+    rows = [{"class": "test_assertion", "exit": 1}, {"class": "ok", "exit": 0}]
     extract.flaky(rows)
-    assert rows == [{"class": "test_flaky"}, {"class": "ok"}]
-    rows = [{"class": "test_assertion"}, {"class": "test_assertion"}]
+    assert rows == [{"class": "test_flaky", "exit": 1}, {"class": "ok", "exit": 0}]
+    rows = [{"class": "test_timeout", "exit": None}, {"class": "ok", "exit": 0}]
+    extract.flaky(rows)
+    assert rows[0]["class"] == "test_timeout", "a run stopped at run_minutes stays a timeout"
+    rows = [{"class": "test_assertion", "exit": 1}, {"class": "test_assertion", "exit": 1}]
     extract.flaky(rows)
     assert rows[0]["class"] == "test_assertion"
 
@@ -116,9 +120,9 @@ def test_every_class_kind_and_step_is_one_of_the_packs_words():
         assert r["class"] in (*p["classes"], "compile") and r.get("step", "test") in p["steps"]
     for table in p["codes"].values():
         assert set(table.values()) <= set(p["compile_kinds"])
-    assert set(extract.ERROR) == set(p["classes"])
-    errors = schema.defs()["Step"]["properties"]["error"]["anyOf"][0]["enum"]
-    assert {e for e in extract.ERROR.values() if e} <= set(errors)
+    props = schema.defs()["Step"]["properties"]
+    assert set(p["classes"]) == set(props["class"]["enum"]) and set(p["steps"]) == set(props["step"]["enum"])
+    assert set(p["compile_kinds"]) == set(props["compile_kind"]["anyOf"][0]["enum"])
     assert extract.coded("rustc", "E0425") == "missing_symbol" and extract.coded("rustc", "E9999") == "other"
 
 
@@ -128,8 +132,8 @@ def test_free_text_in_a_log_never_reaches_a_body(tmp_path):
         for step in ("build", "test"):
             why = extract.classify(step, 1, log, extract.read(log.read_text()))
             row = codebase_checks._classed(codebase_checks._ran(1, 3, log), why)
-            sent = codeval.step(row, key)
-            schema.check("Step", sent)
+            sent = codeval.step(row, key, tested=step == "test")
+            schema.check("TestRun" if step == "test" else "Step", sent)
             wire = json.dumps(sent)
             for word in SECRET:
                 assert word not in wire, (log.name, word)
@@ -181,3 +185,21 @@ def test_gcc_sarif_is_asked_for_only_by_cmake_and_configure_builds_keeping_their
     assert cmake.endswith("cmake -B b && cmake --build b") and "${CFLAGS:-} $f" in cmake and "*clang*" in cmake
     conf = extract.structured("./configure && make")
     assert "${CFLAGS--g -O2} $f" in conf and "-ge 13" in conf
+
+
+def test_codes_are_sent_only_as_the_shipped_tables_name_them():
+    for name, want in (("cargo-e0308.log", ["E0308"]), ("cargo-unknown-code.log", ["other"])):
+        log = LOGS / name
+        assert extract.classify("build", 101, log, extract.read(log.read_text()))["codes"] == want, name
+    ok = extract.classify("build", 0, LOGS / "cargo-e0308.log")
+    assert (ok["class"], ok["codes"], ok["compile_kind"]) == ("ok", [], None), "exit 0 is ok, whatever it printed"
+
+
+@pytest.mark.parametrize(
+    "seconds, want",
+    [(0, 0), (0.0999, 0), (0.1, 1), (0.10999, 1), (0.11, 2), (0.121, 3), (1e9, 165), (-1, 0)],
+)
+def test_a_duration_is_sent_as_its_bucket(seconds, want):
+    bounds = schema.defs()["Step"]["properties"]["took"]["x-bounds-ms"]
+    assert bounds[:4] == [0, 100, 110, 121] and len(bounds) == 166
+    assert codeval.took(seconds) == want

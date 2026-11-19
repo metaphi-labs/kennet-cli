@@ -279,17 +279,13 @@ def _tail(path: Path, lines: int = 15) -> list[str]:
 
 def _ran(code: int | None, took: float, log: Path | None = None) -> dict[str, Any]:
     """One build or test run. `log` is where its output is, on this machine: only its sha256 is sent."""
-    return {**({"log": str(log)} if log is not None else {}), "exit": code, "seconds": round(took)}
+    return {**({"log": str(log)} if log is not None else {}), "exit": code, "seconds": round(took, 3)}
 
 
 def _classed(row: dict[str, Any], why: dict[str, Any]) -> dict[str, Any]:
-    """A run with why it ended: the class, step and kind of compile error from the shipped rules, and the schema's
-    error word for that class. `rule` names the rule that decided; it stays on this machine."""
-    return {
-        **row,
-        "error": extract.error(why["class"]),
-        **{k: why[k] for k in ("class", "step", "compile_kind", "rule")},
-    }
+    """A run with why it ended, from the shipped rules: its step, class, kind of compile error and codes. `rule`
+    names the rule that decided; it stays on this machine."""
+    return {**row, **{k: why[k] for k in ("class", "step", "compile_kind", "codes", "rule")}}
 
 
 def _tested(
@@ -327,9 +323,6 @@ def _tested(
 
 def _flaky(rows: list[dict[str, Any]]) -> None:
     extract.flaky(rows)
-    for r in rows:
-        if "class" in r:
-            r["error"] = extract.error(r["class"])
 
 
 def _found(log: Path, junit: Path, src: Path, since: float) -> extract.Found:
@@ -811,7 +804,7 @@ class Stuck(errors.MetaphiError):
 def _stuck(where: str, side: dict[str, Any], logs: _Logs, label: str) -> Stuck | None:
     """Stuck when a build or test failed because a tool is not installed on this machine."""
     for step, got in (("build", side.get("build")), *(("test-1", t) for t in side.get("tests", [])[:1])):
-        if got and got.get("error") == "toolchain_missing":
+        if got and got.get("class") == "env_toolchain_missing":
             log = logs.root / f"{label}.{step}.log"
             tool = reading.missing(log) or "a tool the build needs"
             return Stuck(

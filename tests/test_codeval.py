@@ -10,6 +10,7 @@ import pytest
 import respx
 
 from metaphi import accounts, cli, codebase_checks, codeval, codeval_runs, config, errors
+from metaphi import codeval_extract as extract
 from metaphi import codeval_schema as schema
 
 API = config.DEFAULT_API
@@ -167,7 +168,7 @@ def test_recipe_records_build_beside_failing_tests():
         record,
     )
     assert kept is False and why == "pass_fraction"
-    assert record[0]["build"]["exit"] == 0 and isinstance(record[0]["build"]["seconds"], int)
+    assert record[0]["build"]["exit"] == 0 and isinstance(record[0]["build"]["seconds"], float)
     assert (record[0]["test"]["exit"], record[0]["test"]["reported"], record[0]["test"]["passed"]) == (1, 2, 0)
 
 
@@ -665,24 +666,85 @@ def test_the_profile_fits_the_schema_and_names_nothing(repo):
     assert (local.home / "key").stat().st_mode & 0o777 == 0o600
 
 
-def test_time_is_a_day_after_the_first_commit_and_the_authors_hour_of_week(tmp_path):
+def _raw_commit(r, message: str, author: str, committer: str, extra: str = "") -> None:
+    """A commit written byte for byte, as an import or a signing tool would: git's own commands normalise `-0000`."""
+
+    def out(*args: str, given: bytes | None = None) -> str:
+        return subprocess.run(
+            ["git", "-C", str(r), *args], input=given, capture_output=True, check=True
+        ).stdout.decode()
+
+    tree, parent = out("write-tree").strip(), out("rev-parse", "HEAD").strip()
+    head = f"tree {tree}\nparent {parent}\nauthor A <a@x.org> {author}\ncommitter A <a@x.org> {committer}\n"
+    made = out(
+        "hash-object", "--literally", "-t", "commit", "-w", "--stdin", given=f"{head}{extra}\n{message}\n".encode()
+    ).strip()
+    git(r, "update-ref", "HEAD", made)
+
+
+def test_times_and_zones_are_sent_as_git_holds_them(tmp_path):
     r = tmp_path / "falcon_time"
     r.mkdir()
     git(r, "init", "-q", "-b", "main")
     (r / "a.py").write_text("x = 1\n")
     git(r, "add", ".")
-    when = {"GIT_AUTHOR_DATE": "2024-03-04T10:30:00+0200", "GIT_COMMITTER_DATE": "2024-03-04T10:30:00+0200"}
+    when = {"GIT_AUTHOR_DATE": "2024-03-04T10:30:00+0200", "GIT_COMMITTER_DATE": "2024-03-04T10:31:07+0200"}
     git(r, "commit", "-qm", "a", **when)
     (r / "a.py").write_text("x = 2\n")
     git(r, "add", ".")
-    later = {"GIT_AUTHOR_DATE": "2024-03-10T23:00:00-0500", "GIT_COMMITTER_DATE": "2024-03-11T09:00:00-0500"}
+    later = {"GIT_AUTHOR_DATE": "2024-03-10T23:00:00-0530", "GIT_COMMITTER_DATE": "2024-03-11T09:00:00-0530"}
     git(r, "commit", "-qm", "b\n\nCo-authored-by: Claude <noreply@anthropic.com>", **later)
-    doc, _ = _profile(r)
-    a, b = doc["commits"]
-    assert doc["first_day"] == 19786 and (a["day"], a["hour"], a["same_time"]) == (0, 10, True)
-    assert (b["day"], b["hour"], b["same_time"]) == (7, 6 * 24 + 23, False)
+    _raw_commit(r, "imported", "1700000200 -0000", "1700000300 +0000")
+    sig = "gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n"
+    _raw_commit(r, "signed", "-5 +1400", "4102444800 -1200", sig)
+    doc, local = _profile(r)
+    schema.check("Profile", doc)
+    a, b, c, d = doc["commits"]
+    stamp = ("author_time", "author_tz", "author_tz_neg0", "committer_time", "committer_tz", "committer_tz_neg0")
+    assert [a[k] for k in stamp] == [1709541000, 120, False, 1709541067, 120, False]
+    assert [b[k] for k in stamp] == [1710131400, -330, False, 1710167400, -330, False]
+    assert [c[k] for k in stamp] == [1700000200, 0, True, 1700000300, 0, False], "-0000 is kept apart from +0000"
+    assert [d[k] for k in stamp] == [-5, 840, False, 4102444800, -720, False], "no clamping of odd times"
+    assert [x["signed"] for x in (a, b, c, d)] == [False, False, False, True]
+    assert d["commit"] == len(doc["commits"]) and doc["tip"] == local.tip, "the tip is the last commit sent"
     assert b["trailers"] == [{"key": "co-authored-by", "tool": "anthropic"}]
-    assert "0200" not in json.dumps(doc) and "0500" not in json.dumps(doc)
+    for gone in ("day", "hour", "same_time", "first_parent"):
+        assert gone not in a
+    assert "first_day" not in doc and "U1NIU0lH" not in json.dumps(doc)
+
+
+def test_hunks_are_their_header_numbers_on_edits_renames_and_binaries(tmp_path):
+    r = tmp_path / "falcon_hunks"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    (r / "ledger.py").write_text("".join(f"line {n}\n" for n in range(1, 21)))
+    (r / "logo.png").write_bytes(b"\x89PNG\0\1\2")
+    (r / ".github/workflows").mkdir(parents=True)
+    (r / ".github/workflows/ci.yml").write_text("on: push\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "a")
+    lines = [f"line {n}\n" for n in range(1, 21)]
+    lines[2], lines[15] = "three\n", "sixteen\n"
+    (r / "ledger.py").write_text("".join(lines))
+    git(r, "mv", "ledger.py", "books.py")
+    (r / "logo.png").write_bytes(b"\x89PNG\0\3\4\5")
+    git(r, "add", "-A")
+    git(r, "commit", "-qm", "b")
+    doc, local = _profile(r)
+    schema.check("Profile", doc)
+    ids = {p: i for i, p in local.kept["paths"].items()}
+    first, second = doc["commits"]
+    by = {x["file"]: x for x in second["files"]}
+    moved = by[ids["books.py"]]
+    assert moved["status"] == "R" and moved["old_file"] not in ids.values()
+    assert moved["hunks"] == [[3, 1, 3, 1], [16, 1, 16, 1]] and (moved["added"], moved["deleted"]) == (2, 2)
+    png = by[ids["logo.png"]]
+    assert png["hunks"] == [] and (png["added"], png["deleted"]) == (-1, -1)
+    added = {x["file"]: x for x in first["files"]}[ids[".github/workflows/ci.yml"]]
+    assert added["hunks"] == [[0, 0, 1, 1]]
+    ci = {f["file"]: f["ci"] for f in doc["files"]}
+    assert ci[ids[".github/workflows/ci.yml"]] and not ci[ids["books.py"]]
+    assert "gaps" not in moved and "ledger" not in json.dumps(doc) and "books" not in json.dumps(doc)
 
 
 def test_dependencies_are_named_only_when_the_public_registry_resolved_them(tmp_path):
@@ -708,14 +770,19 @@ def test_dependencies_are_named_only_when_the_public_registry_resolved_them(tmp_
     assert {k for k, v in doc["agents"].items() if v} == {"agents_md", "cursor_rules"}
 
 
-def test_tags_carry_their_day_and_release_shape_but_not_their_names(repo):
+def test_annotated_tags_carry_the_taggers_time_and_lightweight_tags_none(repo):
     git(repo, "tag", "falcon-launch", "HEAD~1")
-    git(repo, "tag", "-a", "v2.1.0", "-m", "billing", "HEAD", GIT_COMMITTER_DATE="2030-03-01T00:00:00Z")
+    git(repo, "tag", "-a", "v2.1.0", "-m", "billing", "HEAD", GIT_COMMITTER_DATE="2030-03-01T00:00:00+0545")
     doc, _ = _profile(repo)
-    tags = doc["git"]["tags"]
-    assert [(t["commit"], t["annotated"], t["release"]) for t in tags] == [(2, False, False), (3, True, True)]
-    assert tags[0]["day"] is None and tags[1]["day"] > 0
+    schema.check("Profile", doc)
+    light, annotated = doc["git"]["tags"]
+    assert (light["commit"], light["annotated"], light["release"]) == (2, False, False)
+    assert (light["tagger_time"], light["tagger_tz"], light["tagger_tz_neg0"]) == (None, None, None)
+    assert (annotated["commit"], annotated["annotated"], annotated["release"]) == (3, True, True)
+    assert (annotated["tagger_time"], annotated["tagger_tz"], annotated["tagger_tz_neg0"]) == (1898532900, 345, False)
     assert "falcon-launch" not in json.dumps(doc) and "v2.1.0" not in json.dumps(doc)
+    with pytest.raises(schema.Refused, match="lightweight"):
+        schema.check("Profile", {**doc, "git": {**doc["git"], "tags": [{**light, "tagger_tz": 0}]}})
 
 
 def test_operators_are_counted_by_class_and_nothing_of_the_line_is_kept(planted):
@@ -744,14 +811,21 @@ def test_a_trailer_value_with_carriage_returns_is_one_trailer():
 # -- the schema: the allowlist ----------------------------------------------------------------------------------------
 
 
-STEP = {"exit": 1, "seconds": 3, "error": "test_failure", "log": "0" * 64}
+STEP = {"step": "test", "class": "test_assertion", "exit": 1, "took": 40, "log": "0" * 64}
 
 
 @pytest.mark.parametrize(
     "name, body",
     [
         ("Step", {**STEP, "note": "it broke in ledger.py"}),
-        ("Step", {**STEP, "error": "AssertionError in test_ledger"}),
+        ("Step", {**STEP, "class": "AssertionError in test_ledger"}),
+        ("Step", {**STEP, "codes": ["E0308 mismatched SecretCo"]}),
+        ("Step", {**STEP, "took": 1234}),
+        ("Step", {**STEP, "class": "ok"}),
+        ("Step", {**STEP, "exit": None}),
+        ("Step", {**STEP, "compile_kind": "syntax"}),
+        ("Step", {**STEP, "codes": ["E0308", "E0308"]}),
+        ("Side", {"build": STEP, "tests": []}),
         ("Step", {**STEP, "log": "FAILED tests/test_ledger.py"}),
         ("Step", {**STEP, "outcomes": {"test_ledger": "failed"}}),
         ("Step", {**STEP, "outcomes": {"0" * 16: "failed: hunter2"}}),
@@ -844,18 +918,79 @@ def test_a_signed_in_run_with_no_terminal_goes_end_to_end(tested, tmp_path, caps
     outcomes = commit["post"]["tests"][0]["outcomes"]
     assert len(outcomes) == 2 and all(re.fullmatch(r"[0-9a-f]{16}", k) for k in outcomes)
     (mutant,) = sent["mutants"]
-    assert mutant["op"] == "arith" and mutant["post"]["tests"][0]["error"] == "test_failure"
+    assert mutant["op"] == "arith" and mutant["post"]["tests"][0]["class"] == "test_assertion"
+    assert mutant["post"]["tests"][0]["step"] == "test" and sent["rules"] == extract.rules_hash()
+    assert all(isinstance(t["took"], int) for t in commit["post"]["tests"]) and isinstance(sent["took"], int)
     assert sent["blobs"] == [
         {"file": asked["blobs"][0], "blob": codebase_checks._tree(tested, local.tip)["calc.py"][1]}
     ]
     assert sent["tip"]["tests"][0]["passed"] == 2
     wire = gzip.decompress(results.calls[0].request.content).decode()
-    for word in ("hunter2", "test_mul", "calc.py", "falcon_calc", str(tmp_path), "pytest", "PYTHONPATH", "assert"):
+    for word in ("hunter2", "test_mul", "calc.py", "falcon_calc", str(tmp_path), "pytest", "PYTHONPATH", "assert "):
         assert word not in wire, word
     assert (local.home / "sent" / "results-1.json").read_text() == wire
     assert (local.home / "sent" / "profile.json").read_bytes() == gzip.decompress(posted.calls[0].request.content)
     env = (tmp_path / "env.txt").read_text()
     assert "AWS_SECRET_ACCESS_KEY" not in env and "hunter2" not in env and "METAPHI_API_KEY" not in env
+
+
+def _measured_side(log: str) -> dict:
+    """A side as codebase_checks returns it, holding every field any part could hold, and more runs than any takes."""
+    run = {"exit": 1, "seconds": 2.5, "log": log, "step": "test", "class": "test_assertion", "codes": ["E0308"] * 3}
+    run |= {"reported": 2, "passed": 1, "report": "junit", "cases": {"test_add": "passed", "test_mul": "failed"}}
+    build = {"exit": 0, "seconds": 61.0, "log": log, "step": "compile", "class": "ok"}
+    return {
+        "build": {**build, "reported": 3, "passed": 3, "report": "summary", "cases": {"test_x": "passed"}},
+        "tests": [dict(run) for _ in range(5)],
+        "offline": dict(run),
+        "installed_bytes": 1 << 30,
+        "memory_peak_bytes": 1 << 28,
+        "coverage": [{"file": 1, "unit": "statement", "total": 10, "covered": 7}],
+    }
+
+
+@respx.mock
+def test_a_full_stubbed_run_validates_part_by_part(tested, tmp_path, capsys, monkeypatch):
+    log = tmp_path / "run.log"
+    log.write_text("FAILED tests/test_calc.py::test_mul - assert 6 == 5\n")
+    raw = {
+        "commits": [{"pre": _measured_side(str(log)), "post": _measured_side(str(log))}] * 5,
+        "mutants": [{"post": _measured_side(str(log))}] * 4 + [{"broke": True}],
+        "tip": _measured_side(str(log)),
+    }
+    monkeypatch.setattr(codebase_checks, "run", lambda *a, **k: raw)
+    _signed_in()
+    _, local = _profile(tested)
+    calc = next(i for i, p in local.kept["paths"].items() if p == "calc.py")
+    mutant = {"file": calc, "op": "arith", "nth": 0}
+    asked = _next(local.kept["paths"], commits=[1, 2, 3, 4, 5], mutants=[mutant] * 5, blobs=[calc] * 64)
+    posted = respx.post(f"{API}/codeval").respond(json={"run": "cv_1", "object": "codeval", "next": asked})
+    results = respx.post(f"{API}/codeval/cv_1/results").respond(json={"done": True})
+    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 0
+    (_,), (sent,) = _bodies(posted), _bodies(results)
+    schema.check("Results", sent)
+    assert len(sent["commits"]) == 5 and len(sent["mutants"]) == 5 and len(sent["blobs"]) == 64
+    for c in sent["commits"]:
+        assert len(c["pre"]["tests"]) == 1 and len(c["post"]["tests"]) == 3
+        for part in (c["pre"], c["post"]):
+            assert set(part) == {"build", "tests"}, "only the tip is measured beyond pass and fail"
+            assert set(part["build"]) == {"step", "class", "exit", "took", "log"}, "a build counts no tests"
+    assert sent["mutants"][-1] == {**mutant, "error": "unknown"}
+    tip = sent["tip"]
+    assert {"offline", "installed_bytes", "memory_peak_bytes", "coverage"} <= set(tip) and len(tip["tests"]) == 3
+    run = tip["tests"][0]
+    assert run["codes"] == ["E0308"] and run["took"] == codeval.took(2.5) and tip["build"]["took"] == codeval.took(61)
+
+
+@respx.mock
+def test_a_batch_larger_than_results_can_answer_is_refused(tested, tmp_path, capsys):
+    _signed_in()
+    _, local = _profile(tested)
+    asked = _next(local.kept["paths"], commits=[1, 2, 3, 4, 5, 6])
+    respx.post(f"{API}/codeval").respond(json={"run": "cv_1", "object": "codeval", "next": asked})
+    results = respx.post(f"{API}/codeval/cv_1/results").respond(json={"done": True})
+    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) != 0
+    assert not results.called
 
 
 @respx.mock

@@ -394,16 +394,15 @@ The profile, sent once per repository:
 | Field | What it holds |
 | --- | --- |
 | `tip`, `roots` | the git ids of the latest commit and of the root commits |
-| `first_day` | the day of the first commit; every other time is days after it |
-| `git` | counts of branches and submodules, whether LFS is used, the pack size; per tag, its commit's number, whether it is annotated or looks like a release, and its day |
+| `git` | counts of branches and submodules, whether LFS is used, the pack size; per tag, its commit's number, whether it is annotated or looks like a release, and for an annotated tag the tagger's time and zone |
 | `licenses` | the licence families found, from a fixed list |
 | `env` | which CI systems, Docker Compose, devcontainer and Dockerfiles are present, as counts and words from a fixed list of public service images |
 | `agents` | which coding-agent files are present (`AGENTS.md`, `CLAUDE.md`, `.cursorrules` and the like), yes or no |
 | `deps`, `private_deps` | dependencies a lockfile resolved from a public registry, by ecosystem and name; a count of the rest |
 | `authors` | per author a number, whether it is a bot, and a number standing for its email domain |
 | `dirs` | per folder a number and its parent's number |
-| `files` | per file a number, its folder's number, its extension and well-known name from fixed lists, its size, line, comment, indent and token counts, counts of tests, mocks, imports and operators by class, and an HMAC of its content |
-| `commits` | per commit a number, its parents' numbers, author and committer numbers, day and hour of the week in the author's own clock, the lengths of its message, trailer keys and the coding tool a trailer names, whether it reverts or merges, and per changed file its number, status and lines added and deleted; the subject as an HMAC |
+| `files` | per file a number, its folder's number, its extension and well-known name from fixed lists, its size, line, comment, indent and token counts, whether it is a CI file, counts of tests, mocks, imports and operators by class, and an HMAC of its content |
+| `commits` | per commit, the tip last: a number, its parents' numbers, author and committer numbers, the author's and committer's time and zone as git holds them (a `-0000` zone kept apart), whether it is signed, the lengths of its message, trailer keys and the coding tool a trailer names, whether it reverts or merges, and per changed file its number, status, lines added and deleted, and each hunk's start and length on both sides; the subject as an HMAC |
 
 The results, one per batch:
 
@@ -412,10 +411,14 @@ The results, one per batch:
 | `machine` | OS, architecture, CPU count, memory, whether it ran in a container, and the image's digest |
 | `toolchain` | each tool used, from a fixed list, with its version number |
 | `commands` | whether the build and test came from CI, build files or you, each as an HMAC |
-| `services` | how many Compose services were asked for, how many started, how long they took, how many were refused |
-| `tip`, `commits`, `mutants` | per build and test run: exit code, seconds, an error class from a fixed list, the sha256 of its log (the log stays here), counts of tests reported and passed, each test's outcome under the HMAC of its id, coverage per file number, peak memory, and the bytes installed |
+| `services` | how many Compose services were asked for, how many started, how long they took (as a bucket), how many were refused |
+| `tip`, `commits`, `mutants` | per build and test run: the step it reached and the class it ended in from fixed lists, the kind of compile error and the compiler codes the shipped tables name (any other as `other`), the exit code, how long it took as a bucket, the sha256 of its log (the log stays here); per test run also counts of tests reported and passed and each test's outcome under the HMAC of its id; for the tip only, coverage per file number, peak memory and the bytes installed |
 | `blobs` | the git ids of the files Metaphi AI named by number |
-| `seconds` | how long the batch took |
+| `rules` | the sha256 of the rule pack that read the logs |
+| `took` | how long the batch took, as a bucket |
+
+A duration is sent as the index of the last bound at or below it in the schema's list (`x-bounds-ms`: 0, then 100 ms
+growing by 10% a step), never the duration itself.
 
 Everything sent is kept, byte for byte, in the repository's state directory under `sent/`; the done line names it.
 
@@ -425,7 +428,7 @@ Jest `--json`, Bazel's build event file, and GCC 13+ SARIF for CMake and configu
 Surefire and Gradle write anyway. What those do not say is read from the log by the rule pack
 (`metaphi/data/codeval_rules.json`): patterns and templates mapped to a fixed list of classes, environmental ends from
 the exit code, signal, wall clock and memory limit, and tables of compiler codes, where an unknown code counts as
-`other`. Only the class leaves the machine, and each Results body names the pack by its sha256 (`rules`). Metaphi AI
+`other`. Only the step, class, kind and table codes leave the machine, and each Results body names the pack by its sha256 (`rules`). Metaphi AI
 never sends rules; a new rule is a new release. No model is used.
 
 ### Signing in

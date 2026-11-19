@@ -36,6 +36,7 @@ KNOWN = frozenset(
         "minimum",
         "pattern",
         "patternProperties",
+        "prefixItems",
         "properties",
         "propertyNames",
         "required",
@@ -59,8 +60,9 @@ def defs() -> dict[str, Any]:
 
 
 def check(name: str, body: Any) -> None:
-    """Raise `Refused` unless `body` is a `name` document (Profile, Results or Next) the schema holds exactly."""
-    _check(defs()[name], body, name)
+    """Raise `Refused` unless `body` is a `name` document (Profile, Results or Next) the schema holds exactly, and
+    passes the server's checks across its fields."""
+    _check({"$ref": f"#/$defs/{name}"}, body, name)
 
 
 def _is(kind: str, value: Any) -> bool:
@@ -76,13 +78,15 @@ def _bounded(s: dict[str, Any]) -> bool:
 
 
 def _check(s: dict[str, Any], v: Any, at: str) -> None:
-    if unknown := set(s) - KNOWN:
+    if unknown := {k for k in s if not k.startswith("x-")} - KNOWN:
         raise Refused(at, f"the schema uses {min(unknown)}, which this client does not read")
     if "$ref" in s:
         ref = s["$ref"]
         if not ref.startswith("#/$defs/") or ref[8:] not in defs():
             raise Refused(at, f"the schema names {ref}, which it does not hold")
         _check(defs()[ref[8:]], v, at)
+        if (rule := RULES.get(ref[8:])) is not None and (why := rule(v)) is not None:
+            raise Refused(at, why)
         return
     if "anyOf" in s:
         near: Refused | None = None
@@ -114,12 +118,80 @@ def _check(s: dict[str, Any], v: Any, at: str) -> None:
     elif isinstance(v, list):
         if len(v) < s.get("minItems", 0) or len(v) > s.get("maxItems", len(v)):
             raise Refused(at, "it holds too few or too many items")
-        if "items" not in s:
+        first = s.get("prefixItems", [])
+        if "items" not in s and len(v) > len(first):
             raise Refused(at, "the schema does not say what it holds")
         for i, x in enumerate(v):
-            _check(s["items"], x, f"{at}[{i}]")
+            _check(first[i] if i < len(first) else s["items"], x, f"{at}[{i}]")
     elif isinstance(v, dict):
         _object(s, v, at)
+
+
+# The server's own checks across fields (kennet `codeval_schema.py` validators), held here so a body that would be
+# turned away is never sent.
+COMPILED = frozenset(["compile_source", "compile_test", "link"])
+TEST_STEPS = frozenset(["test_compile", "test"])
+
+
+def _step(v: dict[str, Any]) -> str | None:
+    if (v["class"] == "ok") != (v["exit"] == 0) and v["class"] != "test_flaky":
+        return "a step that passed is ok, and one that failed says why"
+    if v["exit"] is None and v["class"] not in ("test_timeout", "env_timeout", "cancelled"):
+        return "a step stopped at run_minutes timed out or was cancelled"
+    if v.get("compile_kind") is not None and v["class"] not in COMPILED:
+        return "compile_kind is a compile or link failure's"
+    if len(set(v.get("codes", []))) != len(v.get("codes", [])):
+        return "each diagnostic code once"
+    return None
+
+
+def _side(v: dict[str, Any]) -> str | None:
+    if v.get("build") is not None and v["build"]["step"] in TEST_STEPS:
+        return "a build ends before the tests"
+    if any(t["step"] not in TEST_STEPS for t in [*v["tests"], *([v["offline"]] if v.get("offline") else [])]):
+        return "a test run ends at test_compile or test"
+    return None
+
+
+def _ran(*sides: str) -> Any:
+    def rule(v: dict[str, Any]) -> str | None:
+        if v.get("error") == "ok" or (v.get("error") is None and any(v.get(k) is None for k in sides)):
+            return "a unit that ran has its sides, and one that did not says why"
+        return None
+
+    return rule
+
+
+def _tag(v: dict[str, Any]) -> str | None:
+    if len({v["tagger_time"] is None, v["tagger_tz"] is None, v["tagger_tz_neg0"] is None}) > 1:
+        return "an annotated tag sends its time, zone and zone flag; a lightweight one none of them"
+    return None
+
+
+def _profile(v: dict[str, Any]) -> str | None:
+    files, people = {f["file"] for f in v["files"]}, {a["author"] for a in v["authors"]}
+    for c in v["commits"]:
+        if c["author"] not in people or c["committer"] not in people:
+            return "a commit names an id the document does not hold"
+        if any(x["file"] not in files or x.get("old_file", None) not in (None, *files) for x in c["files"]):
+            return "a commit names an id the document does not hold"
+    held = {c["commit"] for c in v["commits"]} | {0}
+    if any(t["commit"] not in held for t in v["git"]["tags"]):
+        return "a tag names a commit the document does not hold"
+    return None
+
+
+RULES = {
+    "Step": _step,
+    "TestRun": _step,
+    "Side": _side,
+    "Pre": _side,
+    "Tip": _side,
+    "CommitResult": _ran("pre", "post"),
+    "MutantResult": _ran("post"),
+    "Tag": _tag,
+    "Profile": _profile,
+}
 
 
 def _object(s: dict[str, Any], v: dict[str, Any], at: str) -> None:

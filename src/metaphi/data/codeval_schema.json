@@ -82,11 +82,13 @@
    "additionalProperties": false,
    "properties": {
     "added": {
+     "maximum": 268435455,
      "minimum": -1,
      "title": "Added",
      "type": "integer"
     },
     "deleted": {
+     "maximum": 268435455,
      "minimum": -1,
      "title": "Deleted",
      "type": "integer"
@@ -97,29 +99,37 @@
      "title": "File",
      "type": "integer"
     },
-    "gaps": {
-     "anyOf": [
-      {
-       "items": {
-        "maximum": 9007199254740991,
+    "hunks": {
+     "items": {
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+       {
+        "maximum": 268435455,
         "minimum": 0,
         "type": "integer"
        },
-       "maxItems": 10000,
-       "type": "array"
-      },
-      {
-       "type": "null"
-      }
-     ],
-     "default": null,
-     "title": "Gaps"
-    },
-    "hunks": {
-     "maximum": 9007199254740991,
-     "minimum": 0,
+       {
+        "maximum": 268435455,
+        "minimum": 0,
+        "type": "integer"
+       },
+       {
+        "maximum": 268435455,
+        "minimum": 0,
+        "type": "integer"
+       },
+       {
+        "maximum": 268435455,
+        "minimum": 0,
+        "type": "integer"
+       }
+      ],
+      "type": "array"
+     },
+     "maxItems": 1000000,
      "title": "Hunks",
-     "type": "integer"
+     "type": "array"
     },
     "old_file": {
      "anyOf": [
@@ -169,7 +179,9 @@
      "anyOf": [
       {
        "pattern": "^[0-9a-f]{16}$",
-       "type": "string"
+       "type": "string",
+       "x-bits": 0,
+       "x-bits-why": "the server holds no seller's key"
       },
       {
        "type": "null"
@@ -190,7 +202,9 @@
     "test": {
      "pattern": "^[0-9a-f]{16}$",
      "title": "Test",
-     "type": "string"
+     "type": "string",
+     "x-bits": 0,
+     "x-bits-why": "the server holds no seller's key"
     }
    },
    "required": [
@@ -209,8 +223,24 @@
      "title": "Author",
      "type": "integer"
     },
+    "author_time": {
+     "maximum": 9223372036854775807,
+     "minimum": -9223372036854775808,
+     "title": "Author Time",
+     "type": "integer"
+    },
+    "author_tz": {
+     "maximum": 1439,
+     "minimum": -1439,
+     "title": "Author Tz",
+     "type": "integer"
+    },
+    "author_tz_neg0": {
+     "title": "Author Tz Neg0",
+     "type": "boolean"
+    },
     "body_lines": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Body Lines",
      "type": "integer"
@@ -227,11 +257,21 @@
      "title": "Committer",
      "type": "integer"
     },
-    "day": {
-     "maximum": 200000,
-     "minimum": 0,
-     "title": "Day",
+    "committer_time": {
+     "maximum": 9223372036854775807,
+     "minimum": -9223372036854775808,
+     "title": "Committer Time",
      "type": "integer"
+    },
+    "committer_tz": {
+     "maximum": 1439,
+     "minimum": -1439,
+     "title": "Committer Tz",
+     "type": "integer"
+    },
+    "committer_tz_neg0": {
+     "title": "Committer Tz Neg0",
+     "type": "boolean"
     },
     "files": {
      "items": {
@@ -241,28 +281,18 @@
      "title": "Files",
      "type": "array"
     },
-    "first_parent": {
-     "title": "First Parent",
-     "type": "boolean"
-    },
     "fix_word": {
      "title": "Fix Word",
      "type": "boolean"
     },
-    "hour": {
-     "maximum": 167,
-     "minimum": 0,
-     "title": "Hour",
-     "type": "integer"
-    },
     "msg_chars": {
-     "maximum": 9007199254740991,
+     "maximum": 268435455,
      "minimum": 0,
      "title": "Msg Chars",
      "type": "integer"
     },
     "msg_lines": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Msg Lines",
      "type": "integer"
@@ -278,7 +308,7 @@
      "type": "array"
     },
     "path_terms": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Path Terms",
      "type": "integer"
@@ -309,14 +339,10 @@
      "default": null,
      "title": "Reverts"
     },
-    "same_time": {
-     "title": "Same Time",
-     "type": "boolean"
-    },
     "shared_idents": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 65535,
        "minimum": 0,
        "type": "integer"
       },
@@ -327,8 +353,12 @@
      "default": null,
      "title": "Shared Idents"
     },
+    "signed": {
+     "title": "Signed",
+     "type": "boolean"
+    },
     "subject_chars": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Subject Chars",
      "type": "integer"
@@ -336,10 +366,12 @@
     "subject_key": {
      "pattern": "^[0-9a-f]{16}$",
      "title": "Subject Key",
-     "type": "string"
+     "type": "string",
+     "x-bits": 0,
+     "x-bits-why": "the server holds no seller's key"
     },
     "ticket_refs": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Ticket Refs",
      "type": "integer"
@@ -356,12 +388,15 @@
    "required": [
     "commit",
     "parents",
-    "first_parent",
     "author",
     "committer",
-    "day",
-    "hour",
-    "same_time",
+    "author_time",
+    "author_tz",
+    "author_tz_neg0",
+    "committer_time",
+    "committer_tz",
+    "committer_tz_neg0",
+    "signed",
     "msg_chars",
     "msg_lines",
     "subject_chars",
@@ -393,17 +428,24 @@
      "anyOf": [
       {
        "enum": [
-        "toolchain_missing",
-        "dependency_fetch",
-        "network",
-        "oom",
-        "timeout",
-        "disk",
-        "service",
-        "permission",
-        "not_run",
-        "compile_error",
-        "test_failure",
+        "ok",
+        "dep_unresolved",
+        "dep_conflict",
+        "build_config",
+        "compile_source",
+        "compile_test",
+        "link",
+        "test_assertion",
+        "test_error",
+        "test_timeout",
+        "quality_gate",
+        "test_flaky",
+        "env_network",
+        "env_resource",
+        "env_timeout",
+        "env_toolchain_missing",
+        "env_permission",
+        "cancelled",
         "unknown"
        ],
        "type": "string"
@@ -429,7 +471,7 @@
     "pre": {
      "anyOf": [
       {
-       "$ref": "#/$defs/Side"
+       "$ref": "#/$defs/Pre"
       },
       {
        "type": "null"
@@ -449,19 +491,19 @@
    "description": "One tip source file's coverage from the tip test run, by the runtime's own unit.",
    "properties": {
     "covered": {
-     "maximum": 9007199254740991,
+     "maximum": 268435455,
      "minimum": 0,
      "title": "Covered",
      "type": "integer"
     },
     "file": {
-     "maximum": 2147483647,
+     "maximum": 5000000,
      "minimum": 0,
      "title": "File",
      "type": "integer"
     },
     "total": {
-     "maximum": 9007199254740991,
+     "maximum": 268435455,
      "minimum": 0,
      "title": "Total",
      "type": "integer"
@@ -516,7 +558,9 @@
     "name": {
      "pattern": "^[a-z0-9][a-z0-9._-]{0,99}$",
      "title": "Name",
-     "type": "string"
+     "type": "string",
+     "x-bits": 23,
+     "x-bits-why": "the names the public registries hold (under 2^23)"
     }
    },
    "required": [
@@ -577,31 +621,31 @@
      "type": "array"
     },
     "ci_files": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Ci Files",
      "type": "integer"
     },
     "ci_services": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Ci Services",
      "type": "integer"
     },
     "compose_built": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Compose Built",
      "type": "integer"
     },
     "compose_files": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Compose Files",
      "type": "integer"
     },
     "compose_services": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Compose Services",
      "type": "integer"
@@ -611,13 +655,13 @@
      "type": "boolean"
     },
     "dockerfiles": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Dockerfiles",
      "type": "integer"
     },
     "other_images": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Other Images",
      "type": "integer"
@@ -710,7 +754,7 @@
     "blank": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -725,7 +769,9 @@
      "anyOf": [
       {
        "pattern": "^[0-9a-f]{16}$",
-       "type": "string"
+       "type": "string",
+       "x-bits": 0,
+       "x-bits-why": "the server holds no seller's key"
       },
       {
        "type": "null"
@@ -737,7 +783,7 @@
     "bytes": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 17592186044415,
        "minimum": 0,
        "type": "integer"
       },
@@ -748,10 +794,14 @@
      "default": null,
      "title": "Bytes"
     },
+    "ci": {
+     "title": "Ci",
+     "type": "boolean"
+    },
     "comment": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -763,7 +813,7 @@
      "title": "Comment"
     },
     "depth": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Depth",
      "type": "integer"
@@ -777,7 +827,7 @@
     "env_refs": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -926,7 +976,7 @@
     "imports_external": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -940,7 +990,7 @@
     "imports_internal": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -954,7 +1004,7 @@
     "indent_sum": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 4294967295,
        "minimum": 0,
        "type": "integer"
       },
@@ -1067,7 +1117,7 @@
     "lines": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -1081,7 +1131,7 @@
     "max_indent": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 65535,
        "minimum": 0,
        "type": "integer"
       },
@@ -1095,7 +1145,7 @@
     "max_line": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -1109,7 +1159,7 @@
     "mock_refs": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -1124,7 +1174,7 @@
      "anyOf": [
       {
        "additionalProperties": {
-        "maximum": 9007199254740991,
+        "maximum": 268435455,
         "minimum": 0,
         "type": "integer"
        },
@@ -1148,7 +1198,7 @@
     "test_fns": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -1162,7 +1212,7 @@
     "tokens": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 4294967295,
        "minimum": 0,
        "type": "integer"
       },
@@ -1176,7 +1226,7 @@
     "url_refs": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 268435455,
        "minimum": 0,
        "type": "integer"
       },
@@ -1194,7 +1244,8 @@
     "depth",
     "ext",
     "kind",
-    "at_tip"
+    "at_tip",
+    "ci"
    ],
    "title": "File",
    "type": "object"
@@ -1203,7 +1254,7 @@
    "additionalProperties": false,
    "properties": {
     "branches": {
-     "maximum": 9007199254740991,
+     "maximum": 4294967295,
      "minimum": 0,
      "title": "Branches",
      "type": "integer"
@@ -1213,13 +1264,13 @@
      "type": "boolean"
     },
     "pack_bytes": {
-     "maximum": 9007199254740991,
+     "maximum": 17592186044415,
      "minimum": 0,
      "title": "Pack Bytes",
      "type": "integer"
     },
     "submodules": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Submodules",
      "type": "integer"
@@ -1265,7 +1316,9 @@
      "anyOf": [
       {
        "pattern": "^sha256:[0-9a-f]{64}$",
-       "type": "string"
+       "type": "string",
+       "x-bits": 30,
+       "x-bits-why": "the public images registries hold (under 2^30)"
       },
       {
        "type": "null"
@@ -1275,7 +1328,7 @@
      "title": "Image"
     },
     "memory_bytes": {
-     "maximum": 9007199254740991,
+     "maximum": 17592186044415,
      "minimum": 0,
      "title": "Memory Bytes",
      "type": "integer"
@@ -1321,7 +1374,7 @@
      "type": "integer"
     },
     "nth": {
-     "maximum": 9007199254740991,
+     "maximum": 268435455,
      "minimum": 0,
      "title": "Nth",
      "type": "integer"
@@ -1353,17 +1406,24 @@
      "anyOf": [
       {
        "enum": [
-        "toolchain_missing",
-        "dependency_fetch",
-        "network",
-        "oom",
-        "timeout",
-        "disk",
-        "service",
-        "permission",
-        "not_run",
-        "compile_error",
-        "test_failure",
+        "ok",
+        "dep_unresolved",
+        "dep_conflict",
+        "build_config",
+        "compile_source",
+        "compile_test",
+        "link",
+        "test_assertion",
+        "test_error",
+        "test_timeout",
+        "quality_gate",
+        "test_flaky",
+        "env_network",
+        "env_resource",
+        "env_timeout",
+        "env_toolchain_missing",
+        "env_permission",
+        "cancelled",
         "unknown"
        ],
        "type": "string"
@@ -1382,7 +1442,7 @@
      "type": "integer"
     },
     "nth": {
-     "maximum": 9007199254740991,
+     "maximum": 268435455,
      "minimum": 0,
      "title": "Nth",
      "type": "integer"
@@ -1484,6 +1544,36 @@
    "title": "Next",
    "type": "object"
   },
+  "Pre": {
+   "additionalProperties": false,
+   "description": "A commit's parent with the commit's tests laid over it: built, and its tests run once.",
+   "properties": {
+    "build": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Step"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "tests": {
+     "items": {
+      "$ref": "#/$defs/TestRun"
+     },
+     "maxItems": 1,
+     "title": "Tests",
+     "type": "array"
+    }
+   },
+   "required": [
+    "tests"
+   ],
+   "title": "Pre",
+   "type": "object"
+  },
   "Profile": {
    "additionalProperties": false,
    "description": "Stage 1: one repository as the CLI measures it, sent once, after the owner signs in.",
@@ -1540,12 +1630,6 @@
      "title": "Files",
      "type": "array"
     },
-    "first_day": {
-     "maximum": 200000,
-     "minimum": 0,
-     "title": "First Day",
-     "type": "integer"
-    },
     "git": {
      "$ref": "#/$defs/Git"
     },
@@ -1569,7 +1653,7 @@
      "type": "array"
     },
     "private_deps": {
-     "maximum": 9007199254740991,
+     "maximum": 268435455,
      "minimum": 0,
      "title": "Private Deps",
      "type": "integer"
@@ -1577,7 +1661,9 @@
     "roots": {
      "items": {
       "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
-      "type": "string"
+      "type": "string",
+      "x-bits": 34,
+      "x-bits-why": "the commits public archives hold (Software Heritage: under 2^34)"
      },
      "maxItems": 64,
      "minItems": 1,
@@ -1592,7 +1678,9 @@
     "tip": {
      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
      "title": "Tip",
-     "type": "string"
+     "type": "string",
+     "x-bits": 34,
+     "x-bits-why": "the commits public archives hold (Software Heritage: under 2^34)"
     }
    },
    "required": [
@@ -1600,7 +1688,6 @@
     "cli",
     "tip",
     "roots",
-    "first_day",
     "git",
     "licenses",
     "env",
@@ -1620,6 +1707,7 @@
    "description": "One batch answered: every commit and mutant the batch named, each once, and the blob ids of the files it named,\nand nothing else.",
    "properties": {
     "batch": {
+     "maximum": 6,
      "minimum": 1,
      "title": "Batch",
      "type": "integer"
@@ -1629,7 +1717,7 @@
      "items": {
       "$ref": "#/$defs/Revealed"
      },
-     "maxItems": 256,
+     "maxItems": 64,
      "title": "Blobs",
      "type": "array"
     },
@@ -1654,7 +1742,7 @@
      "items": {
       "$ref": "#/$defs/CommitResult"
      },
-     "maxItems": 64,
+     "maxItems": 5,
      "title": "Commits",
      "type": "array"
     },
@@ -1666,20 +1754,21 @@
      "items": {
       "$ref": "#/$defs/MutantResult"
      },
-     "maxItems": 64,
+     "maxItems": 5,
      "title": "Mutants",
      "type": "array"
+    },
+    "rules": {
+     "pattern": "^[0-9a-f]{64}$",
+     "title": "Rules",
+     "type": "string",
+     "x-bits": 10,
+     "x-bits-why": "the rule packs Metaphi released (under 2^10)"
     },
     "schema": {
      "const": "kennet.codeval.results.v1",
      "title": "Schema",
      "type": "string"
-    },
-    "seconds": {
-     "maximum": 315360000,
-     "minimum": 0,
-     "title": "Seconds",
-     "type": "integer"
     },
     "services": {
      "anyOf": [
@@ -1695,13 +1784,187 @@
     "tip": {
      "anyOf": [
       {
-       "$ref": "#/$defs/Side"
+       "$ref": "#/$defs/Tip"
       },
       {
        "type": "null"
       }
      ],
      "default": null
+    },
+    "took": {
+     "maximum": 165,
+     "minimum": 0,
+     "title": "Took",
+     "type": "integer",
+     "x-bounds-ms": [
+      0,
+      100,
+      110,
+      121,
+      133,
+      146,
+      161,
+      177,
+      195,
+      214,
+      236,
+      259,
+      285,
+      314,
+      345,
+      380,
+      418,
+      459,
+      505,
+      556,
+      612,
+      673,
+      740,
+      814,
+      895,
+      985,
+      1083,
+      1192,
+      1311,
+      1442,
+      1586,
+      1745,
+      1919,
+      2111,
+      2323,
+      2555,
+      2810,
+      3091,
+      3400,
+      3740,
+      4114,
+      4526,
+      4979,
+      5476,
+      6024,
+      6626,
+      7289,
+      8018,
+      8820,
+      9702,
+      10672,
+      11739,
+      12913,
+      14204,
+      15625,
+      17187,
+      18906,
+      20797,
+      22876,
+      25164,
+      27680,
+      30448,
+      33493,
+      36842,
+      40527,
+      44579,
+      49037,
+      53941,
+      59335,
+      65268,
+      71795,
+      78975,
+      86872,
+      95559,
+      105115,
+      115627,
+      127190,
+      139908,
+      153899,
+      169289,
+      186218,
+      204840,
+      225324,
+      247856,
+      272642,
+      299906,
+      329897,
+      362887,
+      399175,
+      439093,
+      483002,
+      531302,
+      584432,
+      642876,
+      707163,
+      777880,
+      855668,
+      941234,
+      1035358,
+      1138894,
+      1252783,
+      1378061,
+      1515867,
+      1667454,
+      1834200,
+      2017619,
+      2219381,
+      2441320,
+      2685451,
+      2953997,
+      3249396,
+      3574336,
+      3931770,
+      4324946,
+      4757441,
+      5233185,
+      5756504,
+      6332154,
+      6965370,
+      7661907,
+      8428097,
+      9270907,
+      10197998,
+      11217797,
+      12339577,
+      13573535,
+      14930888,
+      16423977,
+      18066375,
+      19873012,
+      21860313,
+      24046345,
+      26450979,
+      29096077,
+      32005685,
+      35206253,
+      38726879,
+      42599567,
+      46859523,
+      51545476,
+      56700023,
+      62370026,
+      68607028,
+      75467731,
+      83014504,
+      91315954,
+      100447550,
+      110492305,
+      121541535,
+      133695689,
+      147065258,
+      161771784,
+      177948962,
+      195743858,
+      215318244,
+      236850068,
+      260535075,
+      286588583,
+      315247441,
+      346772185,
+      381449404,
+      419594344,
+      461553778,
+      507709156,
+      558480072,
+      614328079
+     ]
     },
     "toolchain": {
      "items": {
@@ -1715,8 +1978,9 @@
    "required": [
     "schema",
     "cli",
+    "rules",
     "batch",
-    "seconds",
+    "took",
     "machine",
     "toolchain"
    ],
@@ -1729,7 +1993,9 @@
     "blob": {
      "pattern": "^[0-9a-f]{40}$",
      "title": "Blob",
-     "type": "string"
+     "type": "string",
+     "x-bits": 34,
+     "x-bits-why": "the file contents public archives hold (Software Heritage: under 2^34)"
     },
     "file": {
      "maximum": 2147483647,
@@ -1749,7 +2015,7 @@
    "additionalProperties": false,
    "properties": {
     "count": {
-     "maximum": 9007199254740991,
+     "maximum": 65535,
      "minimum": 0,
      "title": "Count",
      "type": "integer"
@@ -1780,11 +2046,179 @@
      "title": "Refused",
      "type": "array"
     },
-    "seconds": {
-     "maximum": 315360000,
+    "took": {
+     "maximum": 165,
      "minimum": 0,
-     "title": "Seconds",
-     "type": "integer"
+     "title": "Took",
+     "type": "integer",
+     "x-bounds-ms": [
+      0,
+      100,
+      110,
+      121,
+      133,
+      146,
+      161,
+      177,
+      195,
+      214,
+      236,
+      259,
+      285,
+      314,
+      345,
+      380,
+      418,
+      459,
+      505,
+      556,
+      612,
+      673,
+      740,
+      814,
+      895,
+      985,
+      1083,
+      1192,
+      1311,
+      1442,
+      1586,
+      1745,
+      1919,
+      2111,
+      2323,
+      2555,
+      2810,
+      3091,
+      3400,
+      3740,
+      4114,
+      4526,
+      4979,
+      5476,
+      6024,
+      6626,
+      7289,
+      8018,
+      8820,
+      9702,
+      10672,
+      11739,
+      12913,
+      14204,
+      15625,
+      17187,
+      18906,
+      20797,
+      22876,
+      25164,
+      27680,
+      30448,
+      33493,
+      36842,
+      40527,
+      44579,
+      49037,
+      53941,
+      59335,
+      65268,
+      71795,
+      78975,
+      86872,
+      95559,
+      105115,
+      115627,
+      127190,
+      139908,
+      153899,
+      169289,
+      186218,
+      204840,
+      225324,
+      247856,
+      272642,
+      299906,
+      329897,
+      362887,
+      399175,
+      439093,
+      483002,
+      531302,
+      584432,
+      642876,
+      707163,
+      777880,
+      855668,
+      941234,
+      1035358,
+      1138894,
+      1252783,
+      1378061,
+      1515867,
+      1667454,
+      1834200,
+      2017619,
+      2219381,
+      2441320,
+      2685451,
+      2953997,
+      3249396,
+      3574336,
+      3931770,
+      4324946,
+      4757441,
+      5233185,
+      5756504,
+      6332154,
+      6965370,
+      7661907,
+      8428097,
+      9270907,
+      10197998,
+      11217797,
+      12339577,
+      13573535,
+      14930888,
+      16423977,
+      18066375,
+      19873012,
+      21860313,
+      24046345,
+      26450979,
+      29096077,
+      32005685,
+      35206253,
+      38726879,
+      42599567,
+      46859523,
+      51545476,
+      56700023,
+      62370026,
+      68607028,
+      75467731,
+      83014504,
+      91315954,
+      100447550,
+      110492305,
+      121541535,
+      133695689,
+      147065258,
+      161771784,
+      177948962,
+      195743858,
+      215318244,
+      236850068,
+      260535075,
+      286588583,
+      315247441,
+      346772185,
+      381449404,
+      419594344,
+      461553778,
+      507709156,
+      558480072,
+      614328079
+     ]
     },
     "up": {
      "title": "Up",
@@ -1795,13 +2229,14 @@
     "from",
     "count",
     "up",
-    "seconds"
+    "took"
    ],
    "title": "Services",
    "type": "object"
   },
   "Side": {
    "additionalProperties": false,
+   "description": "One tree built and tested: the build (its last step reached: setup to package), then each test run (its last\nstep reached: test_compile or test).",
    "properties": {
     "build": {
      "anyOf": [
@@ -1814,66 +2249,11 @@
      ],
      "default": null
     },
-    "coverage": {
-     "anyOf": [
-      {
-       "items": {
-        "$ref": "#/$defs/Covered"
-       },
-       "maxItems": 1000000,
-       "type": "array"
-      },
-      {
-       "type": "null"
-      }
-     ],
-     "default": null,
-     "title": "Coverage"
-    },
-    "installed_bytes": {
-     "anyOf": [
-      {
-       "maximum": 9007199254740991,
-       "minimum": 0,
-       "type": "integer"
-      },
-      {
-       "type": "null"
-      }
-     ],
-     "default": null,
-     "title": "Installed Bytes"
-    },
-    "memory_peak_bytes": {
-     "anyOf": [
-      {
-       "maximum": 9007199254740991,
-       "minimum": 0,
-       "type": "integer"
-      },
-      {
-       "type": "null"
-      }
-     ],
-     "default": null,
-     "title": "Memory Peak Bytes"
-    },
-    "offline": {
-     "anyOf": [
-      {
-       "$ref": "#/$defs/Step"
-      },
-      {
-       "type": "null"
-      }
-     ],
-     "default": null
-    },
     "tests": {
      "items": {
-      "$ref": "#/$defs/Step"
+      "$ref": "#/$defs/TestRun"
      },
-     "maxItems": 16,
+     "maxItems": 3,
      "title": "Tests",
      "type": "array"
     }
@@ -1886,24 +2266,54 @@
   },
   "Step": {
    "additionalProperties": false,
-   "description": "One build or test run: how it ended, never what it printed.",
+   "description": "One step of a build or test run: which, how it ended and why, never what it printed.",
    "properties": {
-    "error": {
+    "class": {
+     "enum": [
+      "ok",
+      "dep_unresolved",
+      "dep_conflict",
+      "build_config",
+      "compile_source",
+      "compile_test",
+      "link",
+      "test_assertion",
+      "test_error",
+      "test_timeout",
+      "quality_gate",
+      "test_flaky",
+      "env_network",
+      "env_resource",
+      "env_timeout",
+      "env_toolchain_missing",
+      "env_permission",
+      "cancelled",
+      "unknown"
+     ],
+     "title": "Class",
+     "type": "string"
+    },
+    "codes": {
+     "default": [],
+     "items": {
+      "pattern": "^(other|-?[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79})$",
+      "type": "string",
+      "x-bits": 14,
+      "x-bits-why": "the codes of the shipped code tables (under 2^14); any other is sent as other"
+     },
+     "maxItems": 16,
+     "title": "Codes",
+     "type": "array"
+    },
+    "compile_kind": {
      "anyOf": [
       {
        "enum": [
-        "toolchain_missing",
-        "dependency_fetch",
-        "network",
-        "oom",
-        "timeout",
-        "disk",
-        "service",
-        "permission",
-        "not_run",
-        "compile_error",
-        "test_failure",
-        "unknown"
+        "missing_symbol",
+        "type_mismatch",
+        "syntax",
+        "semantic",
+        "other"
        ],
        "type": "string"
       },
@@ -1912,7 +2322,7 @@
       }
      ],
      "default": null,
-     "title": "Error"
+     "title": "Compile Kind"
     },
     "exit": {
      "anyOf": [
@@ -1930,7 +2340,353 @@
     "log": {
      "pattern": "^[0-9a-f]{64}$",
      "title": "Log",
+     "type": "string",
+     "x-bits": 0,
+     "x-bits-why": "the server holds no seller's logs"
+    },
+    "step": {
+     "enum": [
+      "setup",
+      "dep_resolve",
+      "compile",
+      "test_compile",
+      "test",
+      "lint",
+      "package"
+     ],
+     "title": "Step",
      "type": "string"
+    },
+    "took": {
+     "maximum": 165,
+     "minimum": 0,
+     "title": "Took",
+     "type": "integer",
+     "x-bounds-ms": [
+      0,
+      100,
+      110,
+      121,
+      133,
+      146,
+      161,
+      177,
+      195,
+      214,
+      236,
+      259,
+      285,
+      314,
+      345,
+      380,
+      418,
+      459,
+      505,
+      556,
+      612,
+      673,
+      740,
+      814,
+      895,
+      985,
+      1083,
+      1192,
+      1311,
+      1442,
+      1586,
+      1745,
+      1919,
+      2111,
+      2323,
+      2555,
+      2810,
+      3091,
+      3400,
+      3740,
+      4114,
+      4526,
+      4979,
+      5476,
+      6024,
+      6626,
+      7289,
+      8018,
+      8820,
+      9702,
+      10672,
+      11739,
+      12913,
+      14204,
+      15625,
+      17187,
+      18906,
+      20797,
+      22876,
+      25164,
+      27680,
+      30448,
+      33493,
+      36842,
+      40527,
+      44579,
+      49037,
+      53941,
+      59335,
+      65268,
+      71795,
+      78975,
+      86872,
+      95559,
+      105115,
+      115627,
+      127190,
+      139908,
+      153899,
+      169289,
+      186218,
+      204840,
+      225324,
+      247856,
+      272642,
+      299906,
+      329897,
+      362887,
+      399175,
+      439093,
+      483002,
+      531302,
+      584432,
+      642876,
+      707163,
+      777880,
+      855668,
+      941234,
+      1035358,
+      1138894,
+      1252783,
+      1378061,
+      1515867,
+      1667454,
+      1834200,
+      2017619,
+      2219381,
+      2441320,
+      2685451,
+      2953997,
+      3249396,
+      3574336,
+      3931770,
+      4324946,
+      4757441,
+      5233185,
+      5756504,
+      6332154,
+      6965370,
+      7661907,
+      8428097,
+      9270907,
+      10197998,
+      11217797,
+      12339577,
+      13573535,
+      14930888,
+      16423977,
+      18066375,
+      19873012,
+      21860313,
+      24046345,
+      26450979,
+      29096077,
+      32005685,
+      35206253,
+      38726879,
+      42599567,
+      46859523,
+      51545476,
+      56700023,
+      62370026,
+      68607028,
+      75467731,
+      83014504,
+      91315954,
+      100447550,
+      110492305,
+      121541535,
+      133695689,
+      147065258,
+      161771784,
+      177948962,
+      195743858,
+      215318244,
+      236850068,
+      260535075,
+      286588583,
+      315247441,
+      346772185,
+      381449404,
+      419594344,
+      461553778,
+      507709156,
+      558480072,
+      614328079
+     ]
+    }
+   },
+   "required": [
+    "step",
+    "class",
+    "exit",
+    "took",
+    "log"
+   ],
+   "title": "Step",
+   "type": "object"
+  },
+  "Tag": {
+   "additionalProperties": false,
+   "properties": {
+    "annotated": {
+     "title": "Annotated",
+     "type": "boolean"
+    },
+    "commit": {
+     "maximum": 2147483647,
+     "minimum": 0,
+     "title": "Commit",
+     "type": "integer"
+    },
+    "release": {
+     "title": "Release",
+     "type": "boolean"
+    },
+    "tagger_time": {
+     "anyOf": [
+      {
+       "maximum": 9223372036854775807,
+       "minimum": -9223372036854775808,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Tagger Time"
+    },
+    "tagger_tz": {
+     "anyOf": [
+      {
+       "maximum": 1439,
+       "minimum": -1439,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Tagger Tz"
+    },
+    "tagger_tz_neg0": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Tagger Tz Neg0"
+    }
+   },
+   "required": [
+    "commit",
+    "tagger_time",
+    "tagger_tz",
+    "tagger_tz_neg0",
+    "annotated",
+    "release"
+   ],
+   "title": "Tag",
+   "type": "object"
+  },
+  "TestRun": {
+   "additionalProperties": false,
+   "description": "A test run: a step, and its tests as counted, where they were. A build is a `Step` and counts none.",
+   "properties": {
+    "class": {
+     "enum": [
+      "ok",
+      "dep_unresolved",
+      "dep_conflict",
+      "build_config",
+      "compile_source",
+      "compile_test",
+      "link",
+      "test_assertion",
+      "test_error",
+      "test_timeout",
+      "quality_gate",
+      "test_flaky",
+      "env_network",
+      "env_resource",
+      "env_timeout",
+      "env_toolchain_missing",
+      "env_permission",
+      "cancelled",
+      "unknown"
+     ],
+     "title": "Class",
+     "type": "string"
+    },
+    "codes": {
+     "default": [],
+     "items": {
+      "pattern": "^(other|-?[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79})$",
+      "type": "string",
+      "x-bits": 14,
+      "x-bits-why": "the codes of the shipped code tables (under 2^14); any other is sent as other"
+     },
+     "maxItems": 16,
+     "title": "Codes",
+     "type": "array"
+    },
+    "compile_kind": {
+     "anyOf": [
+      {
+       "enum": [
+        "missing_symbol",
+        "type_mismatch",
+        "syntax",
+        "semantic",
+        "other"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Compile Kind"
+    },
+    "exit": {
+     "anyOf": [
+      {
+       "maximum": 255,
+       "minimum": -255,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Exit"
+    },
+    "log": {
+     "pattern": "^[0-9a-f]{64}$",
+     "title": "Log",
+     "type": "string",
+     "x-bits": 0,
+     "x-bits-why": "the server holds no seller's logs"
     },
     "outcomes": {
      "anyOf": [
@@ -1947,6 +2703,10 @@
          "type": "string"
         }
        },
+       "propertyNames": {
+        "x-bits": 0,
+        "x-bits-why": "the server holds no seller's key"
+       },
        "type": "object"
       },
       {
@@ -1959,7 +2719,7 @@
     "passed": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 200000,
        "minimum": 0,
        "type": "integer"
       },
@@ -1989,7 +2749,7 @@
     "reported": {
      "anyOf": [
       {
-       "maximum": 9007199254740991,
+       "maximum": 200000,
        "minimum": 0,
        "type": "integer"
       },
@@ -2000,38 +2760,239 @@
      "default": null,
      "title": "Reported"
     },
-    "seconds": {
-     "maximum": 315360000,
+    "step": {
+     "enum": [
+      "setup",
+      "dep_resolve",
+      "compile",
+      "test_compile",
+      "test",
+      "lint",
+      "package"
+     ],
+     "title": "Step",
+     "type": "string"
+    },
+    "took": {
+     "maximum": 165,
      "minimum": 0,
-     "title": "Seconds",
-     "type": "integer"
+     "title": "Took",
+     "type": "integer",
+     "x-bounds-ms": [
+      0,
+      100,
+      110,
+      121,
+      133,
+      146,
+      161,
+      177,
+      195,
+      214,
+      236,
+      259,
+      285,
+      314,
+      345,
+      380,
+      418,
+      459,
+      505,
+      556,
+      612,
+      673,
+      740,
+      814,
+      895,
+      985,
+      1083,
+      1192,
+      1311,
+      1442,
+      1586,
+      1745,
+      1919,
+      2111,
+      2323,
+      2555,
+      2810,
+      3091,
+      3400,
+      3740,
+      4114,
+      4526,
+      4979,
+      5476,
+      6024,
+      6626,
+      7289,
+      8018,
+      8820,
+      9702,
+      10672,
+      11739,
+      12913,
+      14204,
+      15625,
+      17187,
+      18906,
+      20797,
+      22876,
+      25164,
+      27680,
+      30448,
+      33493,
+      36842,
+      40527,
+      44579,
+      49037,
+      53941,
+      59335,
+      65268,
+      71795,
+      78975,
+      86872,
+      95559,
+      105115,
+      115627,
+      127190,
+      139908,
+      153899,
+      169289,
+      186218,
+      204840,
+      225324,
+      247856,
+      272642,
+      299906,
+      329897,
+      362887,
+      399175,
+      439093,
+      483002,
+      531302,
+      584432,
+      642876,
+      707163,
+      777880,
+      855668,
+      941234,
+      1035358,
+      1138894,
+      1252783,
+      1378061,
+      1515867,
+      1667454,
+      1834200,
+      2017619,
+      2219381,
+      2441320,
+      2685451,
+      2953997,
+      3249396,
+      3574336,
+      3931770,
+      4324946,
+      4757441,
+      5233185,
+      5756504,
+      6332154,
+      6965370,
+      7661907,
+      8428097,
+      9270907,
+      10197998,
+      11217797,
+      12339577,
+      13573535,
+      14930888,
+      16423977,
+      18066375,
+      19873012,
+      21860313,
+      24046345,
+      26450979,
+      29096077,
+      32005685,
+      35206253,
+      38726879,
+      42599567,
+      46859523,
+      51545476,
+      56700023,
+      62370026,
+      68607028,
+      75467731,
+      83014504,
+      91315954,
+      100447550,
+      110492305,
+      121541535,
+      133695689,
+      147065258,
+      161771784,
+      177948962,
+      195743858,
+      215318244,
+      236850068,
+      260535075,
+      286588583,
+      315247441,
+      346772185,
+      381449404,
+      419594344,
+      461553778,
+      507709156,
+      558480072,
+      614328079
+     ]
     }
    },
    "required": [
+    "step",
+    "class",
     "exit",
-    "seconds",
+    "took",
     "log"
    ],
-   "title": "Step",
+   "title": "TestRun",
    "type": "object"
   },
-  "Tag": {
+  "Tip": {
    "additionalProperties": false,
+   "description": "The tip, built and tested, and measured beyond pass and fail.",
    "properties": {
-    "annotated": {
-     "title": "Annotated",
-     "type": "boolean"
-    },
-    "commit": {
-     "maximum": 2147483647,
-     "minimum": 0,
-     "title": "Commit",
-     "type": "integer"
-    },
-    "day": {
+    "build": {
      "anyOf": [
       {
-       "maximum": 200000,
+       "$ref": "#/$defs/Step"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "coverage": {
+     "anyOf": [
+      {
+       "items": {
+        "$ref": "#/$defs/Covered"
+       },
+       "maxItems": 100000,
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Coverage"
+    },
+    "installed_bytes": {
+     "anyOf": [
+      {
+       "maximum": 17592186044415,
        "minimum": 0,
        "type": "integer"
       },
@@ -2039,20 +3000,47 @@
        "type": "null"
       }
      ],
-     "title": "Day"
+     "default": null,
+     "title": "Installed Bytes"
     },
-    "release": {
-     "title": "Release",
-     "type": "boolean"
+    "memory_peak_bytes": {
+     "anyOf": [
+      {
+       "maximum": 17592186044415,
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Memory Peak Bytes"
+    },
+    "offline": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/TestRun"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "tests": {
+     "items": {
+      "$ref": "#/$defs/TestRun"
+     },
+     "maxItems": 3,
+     "title": "Tests",
+     "type": "array"
     }
    },
    "required": [
-    "commit",
-    "day",
-    "annotated",
-    "release"
+    "tests"
    ],
-   "title": "Tag",
+   "title": "Tip",
    "type": "object"
   },
   "Toolchain": {
@@ -2179,6 +3167,6 @@
    "type": "object"
   }
  },
- "description": "What `kennet codeval` sends (kennet.codeval.profile.v1, kennet.codeval.results.v1) and the instructions it is answered with (Next). Closed: no field takes free text.",
+ "description": "What `kennet codeval` sends (kennet.codeval.profile.v1, kennet.codeval.results.v1) and the instructions it is answered with (Next). Closed: no field takes free text. What the results extract from running code and reading logs is capped at 500000 bits a step and 117000000 bits a run (log2 of each field's domain, summed; hashes and codes by x-bits, durations as buckets of x-bounds-ms). The profile's git metadata is outside the cap: facts git already holds, not values extracted from content.",
  "title": "Kennet CodeVal"
 }

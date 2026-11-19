@@ -9,6 +9,7 @@ here; a run sends the sha256 of its log alone.
 
 from __future__ import annotations
 
+import bisect
 import collections
 import contextlib
 import gzip
@@ -42,7 +43,7 @@ except ImportError:  # Python 3.10
 
 PROFILE = schema.PROFILE
 RESULTS = schema.RESULTS
-DAYS = 200_000
+TZ_MOST = 23 * 60 + 59
 MAX_BLOB = 2_000_000
 MAX_BLOBS = 64
 
@@ -286,25 +287,82 @@ class Unreadable(Exception):
 
 
 RELEASE = re.compile(r"^v?\d+(\.\d+)+")
-TAG_FORMAT = (
-    "%(objecttype)%00%(objectname)%00%(*objectname)%00%(taggerdate:unix)%00%(creatordate:unix)%00%(refname:lstrip=2)"
-)
+TAG_FORMAT = "%(objecttype)%00%(objectname)%00%(*objectname)%00%(refname:lstrip=2)"
 
 
 def _tags(repo: Path, order: dict[str, int]) -> list[dict[str, Any]]:
-    out = []
+    """Each tag: the commit it names, whether it is annotated or reads as a release, and, for an annotated tag, the
+    tagger's time and zone exactly as the tag object holds them. Its name is never sent."""
+    out, objects = [], []
     for line in _text(repo, "for-each-ref", f"--format={TAG_FORMAT}", "refs/tags").splitlines():
-        kind, obj, target, tagged, created, name = line.split("\0")
-        at = tagged or created
+        kind, obj, target, name = line.split("\0")
         out.append(
             {
                 "commit": order.get(target if kind == "tag" else obj, 0),
-                "at": int(at) if at.lstrip("-").isdigit() else None,
                 "annotated": kind == "tag",
                 "release": bool(RELEASE.match(name)),
+                **(dict.fromkeys(("tagger_time", "tagger_tz", "tagger_tz_neg0")) if kind != "tag" else {}),
             }
         )
-    return sorted(out, key=lambda t: (t["commit"], t["at"] or 0))
+        if kind == "tag":
+            objects.append((out[-1], obj))
+    said = _headers(repo, [obj for _t, obj in objects], "tagger")
+    for tag, obj in objects:
+        tag.update(_stamp(said.get(obj, {}).get("tagger"), "tagger"))
+    return sorted(out, key=lambda t: (t["commit"], t["tagger_time"] is not None, t["tagger_time"] or 0))
+
+
+def _zone(raw: str) -> tuple[int, bool]:
+    """git's `+HHMM` as minutes east of UTC, and whether it is `-0000` (a zone git was not told). A zone git holds
+    but no clock can have is sent as 0."""
+    m = re.fullmatch(r"([+-])(\d\d)(\d\d)", raw)
+    if not m:
+        return 0, False
+    minutes = int(m[2]) * 60 + int(m[3])
+    return ((-minutes if m[1] == "-" else minutes) if minutes <= TZ_MOST else 0), raw == "-0000"
+
+
+def _stamp(line: str | None, who: str) -> dict[str, Any]:
+    """`<who>_time`, `<who>_tz` and `<who>_tz_neg0` from a raw `author`, `committer` or `tagger` header value."""
+    m = re.search(r" (-?\d+) ([+-]\d{4}|\S+)$", line or "")
+    if not m:
+        return {f"{who}_time": 0, f"{who}_tz": 0, f"{who}_tz_neg0": False}
+    tz, neg0 = _zone(m[2])
+    return {f"{who}_time": min(max(int(m[1]), -(1 << 63)), (1 << 63) - 1), f"{who}_tz": tz, f"{who}_tz_neg0": neg0}
+
+
+def _headers(repo: Path, objects: list[str], *names: str) -> dict[str, dict[str, str]]:
+    """The raw header lines of each object, by name (the first of each), read straight from the object store: git's
+    own formatting normalises `-0000` to `+0000`. `signed` is there when a gpgsig header is."""
+    if not objects:
+        return {}
+    got = subprocess.run(
+        _git(repo, "cat-file", "--batch"),
+        input=("\n".join(objects) + "\n").encode(),
+        capture_output=True,
+        env=_ENV,
+        check=False,
+    )
+    if got.returncode != 0:
+        raise Unreadable("cat-file")
+    out: dict[str, dict[str, str]] = {}
+    data, at = got.stdout, 0
+    for obj in objects:
+        nl = data.index(b"\n", at)
+        head = data[at:nl].split()
+        size = int(head[2]) if len(head) == 3 else 0
+        body = data[nl + 1 : nl + 1 + size]
+        at = nl + 1 + size + 1
+        fields: dict[str, str] = {}
+        for line in body.split(b"\n\n", 1)[0].split(b"\n"):
+            name, _, value = line.partition(b" ")
+            word = name.decode("latin-1")
+            if word in names and word not in fields:
+                fields[word] = value.decode("utf-8", "replace")
+            elif word in ("gpgsig", "gpgsig-sha256"):
+                fields["signed"] = "1"
+        out[obj] = fields
+    return out
 
 
 def _git(repo: Path, *args: str) -> list[str]:
@@ -329,10 +387,6 @@ def _out(repo: Path, *args: str) -> bytes:
 
 def _text(repo: Path, *args: str) -> str:
     return _out(repo, *args).decode("utf-8", "replace").strip()
-
-
-def _time(said: str) -> int:
-    return int(said) if said.lstrip("-").isdigit() and -62135596800 <= int(said) <= 253402300799 else 0
 
 
 class _Ids(dict):
@@ -374,24 +428,6 @@ def _path_words(path: str) -> set[str]:
     return {w.lower() for part in re.split(r"[/._-]+", path) for w in PATH_WORD.findall(part)}
 
 
-HOUR_S, DAY_S = 3600, 86400
-MONDAY = 3  # 1970-01-01, day 0, was a Thursday: (day + 3) % 7 is 0 on Mondays
-
-
-def _day(at: int) -> int:
-    """The day a time falls on, counted from 1970-01-01 in UTC."""
-    return at // DAY_S
-
-
-def _how(at: int, tz: str) -> int:
-    """The hour of the week, 0 (Monday 00h) to 167 (Sunday 23h), in the clock of the person who made it. The offset
-    itself is not sent: it would say where they are."""
-    m = re.fullmatch(r"([+-])(\d{2})(\d{2})", tz)
-    off = (1 if m[1] == "+" else -1) * (int(m[2]) * HOUR_S + int(m[3]) * 60) if m else 0
-    local = at + off
-    return ((_day(local) + MONDAY) % 7) * 24 + (local % DAY_S) // HOUR_S
-
-
 def _commits(
     repo: Path,
     authors: _Ids,
@@ -401,8 +437,8 @@ def _commits(
     words: dict[int, set[str]],
     key: bytes,
 ) -> list[dict]:
-    fields = "%H%x00%P%x00%aE%x00%cE%x00%at%x00%ct%x00%ad%x00%cd%x00%B%x00%(trailers:only,unfold)%x00"
-    raw = _out(repo, "log", "HEAD", "--topo-order", "--reverse", "--date=format:%z", f"--format={fields}").split(b"\0")
+    fields = "%H%x00%P%x00%aE%x00%cE%x00%B%x00%(trailers:only,unfold)%x00"
+    raw = _out(repo, "log", "HEAD", "--topo-order", "--reverse", f"--format={fields}").split(b"\0")
 
     def person(address: str) -> int:
         low = address.lower()
@@ -412,28 +448,29 @@ def _commits(
             )
         return authors[low]
 
-    first = set(_text(repo, "rev-list", "--first-parent", "HEAD").split())
-    rows = [[x.decode("utf-8", "replace") for x in raw[i : i + 10]] for i in range(0, len(raw) - 9, 10)]
+    rows = [[x.decode("utf-8", "replace") for x in raw[i : i + 6]] for i in range(0, len(raw) - 5, 6)]
+    tip = rows[-1][0].strip() if rows else ""
+    rows = [r for r in rows if r[0].strip() != tip] + [r for r in rows if r[0].strip() == tip]  # the tip last
     for row in rows:
         order[row[0].strip()] = len(order) + 1
+    said = _headers(repo, list(order), "author", "committer")
     commits = []
     for row in rows:
-        sha, parents, author, committer, at, ct, atz, _ctz, msg, block = row
+        sha, parents, author, committer, msg, block = row
         sha = sha.strip()
         back = REVERTS.search(msg)
         subject, *body = msg.split("\n")
         words[order[sha]] = {w.lower() for w in WORD.findall(msg) if len(w) >= 4}
-        at_s, ct_s = _time(at), _time(ct)
+        raw_head = said.get(sha, {})
         commits.append(
             {
                 "commit": order[sha],
                 "parents": [order.get(p, 0) for p in parents.split()],
-                "first_parent": sha in first,
                 "author": person(author),
                 "committer": person(committer),
-                "day": _day(at_s),
-                "hour": _how(at_s, atz.strip()),
-                "same_time": at_s == ct_s,
+                **_stamp(raw_head.get("author"), "author"),
+                **_stamp(raw_head.get("committer"), "committer"),
+                "signed": "signed" in raw_head,
                 "msg_chars": len(msg),
                 "msg_lines": msg.count("\n") + 1,
                 "ticket_refs": len(TICKET.findall(PR_NUMBER.sub("", msg))),
@@ -544,7 +581,7 @@ def _changes(repo: Path, by_sha: dict[str, dict], paths: _Ids, order: dict[str, 
                 "status": status.get(path, "M"),
                 "added": int(m[1]) if m[1] != "-" else -1,
                 "deleted": int(m[2]) if m[2] != "-" else -1,
-                "hunks": 0,
+                "hunks": [],
             }
             if old is not None:
                 change["old_file"] = paths.of(old)
@@ -587,22 +624,15 @@ def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
         stderr=subprocess.DEVNULL,
         env=_ENV,
     )
-    counts: dict[str, int] = {}
-    spans: dict[str, list[tuple[int, int]]] = {}
+    spans: dict[str, list[list[int]]] = {}
     words: dict[str, set[bytes]] = {"test+": set(), "source+": set(), "source-": set()}
     row: dict | None = None
 
     def close() -> None:
         if row is not None:
-            by_id = {paths[path]: n for path, n in counts.items() if path in paths}
-            gaps = {
-                paths[path]: [max(0, b[0] - a[1]) for a, b in itertools.pairwise(s)]
-                for path, s in spans.items()
-                if path in paths
-            }
+            by_id = {paths[path]: s for path, s in spans.items() if path in paths}
             for change in row["files"]:
-                change["hunks"] = by_id.get(change["file"], 0)
-                change["gaps"] = gaps.get(change["file"], [])
+                change["hunks"] = by_id.get(change["file"], [])
             row["shared_idents"] = len((words["test+"] & words["source+"]) - words["source-"])
 
     skip, path, side = 0, None, None
@@ -616,7 +646,7 @@ def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
             continue
         if line[:1] == b"\x01":
             close()
-            row, counts, spans, path = by_sha.get(line[1:].strip().decode()), {}, {}, None
+            row, spans, path = by_sha.get(line[1:].strip().decode()), {}, None
             words = {"test+": set(), "source+": set(), "source-": set()}
         elif line.startswith(b"+++ "):
             if line[4:] != b"/dev/null\n":
@@ -626,12 +656,11 @@ def _hunks(repo: Path, by_sha: dict[str, dict], paths: _Ids) -> None:
             got = _unquote(line[4:])
             path = got[2:] if got[:2] == "a/" else None
         elif line.startswith(b"@@ ") and path is not None:
-            counts[path] = counts.get(path, 0) + 1
-            m = re.match(rb"@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+            m = re.match(rb"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
             if m:
-                old, gone, came = int(m[1]), int(m[2] or 1), int(m[3] or 1)
+                old, gone, new, came = int(m[1]), int(m[2] or 1), int(m[3]), int(m[4] or 1)
                 skip = gone + came
-                spans.setdefault(path, []).append((old, old + gone))
+                spans.setdefault(path, []).append([old, gone, new, came])
                 kind = _kind(path)
                 side = "test" if kind == "test" else "source" if kind == "source" else None
     close()
@@ -927,9 +956,6 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
         changed = {i for x in c["files"] for i in (x["file"], x.get("old_file")) if i is not None}
         c["path_terms"] = len(words[c["commit"]] & set().union(*(named[i] for i in changed)))
     _hunks(repo, by_sha, paths)
-    first_day = min((c["day"] for c in commits if c["day"] > 0), default=0)
-    for c in commits:
-        c["day"] = min(max(c["day"] - first_day, 0), DAYS)
     tree: dict[str, tuple[str, str, int]] = {}
     for entry in _out(repo, "ls-tree", "-r", "-l", "-z", "HEAD").split(b"\0"):
         if b"\t" in entry:
@@ -958,6 +984,7 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
             "kind": _kind(path),
             "known": (b if (b := os.path.basename(path).lower()) in KNOWN else None),
             "at_tip": path in tree,
+            "ci": any(pattern.search(path) for _n, pattern in codebase_env.CI),
         }
         if path in tree:
             if tree[path][0] != "160000":
@@ -993,9 +1020,6 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
     deps, private = _dependencies(tree, read)
     pack = re.search(r"size-pack: (\d+)", _text(repo, "count-objects", "-v"))
     tags = _tags(repo, order)
-    for t in tags:
-        at = t.pop("at")
-        t["day"] = min(max(_day(at) - first_day, 0), DAYS) if t["annotated"] and at is not None else None
     if keep is not None:
         keep.update(
             path=repo,
@@ -1010,7 +1034,6 @@ def compute(repo: Path, key: bytes, keep: dict | None = None) -> dict[str, Any]:
         "cli": __version__,
         "tip": tip,
         "roots": _text(repo, "rev-list", "--max-parents=0", "HEAD").split()[:64],
-        "first_day": min(first_day, DAYS),
         "git": {
             "branches": len(_text(repo, "for-each-ref", "--format=x", "refs/heads", "refs/remotes").split()),
             "tags": tags,
@@ -1234,7 +1257,12 @@ GZIP = {"content-encoding": "gzip", "content-type": "application/json"}
 def _answer(got: dict[str, Any]) -> dict[str, Any]:
     """The server's answer, its instructions checked against the schema before any is followed."""
     if isinstance(got.get("next"), dict):
-        schema.check("Next", got["next"])
+        nxt = got["next"]
+        schema.check("Next", nxt)
+        held = schema.defs()["Results"]["properties"]
+        for k in ("commits", "mutants", "blobs"):
+            if len(nxt[k]) > held[k]["maxItems"]:
+                raise schema.Refused(f"Next.{k}", f"a batch answers at most {held[k]['maxItems']}")
     return got
 
 
@@ -1276,7 +1304,6 @@ def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
 
 # -- measuring what the server names -------------------------------------------------------------------------------
 
-STEP_MOST = 10 * 365 * 86400
 TESTS_MOST = 200_000
 
 
@@ -1289,20 +1316,36 @@ def _log(raw: dict[str, Any]) -> str:
     return h.hexdigest()
 
 
-def step(raw: dict[str, Any], key: bytes) -> dict[str, Any]:
-    """One build or test run as sent: how it ended, never what it printed. Test cases are named by HMAC alone."""
+def took(seconds: float) -> int:
+    """A duration as the schema's bucket: the index of the last bound at or below it, in milliseconds. The duration
+    itself is never sent."""
+    bounds = schema.defs()["Step"]["properties"]["took"]["x-bounds-ms"]
+    return max(bisect.bisect_right(bounds, max(seconds, 0.0) * 1000) - 1, 0)
+
+
+def step(raw: dict[str, Any], key: bytes, tested: bool = True) -> dict[str, Any]:
+    """One build or test run as sent: which step it reached, how it ended and why, never what it printed. A test run
+    (`tested`) adds its counts and its cases, named by HMAC alone; diagnostic codes only as the shipped tables name
+    them."""
     code = raw.get("exit")
-    error = None if code == 0 else raw.get("error") or ("timeout" if code is None else "unknown")
-    out: dict[str, Any] = {"exit": code, "seconds": min(int(raw.get("seconds") or 0), STEP_MOST), "log": _log(raw)}
-    if error:
-        out["error"] = error
-    named = schema.defs()["Step"]["properties"]
-    for k in ("step", "class", "compile_kind"):
-        if k in named and raw.get(k) is not None:
-            out[k] = raw[k]
-    for k in ("reported", "passed", "report"):
+    out: dict[str, Any] = {
+        "step": raw.get("step") or ("test" if tested else "compile"),
+        "class": raw.get("class") or ("ok" if code == 0 else "env_timeout" if code is None else "unknown"),
+        "exit": code,
+        "took": took(float(raw.get("seconds") or 0)),
+        "log": _log(raw),
+    }
+    if raw.get("compile_kind") and out["class"] in extract.COMPILED:
+        out["compile_kind"] = raw["compile_kind"]
+    if raw.get("codes"):
+        out["codes"] = list(dict.fromkeys(raw["codes"]))[: extract.MAX_CODES]
+    if not tested:
+        return out
+    for k in ("reported", "passed"):
         if raw.get(k) is not None:
-            out[k] = raw[k]
+            out[k] = min(raw[k], TESTS_MOST)
+    if raw.get("report") is not None:
+        out["report"] = raw["report"]
     if raw.get("cases"):
         out["outcomes"] = dict(
             itertools.islice(((keyed(key, "test\0" + c), o) for c, o in sorted(raw["cases"].items())), TESTS_MOST)
@@ -1310,23 +1353,32 @@ def step(raw: dict[str, Any], key: bytes) -> dict[str, Any]:
     return out
 
 
-def side(raw: dict[str, Any], key: bytes) -> dict[str, Any]:
-    out: dict[str, Any] = {"tests": [step(t, key) for t in raw.get("tests", [])][:16]}
-    for k in ("build", "offline"):
-        if raw.get(k):
-            out[k] = step(raw[k], key)
-    for k in ("installed_bytes", "memory_peak_bytes", "coverage"):
-        if raw.get(k) is not None:
-            out[k] = raw[k]
+def side(raw: dict[str, Any], key: bytes, part: str = "Side") -> dict[str, Any]:
+    """One tree built and tested, as the schema's `part` holds it: `Pre` (one test run), `Side` (a commit's or a
+    mutant's post side) or `Tip`, the only one measured beyond pass and fail."""
+    most = schema.defs()[part]["properties"]["tests"]["maxItems"]
+    out: dict[str, Any] = {"tests": [step(t, key) for t in raw.get("tests", [])][:most]}
+    if raw.get("build"):
+        out["build"] = step(raw["build"], key, tested=False)
+    if part == "Tip":
+        if raw.get("offline"):
+            out["offline"] = step(raw["offline"], key)
+        for k in ("installed_bytes", "memory_peak_bytes"):
+            if raw.get(k) is not None:
+                out[k] = raw[k]
+        if raw.get("coverage") is not None:
+            out["coverage"] = raw["coverage"][: schema.defs()["Tip"]["properties"]["coverage"]["anyOf"][0]["maxItems"]]
     return out
 
 
-def _unit(raw: dict[str, Any] | None, key: bytes) -> dict[str, Any]:
+def _unit(raw: dict[str, Any] | None, key: bytes, sides: tuple[str, ...]) -> dict[str, Any]:
+    """A commit (both sides) or a mutant (its post side) as sent, or why it did not run: `cancelled` when the time
+    Metaphi AI set ran out first, `unknown` when it could not be run here."""
     if raw is None:
-        return {"error": "not_run"}
-    if raw.get("broke") or not raw.get("post"):
+        return {"error": "cancelled"}
+    if raw.get("broke") or any(not raw.get(k) for k in sides):
         return {"error": "unknown"}
-    return {k: side(raw[k], key) for k in ("pre", "post") if raw.get(k) is not None}
+    return {k: side(raw[k], key, "Pre" if k == "pre" else "Side") for k in sides}
 
 
 OS = {"linux": "linux", "darwin": "darwin", "windows": "windows"}
@@ -1633,28 +1685,32 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
     out: dict[str, Any] = {
         "schema": RESULTS,
         "cli": __version__,
+        "rules": extract.rules_hash(),
         "batch": nxt["batch"],
         "machine": machine(bench.box, bench.found[0].image if bench.found else None),
         "toolchain": bench.toolchain(),
-        "commits": [{"commit": i, **_unit(r, key)} for i, r in zip(nxt["commits"], raw["commits"], strict=False)],
-        "mutants": [{**m, **_unit(r, key)} for m, r in zip(mutants, raw["mutants"], strict=False)],
+        "commits": [
+            {"commit": i, **_unit(r, key, ("pre", "post"))}
+            for i, r in zip(nxt["commits"], raw["commits"], strict=False)
+        ],
+        "mutants": [{**m, **_unit(r, key, ("post",))} for m, r in zip(mutants, raw["mutants"], strict=False)],
         "blobs": blobs(local, nxt["blobs"]),
     }
     answered = {c["commit"] for c in out["commits"]}
-    out["commits"] += [{"commit": i, "error": "not_run"} for i in nxt["commits"] if i not in answered]
+    out["commits"] += [{"commit": i, "error": "cancelled"} for i in nxt["commits"] if i not in answered]
     done = len(out["mutants"])
-    out["mutants"] += [{**m, "error": "not_run"} for m in mutants[done:]]
+    out["mutants"] += [{**m, "error": "cancelled"} for m in mutants[done:]]
     if (commands := bench.commands()) is not None:
         out["commands"] = commands
     if bench.services is not None:
+        got = bench.services.got
         out["services"] = {
-            k: v for k, v in bench.services.got.items() if k in ("from", "count", "up", "seconds", "refused")
+            **{k: v for k, v in got.items() if k in ("from", "count", "up", "refused")},
+            "took": took(float(got.get("seconds") or 0)),
         }
     if nxt["tip"] and raw.get("tip"):
-        out["tip"] = side(raw["tip"], key)
-    out["seconds"] = min(round(time.monotonic() - began), STEP_MOST)
-    if "rules" in schema.defs()["Results"]["properties"]:
-        out["rules"] = extract.rules_hash()
+        out["tip"] = side(raw["tip"], key, "Tip")
+    out["took"] = took(time.monotonic() - began)
     return out
 
 

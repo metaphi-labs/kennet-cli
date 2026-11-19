@@ -109,16 +109,19 @@ def structured(command: str) -> str:
 @dataclass
 class Found:
     """What structured output said about one run: the class it names, the kinds of compile error by count, and the
-    test outcomes and counts when it has them. Codes are counted under the kind their table gives, never kept."""
+    test outcomes and counts when it has them. `codes` holds each diagnostic code as the shipped table names it, any
+    other as `other`."""
 
     classes: list[str] = field(default_factory=list)
     kinds: Counter = field(default_factory=Counter)
+    codes: list[str] = field(default_factory=list)
     cases: dict[str, str] = field(default_factory=dict)
     counts: tuple[int, int] | None = None
 
     def merge(self, other: Found) -> None:
         self.classes += other.classes
         self.kinds.update(other.kinds)
+        self.codes += other.codes
         self.cases.update(other.cases)
         if other.counts and not self.counts:
             self.counts = other.counts
@@ -140,6 +143,11 @@ def _lines(text: str, start: str) -> list[dict]:
 def coded(table: str, code: str | None) -> str:
     """The kind a diagnostic code stands for in the shipped table, else `other`."""
     return pack()["codes"].get(table, {}).get(code or "", "other")
+
+
+def code_word(table: str, code: str | None) -> str:
+    """A diagnostic code as it may be sent: itself when the shipped table holds it, else `other`."""
+    return code if code and code in pack()["codes"].get(table, {}) else "other"
 
 
 def kind_of(message: str) -> str:
@@ -183,6 +191,8 @@ def cargo_messages(text: str) -> Found:
             if msg.get("level") in ("error", "error: internal compiler error"):
                 code = (msg.get("code") or {}).get("code")
                 f.kinds[coded("rustc", code) if code else kind_of(str(msg.get("message") or ""))] += 1
+                if code:
+                    f.codes.append(code_word("rustc", code))
         elif m.get("reason") == "build-finished" and m.get("success") is False:
             f.classes.append("compile")
     if f.kinds and "compile" not in f.classes:
@@ -204,6 +214,8 @@ def sarif(paths: list[Path]) -> Found:
                     continue
                 rule = r.get("ruleId")
                 kind = coded("gcc", rule) if rule else "other"
+                if rule:
+                    f.codes.append(code_word("gcc", rule))
                 if kind == "other":
                     kind = kind_of(str((r.get("message") or {}).get("text") or ""))
                 f.kinds[kind] += 1
@@ -356,6 +368,14 @@ def _template(line: str, tokens: list[str]) -> bool:
     return len(words) == len(tokens) and all(t == "<*>" or t == w for t, w in zip(tokens, words, strict=True))
 
 
+def codes_in(text: str) -> list[str]:
+    """The diagnostic codes a log names (rustc, tsc, csc), as they may be sent, in the order first seen."""
+    got = []
+    for table, pattern in pack()["code_res"].items():
+        got += [code_word(table, c) for c in re.findall(pattern, text)]
+    return got
+
+
 def matched(text: str) -> tuple[dict | None, str | None]:
     """The first rule in the pack that matches the log: a pattern, else a template on one of its lines. Answers the
     rule and the kind of compile error the log names, if any."""
@@ -374,6 +394,11 @@ def matched(text: str) -> tuple[dict | None, str | None]:
     return rule, kind
 
 
+COMPILED = frozenset(["compile_source", "compile_test", "link"])
+TEST_STEPS = frozenset(["test_compile", "test"])
+MAX_CODES = 16
+
+
 def classify(
     step: str,
     code: int | None,
@@ -385,42 +410,47 @@ def classify(
     memory: int | None = None,
     memory_limit: int | None = None,
 ) -> dict[str, Any]:
-    """Why one build (`step` "build") or test run (`step` "test") ended, as {step, class, compile_kind, rule}. The
-    order: how the process ended; what structured output said; the rule pack on the log; then what the counts say.
-    `rule` is the id of the shipped rule that decided, kept on this machine."""
-    failed_counts = counts is not None and counts[0] != counts[1]
-    if code == 0 and not failed_counts:
-        return {"step": "compile" if step == "build" else "test", "class": "ok", "compile_kind": None, "rule": None}
-    at = "compile" if step == "build" else "test"
-    if env := environmental(code, seconds, limit_s, memory, memory_limit):
-        return {"step": at, "class": env, "compile_kind": None, "rule": f"exit.{code}"}
+    """Why one build (`step` "build") or test run (`step` "test") ended, as {step, class, compile_kind, codes, rule}.
+    Exit 0 is `ok`. Otherwise the order is: how the process ended; what structured output said; the rule pack on the
+    log; then what the counts say. A build's step is never a test step, and a test run's always is. `rule` is the id
+    of the shipped rule that decided, kept on this machine."""
     found = found or Found()
+    text = _text(log) if code != 0 else ""
+    codes = list(dict.fromkeys(found.codes + codes_in(text)))[:MAX_CODES]
+    if code == 0:
+        return _row(step, "ok", None, [], None)
+    if env := environmental(code, seconds, limit_s, memory, memory_limit):
+        return _row(step, env, None, codes, f"exit.{code}")
     order = ("compile", "test_timeout", "test_error", "test_assertion", "test_flaky", "env_resource", "env_timeout",
              "env_network", "build_config", "cancelled")  # fmt: skip
-    named = next((c for c in order if c in found.classes), None)
-    if named:
-        return _resolved(step, named, found.kinds.most_common(1)[0][0] if found.kinds else None, "structured")
-    rule, kind = matched(_text(log))
+    if named := next((c for c in order if c in found.classes), None):
+        return _row(step, named, found.kinds.most_common(1)[0][0] if found.kinds else None, codes, "structured")
+    rule, kind = matched(text)
     if rule is not None:
-        return _resolved(step, rule["class"], kind, rule["id"], rule.get("step"))
-    if failed_counts:
-        return _resolved(step, "test_assertion", None, "counts")
-    return {"step": at, "class": "unknown", "compile_kind": None, "rule": None}
+        return _row(step, rule["class"], kind, codes, rule["id"], rule.get("step"))
+    if counts is not None and counts[0] != counts[1]:
+        return _row(step, "test_assertion", None, codes, "counts")
+    return _row(step, "unknown", None, codes, None)
 
 
-def _resolved(step: str, cls: str, kind: str | None, rule: str, where: str | None = None) -> dict[str, Any]:
+def _row(
+    step: str, cls: str, kind: str | None, codes: list[str], rule: str | None, where: str | None = None
+) -> dict[str, Any]:
+    test_side = step != "build"
     if cls == "compile":
-        test_side = step != "build"
-        return {
-            "step": "test_compile" if test_side else "compile",
-            "class": "compile_test" if test_side else "compile_source",
-            "compile_kind": kind or "other",
-            "rule": rule,
-        }
-    if where in ("test_compile", "compile"):
-        where = "test_compile" if step != "build" and where == "compile" else where
-    at = where or ("compile" if step == "build" else "test")
-    return {"step": at, "class": cls, "compile_kind": None, "rule": rule}
+        cls, where = ("compile_test", "test_compile") if test_side else ("compile_source", "compile")
+        kind = kind or "other"
+    if test_side:
+        where = "test_compile" if where in ("test_compile", "compile") or cls == "compile_test" else "test"
+    elif where is None or where in TEST_STEPS:
+        where = "compile"
+    return {
+        "step": where,
+        "class": cls,
+        "compile_kind": kind if cls in COMPILED else None,
+        "codes": codes,
+        "rule": rule,
+    }
 
 
 def flaky(rows: list[dict[str, Any]]) -> None:
@@ -428,48 +458,21 @@ def flaky(rows: list[dict[str, Any]]) -> None:
     same image, and a different end."""
     passed = any(r.get("class") == "ok" for r in rows)
     for r in rows:
-        if passed and r.get("class") not in ("ok", None) and str(r.get("class", "")).startswith("test_"):
+        if passed and r.get("exit") is not None and str(r.get("class", "")).startswith("test_"):
             r["class"] = "test_flaky"
 
 
-# The schema's error words today, for each class; replaced by the classes themselves once the server's schema names
-# them (kennet#1350).
-ERROR = {
-    "ok": None,
-    "dep_unresolved": "dependency_fetch",
-    "dep_conflict": "dependency_fetch",
-    "build_config": "compile_error",
-    "compile_source": "compile_error",
-    "compile_test": "compile_error",
-    "link": "compile_error",
-    "test_assertion": "test_failure",
-    "test_error": "test_failure",
-    "test_timeout": "test_failure",
-    "test_flaky": "test_failure",
-    "quality_gate": "test_failure",
-    "env_network": "network",
-    "env_resource": "oom",
-    "env_timeout": "timeout",
-    "env_toolchain_missing": "toolchain_missing",
-    "env_permission": "permission",
-    "cancelled": "unknown",
-    "unknown": "unknown",
-}
-
-
-def error(cls: str) -> str | None:
-    return ERROR.get(cls, "unknown")
-
-
 __all__ = [
-    "ERROR",
+    "COMPILED",
+    "MAX_CODES",
     "Found",
     "bep",
     "cargo_messages",
     "classify",
+    "code_word",
     "coded",
+    "codes_in",
     "environmental",
-    "error",
     "flaky",
     "go_events",
     "jest",
