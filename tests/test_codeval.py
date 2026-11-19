@@ -734,6 +734,11 @@ def test_a_trailer_value_with_carriage_returns_is_one_trailer():
         {"key": "signed-off-by", "tool": None},
         {"key": "assisted-by", "tool": "openai"},
     ]
+    named = schema.defs()["Trailer"]["properties"]["tool"]["anyOf"][0]["enum"]
+    assert {t for t, _ in codeval.VENDORS} <= set(named)
+    assert codeval._trailers("Co-authored-by: A <1+a@users.noreply.github.com>") == [
+        {"key": "co-authored-by", "tool": None}
+    ]
 
 
 # -- the schema: the allowlist ----------------------------------------------------------------------------------------

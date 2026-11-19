@@ -489,7 +489,6 @@ VENDORS = (
     ("factory", ("factory.ai",)),
     ("sweep", ("sweep.dev",)),
     ("coderabbit", ("coderabbit.ai",)),
-    ("github", ("github.com",)),
     ("google", ("google.com",)),
 )
 """Coding assistant vendors by their email domains (or a subdomain): a trailer names the vendor, never the domain."""

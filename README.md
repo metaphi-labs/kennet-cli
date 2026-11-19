@@ -212,7 +212,7 @@ The exit status says what kind of end it was:
 | 3 | A sign-in or a key is needed (`auth_error`). |
 | 4 | The same call may work later: the service is unavailable, a limit is reached, or a wait ran out. |
 | 5 | This version is too old for the service (`upgrade_required`); `next_step` upgrades it. |
-| 6 | `kennet codeval` needs a person to decide: `needs` says what to ask them and the commands each answer runs. |
+| 6 | `kennet codeval` needs a person to act: a toolchain is missing, or no test command was found. |
 
 A request that fails in transit or with a retryable error is sent again at most twice, within 5 seconds in all;
 a longer `Retry-After` is handed back as `retry_after_s`, not waited out.
@@ -255,11 +255,11 @@ but for the last:
 | `not_signed_in` | no sign-in on this machine, or the server has ended it | `kennet login` |
 | `no_api_key` | signed in, but the sign-in was handed no key; the message says why, and `reason` which it is (below). Keys come with a sign-in, so `kennet login` saves them once the organization has access | `kennet org join <org>` when an organization has invited you (`invitation_pending`); `kennet org create <name>` when you are in no organization and none has; `null` when you were taken out of yours (`removed`: an owner of it adds you back), while yours waits for approval, and from `login` itself; else `kennet login` |
 | `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
-| `confirmation_required` | `kennet keys revoke` or `kennet codeval` away from a terminal, or under `--json`, without `--yes`; `kennet codeval --detach` without `--yes` | the same command with `--yes` (a revoke by id) |
-| `container_required` | `kennet codeval --deep` with no Docker or Podman running (exit 6, with `needs`) | the same command |
-| `test_command_missing` | `kennet codeval` found no build or test for a repository (exit 6, with `needs`) | `null`; the same command |
-| `run_not_found` | `kennet codeval status` names a run this machine does not hold | `kennet codeval <path> --dry-run --json` |
-| `run_in_progress` | `kennet codeval` for a run another process is running here | `kennet codeval status <run> --json --wait 600` |
+| `confirmation_required` | `kennet keys revoke` away from a terminal, or under `--json`, without `--yes` | the same command with `--yes` (a revoke by id) |
+| `sign_in_required` | `kennet codeval` not signed in for CodeVal away from a terminal, or under `--json` (exit 3, with `sign_in`) | `kennet login --wait 300 --json` |
+| `sign_in_pending` | `kennet login --wait` ran out before the person approved (exit 4) | the same command |
+| `toolchain_missing`, `test_command_missing` | `kennet codeval` found no toolchain, or no build or test, for a repository (exit 6) | `null`; the same command with `-- <test command>` |
+| `schema_refused` | a body `kennet codeval` was about to send is not on the schema; nothing was sent | `null` |
 | `no_key`, `ambiguous_key` | `kennet keys revoke` names no live key, or a name several live keys share | `kennet keys list`; the revoke of one by id |
 | `secret_destination_required` | `kennet keys create --json` without `--show-secret`: nothing is made | the pipe form |
 | `name_taken`, `scope_not_held`, `too_many_keys` | `kennet keys create` with a name a live key holds, a scope the organization does not hold, or at its cap of live keys | `null`; `null`; `kennet keys list` |
@@ -361,87 +361,99 @@ total      7:43                                             5:44
 
 ## CodeVal
 
+CodeVal is a tool that helps data owners to monetize their private code with a completely private, and local only assessment. It collects data and de identified logs that help Metaphi AI evaluate your data for commercial licensing for AI training
+
 ```sh
 kennet codeval ./core ./billing
 kennet codeval https://github.com/acme/core.git
-kennet codeval ./core --dry-run
-kennet codeval ./core --yes --detach
-kennet codeval status --wait 600
+kennet codeval ./core -- make test
 ```
 
-`kennet codeval` profiles a git repository's history and tests: it reads the history, then builds and tests the
-latest commit and a few past commits Metaphi AI names, in temporary copies on this machine, in Docker or Podman when
-one is running. It also runs your tests on small single-line edits Metaphi AI names; only results leave the machine.
-Your source code stays here. On a large repository this takes hours; each progress line says about how long is left,
-and a repository stops after the hours Metaphi AI sets for it. What is sent to Metaphi AI:
+One command. It reads each repository's history, sends the profile, then builds and tests exactly what Metaphi AI
+asks for (the latest commit, some past commits, single-line edits at named places) in temporary copies on this
+machine, in Docker or Podman when one is running, and sends the typed results, batch by batch, until Metaphi AI is
+done. It finds the build and test from the repository's CI configuration and build files; when it cannot, give the
+test command after `--`, as one shell line. Every run starts by saying:
 
-- counts and ids for files, folders, commits and authors;
-- the shape of commit messages, never their text;
-- build and test output and logs, with common secret and token patterns replaced;
-- the git ids of files Metaphi AI names.
+```
+CodeVal measures ./core here and sends Metaphi AI typed measurements, never source code, logs or names.
+Exactly what: https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected
+```
 
-It lists this once it has read the history, before anything is built or sent. At a terminal it then asks
-`Send to Metaphi AI? [y/N]`; yes signs you in if needed, sends the history profile, which names the past commits, and
-sends the build and test results when they finish; no sends nothing. Away from a terminal, or under `--json`, it
-runs only with `--yes`; without it, it fails with `confirmation_required` and `next_step` is the same command with
-`--yes`. `--dry-run` builds and tests the latest commit only, writes what would be sent, and sends nothing.
+### What is sent
 
-Everything is kept in `./kennet-codeval/<run>/`. What was sent, byte for byte, is in `sent/`; `sent.json` lists each
-file with its sha256, the sha256 Metaphi AI received, and how many secrets of each kind were replaced in the logs.
-If a send fails, run the same command again: it sends what was kept and runs nothing twice.
+Every body is checked against a closed schema before it leaves; a field that is not on it, or a string that is
+not a number, an id, a hash or a word from a fixed list, stops the run (`schema_refused`) and nothing is sent.
+Names, paths, messages, commands, test names and logs never leave the machine. Where something must be told apart
+from its neighbours (a command, a test, a commit subject, a file's content), it is sent as an HMAC under a key made
+for that repository and kept on this machine (`key`, mode 0600), so Metaphi AI can see that two are the same but
+not what they are.
+
+The profile, sent once per repository:
+
+| Field | What it holds |
+| --- | --- |
+| `tip`, `roots` | the git ids of the latest commit and of the root commits |
+| `first_day` | the day of the first commit; every other time is days after it |
+| `git` | counts of branches and submodules, whether LFS is used, the pack size; per tag, its commit's number, whether it is annotated or looks like a release, and its day |
+| `licenses` | the licence families found, from a fixed list |
+| `env` | which CI systems, Docker Compose, devcontainer and Dockerfiles are present, as counts and words from a fixed list of public service images |
+| `agents` | which coding-agent files are present (`AGENTS.md`, `CLAUDE.md`, `.cursorrules` and the like), yes or no |
+| `deps`, `private_deps` | dependencies a lockfile resolved from a public registry, by ecosystem and name; a count of the rest |
+| `authors` | per author a number, whether it is a bot, and a number standing for its email domain |
+| `dirs` | per folder a number and its parent's number |
+| `files` | per file a number, its folder's number, its extension and well-known name from fixed lists, its size, line, comment, indent and token counts, counts of tests, mocks, imports and operators by class, and an HMAC of its content |
+| `commits` | per commit a number, its parents' numbers, author and committer numbers, day and hour of the week in the author's own clock, the lengths of its message, trailer keys and the coding tool a trailer names, whether it reverts or merges, and per changed file its number, status and lines added and deleted; the subject as an HMAC |
+
+The results, one per batch:
+
+| Field | What it holds |
+| --- | --- |
+| `machine` | OS, architecture, CPU count, memory, whether it ran in a container, and the image's digest |
+| `toolchain` | each tool used, from a fixed list, with its version number |
+| `commands` | whether the build and test came from CI, build files or you, each as an HMAC |
+| `services` | how many Compose services were asked for, how many started, how long they took, how many were refused |
+| `tip`, `commits`, `mutants` | per build and test run: exit code, seconds, an error class from a fixed list, the sha256 of its log (the log stays here), counts of tests reported and passed, each test's outcome under the HMAC of its id, coverage per file number, peak memory, and the bytes installed |
+| `blobs` | the git ids of the files Metaphi AI named by number |
+| `seconds` | how long the batch took |
+
+Everything sent is kept, byte for byte, in the repository's state directory under `sent/`; the done line names it.
+
+### Signing in
+
+CodeVal always signs in with a browser code, for the scope `kennet:codeval:write`. At a terminal it opens the page
+(`--no-browser` only prints it) and waits. Away from a terminal, or under `--json`, it starts the code and stops at
+once with exit 3:
+
+```json
+{"error": {"type": "auth_error", "code": "sign_in_required", "next_step": "kennet login --wait 300 --json"},
+ "sign_in": {"verification_uri": "https://app.metaphi.ai/device", "user_code": "WDJB-MJHT",
+             "verification_uri_complete": "https://app.metaphi.ai/device?user_code=WDJB-MJHT", "expires_at": "..."},
+ "sends": "https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected"}
+```
+
+An agent relays the link and code to the person word for word, then runs `kennet login --wait 300 --json`. That
+waits for the approval and prints `{"email", "org", "org_name", "scopes", "next_step"}`, where `next_step` is the
+same `kennet codeval` command; it exits 4 while still waiting. Running the command again reuses the code still
+pending. A denied or expired code exits 3: `Nothing was sent. Run the same command for a new code.`
+
+| Exit | Meaning | Next |
+| --- | --- | --- |
+| 0 | done | the run id is the reference |
+| 3 | sign-in needed, denied or expired | relay the link and code; run `next_step` |
+| 4 | still waiting for the sign-in, or the service asked to try later | run `next_step` again |
+| 1 | failed | show the error |
+| 5 | this version is too old for the service | upgrade |
+| 6 | a person must act: no toolchain, or no test command found | ask them; rerun with `-- <test command>` |
 
 ### Runs that take hours
 
-Each commit, edit and repository is kept in `checks.jsonl` as it finishes. If a run stops (the machine slept or
-restarted, the process was stopped), run the same command again from the same directory: it goes on from the last
-finished commit, with the same plan, and sends nothing twice. Asking for other checks (another `--test`, `--deep`)
-starts them afresh.
-
-`--detach` (with `--yes`) starts the run in a session of its own and returns at once with its run id. It keeps the
-machine awake while it runs (`caffeinate` on macOS, `systemd-inhibit` on Linux when there) and writes its output
-to `run.log` in the run's directory. While it runs, it sends Metaphi AI how far it is: the phase (`profile`,
-`plan`, `setup`, `checks`, `logs`, `done`), counts of past commits and edits done, and, when it waits on a person,
-which code it waits on.
-
-`kennet codeval status [<run>]` reads a run on this machine, from any directory; with no run id, the one updated
-last. `--wait <seconds>` waits up to that long and returns as soon as the run moves on, ends or needs a person.
-Under `--json` it prints:
-
-```json
-{
-  "run": "run_...", "state": "running", "phase": "checks", "done": 12, "total": 40,
-  "reference": "cv_...", "results": "<directory>", "needs": null, "error": null,
-  "next_step": "kennet codeval status run_... --json --wait 600"
-}
-```
-
-| `state` | Exit | What it means |
-| --- | --- | --- |
-| `running` | 4 | Still going; `next_step` comes back for it. |
-| `done` | 0 | Sent; `reference` names it. |
-| `needs_person` | 6 | Waiting on a person: `needs.ask` is the question to put to them, `needs.options` the commands (`{"label", "run"}`) their answer runs, `needs.action_url` a page when there is one. `needs.code` is `test_command_missing` or `container_required`. |
-| `failed`, `stopped` | 1 (3 for a sign-in) | It ended early; `next_step` is the command that goes on from where it stopped. |
-
-A coding agent runs it the same way, with the person's yes at each step: `--dry-run --json` to show what would be
-sent; on their yes, `--yes --detach --json`; then `kennet codeval status <run> --json --wait 600`, in that session or
-a later one, until it ends or needs them. Consent stays with the person: an agent never adds `--yes` or `--deep` on
-its own.
-
-When it cannot find how a repository builds and tests, it says so. Run it again with your commands, or with
-`--deep`:
-
-```sh
-kennet codeval ./core --build 'make' --test 'make test'
-kennet codeval ./core --deep
-```
-
-| Flag | What it does |
-| --- | --- |
-| `--test`, `--build` | The commands to test, and to build when that is separate. |
-| `--deep` | Lets a model set up the build when no recipe fits, inside containers; needs Docker or Podman (`container_required` otherwise). Sends the contents of the files it reads. |
-| `--yes` | Send without asking. |
-| `--detach` | Run in the background and return the run id at once. Needs `--yes`. |
-| `--dry-run` | Send nothing; write what would be sent to `sent/`. Not with `--deep`, `--yes` or `--detach`. |
+Each finished commit and edit is kept in `checks.jsonl` as it finishes. If a run stops (the machine slept, the
+process was killed), run the same command again: it asks Metaphi AI where the run stands, reads back what finished,
+and runs nothing twice. The machine is kept awake while it runs (`caffeinate` on macOS, `systemd-inhibit` on Linux).
+The latest commit is built first, alone; the rest run side by side, sharing dependency caches, with the same image
+and environment for the before and after of each commit. A run that looks unstable is run again alone, and both
+attempts are kept.
 
 Builds and tests run with a fixed set of environment variables (`PATH`, `HOME`, locale and the like), never your
 keys or cloud credentials. Containers run with all but a few file-ownership capabilities dropped, no new privileges,
@@ -452,7 +464,6 @@ namespace, added capabilities, devices or a bind mount outside the repository is
 
 `kennet mnda` shows your organization's mutual NDA with Metaphi AI, and `kennet mnda sign` makes one and opens it to
 sign in the browser (`--no-browser` prints the link). `kennet agents install` gives coding agents the `kennet-partner` skill, the guide to CodeVal.
-Every run needs `kennet login` with an organization that may use CodeVal.
 
 ## Your organization
 
