@@ -297,7 +297,7 @@ def _profile(estate, *flags):
             json={"base_url": "https://gateway.metaphi.ai/anthropic", "token": "kgw1.t", "model": "claude-sonnet-5-5"},
         )
     )
-    assert cli.main(["codeval", str(estate), *flags, "--yes"]) in (0, None)
+    assert cli.main(["codeval", str(estate), *flags, "--yes"]) in (0, None, cli.NEEDS_PERSON)
     return json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
 
 

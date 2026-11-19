@@ -559,7 +559,7 @@ def _said(*calls):
     )
 
 
-def _no_commands(tested, model_said, first=1):
+def _no_commands(tested, model_said, first=1, ended=(0, None)):
     import sys  # noqa: F401
 
     ref = "cv_" + "2" * 16
@@ -577,7 +577,8 @@ def _no_commands(tested, model_said, first=1):
     model = respx.post("https://gateway.metaphi.ai/anthropic/v1/messages").mock(side_effect=model_said)
     checks = respx.post(f"{API}/codeval/{ref}/checks").mock(return_value=httpx.Response(200, json={"id": ref}))
     logs = respx.post(f"{API}/codeval/{ref}/logs").mock(return_value=httpx.Response(200, json={"id": ref}))
-    assert cli.main(["codeval", str(tested), "--deep", "--yes"]) in (0, None)
+    respx.post(f"{API}/codeval/{ref}/progress").mock(return_value=httpx.Response(204))
+    assert cli.main(["codeval", str(tested), "--deep", "--yes"]) in ended
     names, said = _unpacked(logs.calls[-1].request.content)
     assert not any("conversation.jsonl" in n or "/run-" in n for n in names)
     for line in said.get("0/setup/turns.jsonl", b"").splitlines():
@@ -630,7 +631,7 @@ def test_setup(tested, capsys, tmp_path, engine):
 @respx.mock
 def test_setup_fails(tested, tmp_path, engine):
     _, _, sent = _no_commands(
-        tested, [_said(("give_up", {"why": "license", "reason": "needs a licensed compiler"}))], first=2
+        tested, [_said(("give_up", {"why": "license", "reason": "needs a licensed compiler"}))], first=2, ended=(6,)
     )
     assert [x["worked"] for x in sent["setup"]] == [False, False] and "tip" not in sent
     assert sent["setup"][1]["why"] == "gave_up_license"
@@ -878,6 +879,7 @@ def _server(ref, commits=((2,),), runs=1, checks=200, logs=200, blobs=None, **mo
         "setup": respx.post(f"{API}/codeval/{ref}/setup"),
         "checks": respx.post(f"{API}/codeval/{ref}/checks").mock(return_value=httpx.Response(checks, json={"id": ref})),
         "logs": respx.post(f"{API}/codeval/{ref}/logs").mock(return_value=httpx.Response(logs, json={"id": ref})),
+        "progress": respx.post(f"{API}/codeval/{ref}/progress").mock(return_value=httpx.Response(204)),
     }
 
 
@@ -888,8 +890,10 @@ def test_default_finds_nothing(repo, capsys, tmp_path, monkeypatch):
     monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))
     ref = "cv_" + "4" * 16
     got = _server(ref, commits=((2,),))
-    assert cli.main(["codeval", str(repo), "--yes"]) in (0, None)
+    assert cli.main(["codeval", str(repo), "--yes"]) == cli.NEEDS_PERSON
     assert not got["setup"].called and got["plan"].called and got["checks"].called and got["logs"].called
+    said = json.loads(got["progress"].calls[-1].request.content)
+    assert said == {"phase": "done", "done": 1, "total": 1, "needs": "test_command_missing"}
     sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
     assert [(s["by"], s["worked"], s["why"], s["tries"]) for s in sent["setup"]] == [("local", False, "none_found", [])]
     assert sent["commits"] == [{"commit": 2, "broke": True}] and sent["edits"] == []
