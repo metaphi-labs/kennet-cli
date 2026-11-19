@@ -1668,33 +1668,6 @@ def test_other_checks_asked_start_the_checks_afresh(tested, capsys, tmp_path, mo
 
 
 @respx.mock
-def test_an_unsigned_nda_waits_on_the_person(tested, capsys, tmp_path):
-    ref = "cv_" + "d" * 16
-    got = _server(ref)
-    got["plan"].mock(
-        return_value=httpx.Response(
-            403,
-            json={
-                "error": {
-                    "type": "invalid_request_error",
-                    "code": "nda_unsigned",
-                    "message": "sign the mutual NDA first",
-                    "action_url": "https://app.metaphi.ai/mnda",
-                }
-            },
-        )
-    )
-    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) == cli.NEEDS_PERSON
-    said = json.loads(capsys.readouterr().out)
-    needs = said["needs"]
-    assert needs["code"] == "nda_unsigned" and needs["action_url"] == "https://app.metaphi.ai/mnda"
-    assert needs["options"] == [{"label": "Sign the mutual NDA in the browser", "run": "kennet mnda sign --json"}]
-    assert said["next_step"].endswith("--test true --json --yes") and said["run"] == _home(tmp_path).name
-    assert json.loads(got["progress"].calls[-1].request.content)["needs"] == "nda_unsigned"
-    assert cli.main(["codeval", "status", said["run"], "--json"]) == cli.NEEDS_PERSON
-    assert json.loads(capsys.readouterr().out)["needs"] == needs
-
-
 def test_status_waits_until_the_run_moves_on(tmp_path, capsys, monkeypatch):
     import threading
 

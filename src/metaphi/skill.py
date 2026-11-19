@@ -210,7 +210,7 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `git_too_old` | `kennet codeval` needs a newer git. Tell the user; nothing was sent. |
 | `no_repository` | `kennet codeval` found no full git clone at the paths given; each path's reason is in the output. Tell the user to clone it in full and run the same command. |
 | `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes`, `dry_run_with_detach` | `kennet codeval` was given flags that do not go together. Fix the flags and run it again; nothing ran or was sent. |
-| `container_required`, `test_command_missing`, `nda_unsigned` | `kennet codeval` needs the user (exit 6): put `needs.ask` to them, word for word, and on their answer run the `needs.options` command it picks, or `next_step`. `kennet skill show partner` is the CodeVal guide. |
+| `container_required`, `test_command_missing` | `kennet codeval` needs the user (exit 6): put `needs.ask` to them, word for word, and on their answer run the `needs.options` command it picks, or `next_step`. `kennet skill show partner` is the CodeVal guide. |
 | `run_not_found`, `bad_wait` | `kennet codeval status` found no such run on this machine, or `--wait` was negative. `kennet codeval status --json` names the run updated last. |
 | `run_in_progress` | That `kennet codeval` run is already going in another process. Run `next_step` to follow it. |
 | `confirmation_required` | Nothing was sent. Ask the user; on yes, run `next_step`, the same command with `--yes`. |
@@ -487,8 +487,7 @@ in `sent/`, listed with sha256 sums in `sent/sent.json`. `--dry-run` writes `sen
   `needs.action_url` when there is one. Each of `needs.options` is `{{"label", "run"}}`: run the one they choose,
   filling any `<build>` or `<test>` with the commands they agree to. `needs.code` is `test_command_missing` (no
   build or test found: read the repository's README, CI configuration and build files, ask first as that is
-  content, and propose the commands), `container_required` (`--deep` needs Docker or Podman running) or
-  `nda_unsigned` (a mutual NDA first, step 3; then run `next_step`).
+  content, and propose the commands) or `container_required` (`--deep` needs Docker or Podman running).
 - `stopped` or `failed`: the run ended early (the machine slept or restarted, or the process was stopped).
   `next_step` is the same command: it goes on from the last finished commit; finished work is never run or sent
   twice.
@@ -497,7 +496,9 @@ in `sent/`, listed with sha256 sums in `sent/sent.json`. `--dry-run` writes `sen
 - `confirmation_required`: nothing was sent. Ask the user; on yes run `next_step`.
 - `--dry-run` builds and tests the latest commit only.
 
-## 3. A mutual NDA
+## 3. A mutual NDA, only if the user wants one
+
+CodeVal never needs one. When the user asks for an NDA with Metaphi AI:
 
 ```sh
 kennet mnda --json
@@ -522,7 +523,7 @@ It answers `pending` with its `url`: give the user the link to sign in the brows
 | `no_organization` | From `kennet mnda`: make the organization as in step 1, then the same command. |
 | `insufficient_scope` | `kennet login --json` once, then the same command. If it repeats, tell the user the message. |
 | `confirmation_required` | Ask the user; on yes run `next_step`. |
-| `container_required`, `test_command_missing`, `nda_unsigned` | Exit 6: put `needs.ask` to the user and run the option they choose (step 2). |
+| `container_required`, `test_command_missing` | Exit 6: put `needs.ask` to the user and run the option they choose (step 2). |
 | `run_not_found` | `kennet codeval status` knows no such run on this machine: `kennet codeval status --json` names the last one. |
 | `run_in_progress` | The run is already going in another process: run `next_step` to follow it. |
 | `git_too_old` | Ask the user to update git; nothing was sent. |

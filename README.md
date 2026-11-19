@@ -257,7 +257,7 @@ but for the last:
 | `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
 | `confirmation_required` | `kennet keys revoke` or `kennet codeval` away from a terminal, or under `--json`, without `--yes`; `kennet codeval --detach` without `--yes` | the same command with `--yes` (a revoke by id) |
 | `container_required` | `kennet codeval --deep` with no Docker or Podman running (exit 6, with `needs`) | the same command |
-| `test_command_missing`, `nda_unsigned` | `kennet codeval` found no build or test for a repository, or the organization has no signed mutual NDA (exit 6, with `needs`) | `null`; the same command |
+| `test_command_missing` | `kennet codeval` found no build or test for a repository (exit 6, with `needs`) | `null`; the same command |
 | `run_not_found` | `kennet codeval status` names a run this machine does not hold | `kennet codeval <path> --dry-run --json` |
 | `run_in_progress` | `kennet codeval` for a run another process is running here | `kennet codeval status <run> --json --wait 600` |
 | `no_key`, `ambiguous_key` | `kennet keys revoke` names no live key, or a name several live keys share | `kennet keys list`; the revoke of one by id |
@@ -419,7 +419,7 @@ Under `--json` it prints:
 | --- | --- | --- |
 | `running` | 4 | Still going; `next_step` comes back for it. |
 | `done` | 0 | Sent; `reference` names it. |
-| `needs_person` | 6 | Waiting on a person: `needs.ask` is the question to put to them, `needs.options` the commands (`{"label", "run"}`) their answer runs, `needs.action_url` a page when there is one. `needs.code` is `test_command_missing`, `container_required` or `nda_unsigned`. |
+| `needs_person` | 6 | Waiting on a person: `needs.ask` is the question to put to them, `needs.options` the commands (`{"label", "run"}`) their answer runs, `needs.action_url` a page when there is one. `needs.code` is `test_command_missing` or `container_required`. |
 | `failed`, `stopped` | 1 (3 for a sign-in) | It ended early; `next_step` is the command that goes on from where it stopped. |
 
 A coding agent runs it the same way, with the person's yes at each step: `--dry-run --json` to show what would be

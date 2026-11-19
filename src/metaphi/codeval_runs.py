@@ -27,7 +27,7 @@ import httpx
 from metaphi import api, config
 
 PHASES = ("profile", "plan", "setup", "checks", "logs", "done")
-NEEDS = ("test_command_missing", "container_required", "nda_unsigned")
+NEEDS = ("test_command_missing", "container_required")
 STATE, JOURNAL, LOG = "state.json", "checks.jsonl", "run.log"
 UNITS = ("commit", "edit")
 REPORT = httpx.Timeout(5.0, connect=3.0)

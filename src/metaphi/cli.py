@@ -519,7 +519,7 @@ def _needs_block(a: argparse.Namespace, e: errors.MetaphiError, missing: list[st
             else f"CodeVal could not find how to build and test {names}. Do you want to give the build and test "
             "commands, or let a model set it up, which sends the contents of the files it reads to Metaphi AI?"
         )
-    elif e.code == "container_required":
+    else:  # container_required
         ask = (
             "CodeVal --deep runs its commands in containers, and no Docker or Podman is running. Can you start "
             "Docker or Podman, or should it run without --deep?"
@@ -528,12 +528,6 @@ def _needs_block(a: argparse.Namespace, e: errors.MetaphiError, missing: list[st
             {"label": "Docker or Podman is running now: run it again", "run": _codeval_again(a)},
             {"label": "Run without --deep", "run": _codeval_again(a, deep=False)},
         ]
-    else:
-        ask = (
-            "Metaphi AI needs a signed mutual NDA with your organization before CodeVal goes on. Do you want to "
-            "sign it now?"
-        )
-        options = [{"label": "Sign the mutual NDA in the browser", "run": "kennet mnda sign --json"}]
     return {"code": e.code, "ask": ask, "options": options, "action_url": e.action_url}
 
 
