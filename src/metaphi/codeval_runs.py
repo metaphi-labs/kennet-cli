@@ -8,6 +8,7 @@ its root commits. It holds:
     profile.json   what the filed profile bound the run to: its tip, commit order and ids (never re-read from git)
     checks.jsonl   each finished unit (the tip, a commit, a mutant), written and synced before the next starts
     logs/          every build and test log, whole; only each log's sha256 is sent
+    replaced/      the finished units of a measure a restart replaced, set aside and never read again
     sent/          every body sent, exactly as sent (before gzip): profile-N.json, results-N.json, never overwritten
 """
 
@@ -103,6 +104,20 @@ def kept_profile(at: Path) -> dict[str, Any] | None:
     return got if isinstance(got, dict) and isinstance(got.get("tip"), str) else None
 
 
+def replaced(at: Path) -> None:
+    """A restart: the finished units were measured against the old profile's ids, so they are set aside, kept as they
+    were (`replaced/checks-N.jsonl`), and never read again."""
+    journal = at / JOURNAL
+    if not journal.exists():
+        return
+    folder = at / "replaced"
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    n = 1 + sum(1 for _ in folder.glob("checks-*.jsonl"))
+    while (folder / f"checks-{n}.jsonl").exists():
+        n += 1
+    os.replace(journal, folder / f"checks-{n}.jsonl")
+
+
 def sent(at: Path, kind: str, body: bytes) -> Path:
     """Keep a body exactly as it is sent, under the next free name of its kind (`profile-1.json`, `profile-2.json`,
     `results-1.json`, ...), never over an earlier one; answers where."""
@@ -196,6 +211,7 @@ __all__ = [
     "keep_profile",
     "keep_run",
     "kept_profile",
+    "replaced",
     "repo_key",
     "run_state",
     "sent",

@@ -24,10 +24,8 @@ import httpx
 from metaphi import __version__, accounts, agents, config, errors, palette, skill, update
 
 FAILED, AUTH, LATER, UPGRADE, NEEDS_PERSON = 1, 3, 4, 5, 6
-# kennet codeval: install a tool, give a command, fix the machine the tip ended on, or go to the run's machine
-PERSON_MUST_ACT = frozenset(
-    ["toolchain_missing", "test_command_missing", "environment", "profile_gone", "key_mismatch"]
-)
+# kennet codeval: install a tool, give a command, or fix the machine the tip ended on
+PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing", "environment"])
 
 
 def status(error: errors.MetaphiError) -> int:
@@ -500,6 +498,13 @@ def codebase_hours(h: float) -> str:
     return about(h * 3600).removeprefix("about ")
 
 
+def _codeval_state(run: str, got: dict[str, Any]) -> dict[str, Any]:
+    """A run's state from GET, in the terms a filing answers in."""
+    if got.get("state") == "declined":
+        return {"run": run, "decision": "decline"}
+    return {"run": run, **({"done": True} if got.get("state") == "done" else {"next": got.get("next")})}
+
+
 def cmd_codeval(a: argparse.Namespace) -> int | None:
     from metaphi import codebase_checks, codeval, codeval_runs
 
@@ -519,21 +524,29 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
     with tempfile.TemporaryDirectory(prefix="kennet-clone-") as scratch:
         for local in codeval.opened(paths, Path(scratch), say):
             kept = codeval_runs.run_state(local.home)
-            if kept.get("run") and codeval.resumed(local):
-                say(f"{local.name}: going on with {kept['run']}, measured against the profile it was filed with")
-                got = codeval.get_run(kept["run"])
-                got = (
-                    {"run": kept["run"], "decision": "decline"}
-                    if got.get("state") == "declined"
-                    else {
-                        "run": kept["run"],
-                        **({"done": True} if got.get("state") == "done" else {"next": got.get("next")}),
-                    }
-                )
-            else:
+            got = None
+            if kept.get("run"):
+                try:
+                    goes_on = codeval.resumed(local)
+                except errors.MetaphiError as e:
+                    if e.code != "profile_gone":
+                        raise
+                    got = codeval.restart(local, e.code)
+                else:
+                    if goes_on:
+                        say(
+                            f"{local.name}: going on with {kept['run']}, measured against the profile it was filed with"
+                        )
+                        got = _codeval_state(kept["run"], codeval.get_run(kept["run"]))
+            if got is None:
                 say(f"Reading {local.name}\u2026")
-                got = codeval.send_filed(local)
-                codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip)
+                try:
+                    got = codeval.send_filed(local)
+                    codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip)
+                except errors.MetaphiError as e:
+                    if e.code not in codeval.RESTART_WHY:
+                        raise
+                    got = codeval.restart(local, e.code)
             run = got["run"]
             row = {"name": local.name, "run": run, "sent": str(local.home / "sent")}
             bench = None
@@ -545,10 +558,22 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                     nxt = got["next"]
                     say(_batch_line(local.name, nxt))
                     results = codeval.measured(local, bench, nxt, say)
-                    got, _path = codeval.send_results(local, run, results)
+                    try:
+                        got, _path = codeval.send_results(local, run, results)
+                    except errors.MetaphiError as e:
+                        if e.code != "key_mismatch":
+                            raise
+                        got = codeval.restart(local, e.code)
+                        run = row["run"] = got["run"]
+                        continue
                     got.setdefault("run", run)
                     if stop := codeval.environment(local, results):
-                        raise stop
+                        if not got.get("done"):
+                            raise stop
+                        say(
+                            f"{local.name}: the latest commit kept ending in this machine's environment "
+                            f"({stop.context['class']}), so Metaphi AI ended the run"
+                        )
             except codebase_checks.Stuck as e:
                 e.next_step = e.next_step or _codeval_line(a)
                 raise

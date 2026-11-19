@@ -1214,21 +1214,34 @@ def test_a_run_goes_on_against_its_filed_profile_when_the_tip_moves(tested, tmp_
 
 
 @respx.mock
-def test_a_run_whose_filed_tip_was_rewritten_away_stops_for_the_person(tested, tmp_path, capsys, monkeypatch):
+def test_a_run_whose_filed_tip_was_rewritten_away_restarts_at_the_tip(tested, tmp_path, capsys, monkeypatch):
     _signed_in()
     _, local = _profile(tested)
     asked = _next(local.kept["paths"], commits=[], mutants=[])
-    respx.post(f"{API}/codeval").respond(json={"run": "cv_5", "object": "codeval", "next": asked})
+    posted = respx.post(f"{API}/codeval").mock(
+        side_effect=[
+            httpx.Response(200, json={"run": "cv_5", "object": "codeval", "next": asked}),
+            httpx.Response(200, json={"run": "cv_5", "object": "codeval", "done": True}),
+        ]
+    )
     with monkeypatch.context() as m:
         m.setattr(codeval, "measured", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt))
         assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 130
+    codeval_runs.Run(local.home).put("falcon_calc", "commit", 2, {"commit": 2})
     git(tested, "reset", "-q", "--hard", "HEAD~1")
     git(tested, "reflog", "expire", "--expire=now", "--all")
     git(tested, "gc", "-q", "--prune=now")
     capsys.readouterr()
-    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 6
-    said = json.loads(capsys.readouterr().out)["error"]
-    assert said["code"] == "profile_gone" and "no longer in the repository" in said["message"]
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 0
+    first, second = _bodies(posted)
+    head = codeval._text(tested, "rev-parse", "HEAD")
+    assert "restart" not in first and second["restart"] is True and second["tip"] == head
+    out, err = capsys.readouterr()
+    assert json.loads(out)["repos"][0]["state"] == "done"
+    assert err.count("replaces the earlier measurements") == 1 and "no longer in this clone" in err
+    assert codeval_runs.kept_profile(local.home)["tip"] == head
+    assert codeval_runs.Run(local.home).get("falcon_calc", "commit", 2) is None, "the old ids are never read again"
+    assert (local.home / "replaced" / "checks-1.jsonl").exists()
 
 
 @respx.mock
@@ -1316,13 +1329,26 @@ def test_the_key_id_names_the_key_without_it_and_a_mismatch_says_where_the_run_g
     schema.check("Profile", doc)
     _signed_in()
     asked = _next(local.kept["paths"], commits=[], mutants=[])
-    respx.post(f"{API}/codeval").respond(json={"run": "cv_7", "object": "codeval", "next": asked})
-    results = respx.post(f"{API}/codeval/cv_7/results").respond(
-        409, json={"error": {"type": "invalid_request_error", "code": "key_mismatch", "message": "x"}}
+    mismatch = {"error": {"type": "invalid_request_error", "code": "key_mismatch", "message": "x"}}
+    posted = respx.post(f"{API}/codeval").mock(
+        side_effect=[
+            httpx.Response(409, json=mismatch),
+            httpx.Response(200, json={"run": "cv_7", "object": "codeval", "next": asked}),
+        ]
     )
-    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 6
+    results = respx.post(f"{API}/codeval/cv_7/results").respond(json={"done": True})
+    assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 0
+    first, second = _bodies(posted)
+    assert "restart" not in first and second["restart"] is True and second["key_id"] == want
     assert _bodies(results)[0]["key_id"] == want
-    assert "this run continues on the machine that started it" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.count("replaces the earlier measurements of this repository") == 1
+    assert "started on another machine" in err
+    assert sorted(p.name for p in (local.home / "sent").iterdir()) == [
+        "profile-1.json",
+        "profile-2.json",
+        "results-1.json",
+    ]
 
 
 def hmac_hex(key: bytes, label: str) -> str:
@@ -1423,8 +1449,8 @@ def test_a_profile_of_another_tip_is_filed_again_at_the_tip_the_server_holds(tes
         "error": {
             "type": "invalid_request_error",
             "code": "profile_mismatch",
-            "message": f"run cv_10 is measuring tip {filed}; it takes no profile of another tip until it ends. "
-            f"Measure tip {filed} and the run goes on where it stopped",
+            "message": "run cv_10 is measuring another tip; measure that tip and the run goes on where it stopped",
+            "filed_tip": filed,
         }
     }
     posted = respx.post(f"{API}/codeval").mock(
@@ -1489,3 +1515,61 @@ def test_every_body_sent_is_kept_under_its_own_name_and_a_kept_profile_is_filed_
         assert codeval_runs.sent(local.home, "results", b"{}").name == f"results-{n}.json"
     assert (local.home / "sent" / "profile-1.json").exists()
     assert codeval_runs.sent(local.home, "profile", b"{}").name == "profile-2.json"
+
+
+@respx.mock
+def test_a_mismatch_at_a_tip_this_clone_does_not_hold_restarts_at_the_tip(tested, tmp_path, capsys):
+    _signed_in()
+    _, local = _profile(tested)
+    refused = {"type": "invalid_request_error", "code": "profile_mismatch", "message": "m", "filed_tip": "ab" * 20}
+    posted = respx.post(f"{API}/codeval").mock(
+        side_effect=[
+            httpx.Response(409, json={"error": refused}),
+            httpx.Response(200, json={"run": "cv_13", "done": True}),
+        ]
+    )
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 0
+    first, second = _bodies(posted)
+    assert first["tip"] == second["tip"] == local.tip and second["restart"] is True
+    assert "is not in this clone" in capsys.readouterr().err
+
+
+def test_the_profile_is_the_tips_own_history_whatever_other_branches_hold(tested):
+    git(tested, "checkout", "-q", "-b", "side", "HEAD~1")
+    (tested / "side.py").write_text("SIDE = 1\n")
+    git(tested, "add", "side.py")
+    git(tested, "commit", "-qm", "side")
+    side = codeval._text(tested, "rev-parse", "HEAD")
+    git(tested, "checkout", "-q", "-")
+    doc, local = _profile(tested)
+    assert side not in local.kept["order"] and len(doc["commits"]) == int(
+        codeval._text(tested, "rev-list", "--count", "HEAD")
+    )
+    assert local.kept["order"][local.tip] == doc["commits"][-1]["commit"], "the tip is the last commit"
+    stray = {**doc["commits"][-1], "commit": len(doc["commits"]) + 1, "parents": [doc["commits"][0]["commit"]]}
+    with pytest.raises(schema.Refused, match="in its history"):
+        schema.check("Profile", {**doc, "commits": [*doc["commits"], stray]})
+
+
+@respx.mock
+def test_a_run_the_server_ends_after_the_tip_keeps_failing_in_the_environment_ends_cleanly(
+    tested, tmp_path, capsys, monkeypatch
+):
+    ended = {"build": {"exit": 1, "seconds": 3, "step": "dep_resolve", "class": "env_network"}, "tests": []}
+    monkeypatch.setattr(codebase_checks, "_side", lambda *a, **k: json.loads(json.dumps(ended)))
+    _signed_in()
+    _, local = _profile(tested)
+    asked = _next(local.kept["paths"], commits=[], mutants=[], blobs=[])
+    respx.post(f"{API}/codeval").respond(json={"run": "cv_14", "object": "codeval", "next": asked})
+    respx.get(f"{API}/codeval/cv_14").respond(json={"state": "measuring", "next": asked})
+    results = respx.post(f"{API}/codeval/cv_14/results").mock(
+        side_effect=[httpx.Response(200, json={"run": "cv_14", "next": asked})] * 2
+        + [httpx.Response(200, json={"run": "cv_14", "done": True})]
+    )
+    for _ in range(2):
+        assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 6
+    capsys.readouterr()
+    assert cli.main(["codeval", str(tested), "--json", "--", "true"]) == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out)["repos"][0]["state"] == "done" and results.call_count == 3
+    assert "kept ending in this machine's environment (env_network), so Metaphi AI ended the run" in err

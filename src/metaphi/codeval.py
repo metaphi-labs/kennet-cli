@@ -464,8 +464,9 @@ def _commits(
         return authors[low]
 
     rows = [[x.decode("utf-8", "replace") for x in raw[i : i + 6]] for i in range(0, len(raw) - 5, 6)]
-    tip = rows[-1][0].strip() if rows else ""
-    rows = [r for r in rows if r[0].strip() != tip] + [r for r in rows if r[0].strip() == tip]  # the tip last
+    # only the tip's own history (git log of `at`, no other branch), parents first and the tip last
+    tip = _ask(repo, "rev-parse", f"{at}^{{commit}}")
+    rows = [r for r in rows if r[0].strip() != tip] + [r for r in rows if r[0].strip() == tip]
     for row in rows:
         order[row[0].strip()] = len(order) + 1
     said = _headers(repo, list(order), "author", "committer")
@@ -1259,19 +1260,13 @@ def _named(e: errors.MetaphiError) -> errors.MetaphiError:
             "once your organization does"
         )
         e.next_step = "kennet login"
-    elif e.code == "key_mismatch":
-        e.message = "this run continues on the machine that started it; nothing was sent"
-        e.next_step = "run `kennet codeval` again on the machine that started this run"
     return e
 
 
-FILED_TIP = re.compile(r"\btip ([0-9a-f]{40}(?:[0-9a-f]{24})?)\b")
-
-
 def filed_tip(e: errors.MetaphiError) -> str | None:
-    """The tip a `profile_mismatch` names: the one the open run was filed at, to profile and file again."""
-    m = FILED_TIP.search(e.message or "")
-    return m[1] if m else None
+    """The tip a `profile_mismatch` names as data (`error.filed_tip`): the one the open run was filed at."""
+    tip = e.context.get("filed_tip")
+    return tip if isinstance(tip, str) and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", tip) else None
 
 
 def _held(local: Local, tip: str | None) -> bool:
@@ -1294,6 +1289,29 @@ def send_filed(local: Local, sleep: Callable[[float], None] = time.sleep) -> dic
         local.kept = {}
         got, _path = send_profile(local, profile(local, tip), sleep)
     file(local)
+    return got
+
+
+RESTART_WHY = {
+    "profile_gone": "the commit it was filed at is no longer in this clone",
+    "profile_mismatch": "the commit it was filed at is not in this clone",
+    "key_mismatch": "it was started on another machine",
+}
+
+
+def restart(local: Local, why: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    """Measure the repository afresh: a profile of the current tip sent with `restart`, which the server files in
+    place of the open run's measure. What this machine finished for the old one is set aside (`replaced`)."""
+    if say:
+        say(
+            f"{local.name}: measuring the latest commit afresh ({RESTART_WHY.get(why, why)}); this replaces the "
+            "earlier measurements of this repository"
+        )
+    local.kept = {}
+    got, _path = send_profile(local, {**profile(local), "restart": True}, sleep)
+    codeval_runs.replaced(local.home)
+    file(local)
+    codeval_runs.keep_run(local.home, run=got["run"], tip=local.tip)
     return got
 
 
@@ -1527,12 +1545,14 @@ def environment(local: Local, results: dict[str, Any]) -> errors.MetaphiError | 
     if cls is None:
         return None
     what, fix = ENVIRONMENT.get(cls, ("something on this machine failed", "fix this machine"))
-    return errors.MetaphiError(
+    stop = errors.MetaphiError(
         f"{local.name}: the latest commit could not be measured here because {what} ({cls}); that was sent, and "
         "nothing more is run until it is fixed",
         code="environment",
         next_step=f"{fix}, then run the same command again; it measures the latest commit again",
     )
+    stop.context["class"] = cls
+    return stop
 
 
 OS = {"linux": "linux", "darwin": "darwin", "windows": "windows"}

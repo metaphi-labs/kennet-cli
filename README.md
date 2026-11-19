@@ -423,13 +423,15 @@ Everything sent is kept, byte for byte, in the repository's state directory unde
 name (`profile-1.json`, `results-1.json`, `results-2.json`, ...), never overwritten; the done line names the folder.
 
 A run is bound to the profile it was filed with. Run again after the tip has moved and it goes on measuring the filed
-tip, commits and file numbers, never a new profile; if that tip is no longer in the clone (a history rewrite), it stops
-with exit 6 (`profile_gone`). The profile and every Results body carry `key_id`, a keyed hash of a fixed label under the
-repository's key, so a run goes on only on the machine that started it.
+tip, commits and file numbers, never a new profile. The profile and every Results body carry `key_id`, a keyed hash
+of a fixed label under the repository's key. When the run cannot go on here (its filed tip is no longer in the clone,
+as after a history rewrite, or it was started on another machine), CodeVal sends a profile of the current tip with
+`restart` set and says in one line that it replaces the earlier measurements of the repository. Only the tip's own
+history is sent, the tip last; other branches are not.
 
 A tip that ends in this machine's environment (the network, memory or disk, time, permissions) is sent once, and
 CodeVal then stops with exit 6 (`environment`) naming what to fix; such an end is never kept, so the next run measures
-the tip again.
+the tip again. After three such ends Metaphi AI ends the run, and CodeVal says so and finishes.
 
 Why a build or test failed is read here, by rules shipped with this release. CodeVal turns on the toolchain's
 structured output where the command names the tool (`go test -json`, cargo `--message-format=json`, pytest JUnit XML,

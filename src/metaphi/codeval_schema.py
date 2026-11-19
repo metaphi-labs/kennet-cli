@@ -208,6 +208,14 @@ def _profile(v: dict[str, Any]) -> str | None:
         seen.add(c["commit"])
     if any(c.get("reverts") is not None and c["reverts"] not in seen for c in v["commits"]):
         return "a revert names a commit the document holds"
+    parents = {c["commit"]: c["parents"] for c in v["commits"]}
+    reach, todo = set(), [v["commits"][-1]["commit"]] if v["commits"] else []
+    while todo:
+        if (c := todo.pop()) not in reach and c != 0:
+            reach.add(c)
+            todo.extend(parents[c])
+    if len(reach) != len(parents):
+        return "the tip is the last commit, and every commit sent is in its history"
     return None
 
 
