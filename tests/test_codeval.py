@@ -1,6 +1,7 @@
 import gzip
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -1388,8 +1389,11 @@ def test_deep_needs_a_container_engine(tested, capsys, monkeypatch):
 
     monkeypatch.setattr(codebase_setup, "engine", lambda: None)
     monkeypatch.setattr(codeval, "setup_reach", lambda *a: pytest.fail("model"))
-    assert cli.main(["codeval", str(tested), "--deep", "--yes", "--json"]) != 0
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "container_required"
+    assert cli.main(["codeval", str(tested), "--deep", "--yes", "--json"]) == cli.NEEDS_PERSON
+    got = json.loads(capsys.readouterr().out)
+    assert got["error"]["code"] == got["needs"]["code"] == "container_required" and got["state"] == "needs_person"
+    assert "Docker or Podman" in got["needs"]["ask"] and got["next_step"].endswith("--deep --json --yes")
+    assert [o["run"].endswith(f"codeval {tested} --json --yes") for o in got["needs"]["options"]] == [False, True]
 
 
 @respx.mock
@@ -1581,3 +1585,244 @@ def test_each_commit_installs_its_own_dependencies_on_a_set_up_image(monkeypatch
     host = Recipe("npm ci", "true", "npm test", None)
     codebase_checks._ran_side(shell, plan, {}, 1, codebase_checks._Logs(tmp_path / "logs"), "002", print, host)
     assert ran[0] == "(npm ci) && (true)"
+
+
+def _fails_on(n: int):
+    real, made = codebase_checks._commit, []
+
+    def commit(*a, **k):
+        made.append(a[6])
+        if len(made) == n:
+            raise KeyboardInterrupt
+        return real(*a, **k)
+
+    return commit, made
+
+
+@respx.mock
+def test_a_run_that_stops_goes_on_from_the_last_finished_commit(tested, capsys, tmp_path, monkeypatch):
+    from metaphi import codeval_runs
+
+    ref = "cv_" + "a" * 16
+    got = _server(ref, commits=((2, 3),))
+    run = ["codeval", str(tested), "--test", "echo SAID-BY-TESTS", "--yes", "--json"]
+    commit, made = _fails_on(2)
+    monkeypatch.setattr(codebase_checks, "_commit", commit)
+    assert cli.main(run) == 130
+    capsys.readouterr()
+    home = _home(tmp_path)
+    kept = [json.loads(x) for x in (home / codeval_runs.JOURNAL).read_text().splitlines()]
+    assert [(k["kind"], k["key"]) for k in kept] == [("tip", ""), ("commit", "2")]
+    assert not (home / "checks.json").exists() and not got["checks"].called
+    assert cli.main(["codeval", "status", "--json"]) == cli.FAILED
+    said = json.loads(capsys.readouterr().out)
+    assert said["state"] == "stopped" and said["error"]["code"] == "interrupted" and said["phase"] == "checks"
+    assert said["next_step"] == shlex.join(["kennet", "codeval", str(tested), "--test", "echo SAID-BY-TESTS"]) + (
+        " --json --yes"
+    )
+    assert (said["done"], said["total"]) == (1, 2)
+
+    commit, made = _fails_on(0)
+    monkeypatch.setattr(codebase_checks, "_commit", commit)
+    assert cli.main(run) in (0, None)
+    out = capsys.readouterr()
+    assert json.loads(out.out) == {"reference": ref, "sent": True, "results": str(home), "run": home.name}
+    assert len(made) == 1 and "the latest commit was run before" in out.err and "1 of 2 past commits" in out.err
+    assert got["plan"].call_count == 1 and got["profile"].call_count == 1
+    sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))
+    assert [c["commit"] for c in sent["repos"][0]["commits"]] == [2, 3] and sent["repos"][0]["tip"]["tests"]
+    assert set(sent) == {"schema", "tool_version", "repos", "seconds"}
+    assert json.loads((home / "checks.json").read_text()) == sent
+    reports = [json.loads(c.request.content) for c in got["progress"].calls]
+    assert all(set(r) == {"phase", "done", "total", "needs"} for r in reports)
+    assert [r["phase"] for r in reports][-1] == "done" and reports[-1]["done"] == reports[-1]["total"] == 2
+    assert {r["phase"] for r in reports} <= set(codeval_runs.PHASES) and all(r["needs"] is None for r in reports)
+    assert cli.main(["codeval", "status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "done"
+
+
+@respx.mock
+def test_a_failed_progress_report_never_fails_the_run(tested, capsys):
+    ref = "cv_" + "b" * 16
+    got = _server(ref, commits=((2,),))
+    got["progress"].mock(side_effect=httpx.ConnectError("no"))
+    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) in (0, None)
+    assert got["progress"].called and json.loads(capsys.readouterr().out)["sent"] is True
+
+
+@respx.mock
+def test_other_checks_asked_start_the_checks_afresh(tested, capsys, tmp_path, monkeypatch):
+    from metaphi import codeval_runs
+
+    ref = "cv_" + "c" * 16
+    got = _server(ref, commits=((2, 3),))
+    commit, _made = _fails_on(2)
+    monkeypatch.setattr(codebase_checks, "_commit", commit)
+    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) == 130
+    commit, made = _fails_on(0)
+    monkeypatch.setattr(codebase_checks, "_commit", commit)
+    assert cli.main(["codeval", str(tested), "--test", "echo again", "--yes", "--json"]) in (0, None)
+    assert len(made) == 2 and got["plan"].call_count == 2
+    kept = (_home(tmp_path) / codeval_runs.JOURNAL).read_text()
+    assert kept.count('"kind":"commit"') == 2
+
+
+@respx.mock
+def test_an_unsigned_nda_waits_on_the_person(tested, capsys, tmp_path):
+    ref = "cv_" + "d" * 16
+    got = _server(ref)
+    got["plan"].mock(
+        return_value=httpx.Response(
+            403,
+            json={
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "nda_unsigned",
+                    "message": "sign the mutual NDA first",
+                    "action_url": "https://app.metaphi.ai/mnda",
+                }
+            },
+        )
+    )
+    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) == cli.NEEDS_PERSON
+    said = json.loads(capsys.readouterr().out)
+    needs = said["needs"]
+    assert needs["code"] == "nda_unsigned" and needs["action_url"] == "https://app.metaphi.ai/mnda"
+    assert needs["options"] == [{"label": "Sign the mutual NDA in the browser", "run": "kennet mnda sign --json"}]
+    assert said["next_step"].endswith("--test true --json --yes") and said["run"] == _home(tmp_path).name
+    assert json.loads(got["progress"].calls[-1].request.content)["needs"] == "nda_unsigned"
+    assert cli.main(["codeval", "status", said["run"], "--json"]) == cli.NEEDS_PERSON
+    assert json.loads(capsys.readouterr().out)["needs"] == needs
+
+
+def test_status_waits_until_the_run_moves_on(tmp_path, capsys, monkeypatch):
+    import threading
+
+    from metaphi import codeval_runs
+
+    monkeypatch.setattr(codeval_runs, "WAIT_POLL_S", 0.02)
+    home = tmp_path / "elsewhere" / "kennet-codeval" / "run_0123456789abcdef"
+    run = codeval_runs.Run(home, home.name, "kennet codeval ./core --yes --detach")
+    codeval_runs.register(home.name, home)
+    run.plan({"core": 3})
+    assert cli.main(["codeval", "status", "--json"]) == cli.LATER
+    said = json.loads(capsys.readouterr().out)
+    assert (said["state"], said["phase"], said["done"], said["total"]) == ("running", "profile", 0, 3)
+    assert said["next_step"] == f"kennet codeval status {home.name} --json --wait 600"
+
+    later = threading.Timer(0.2, run.put, ("core", "commit", 7, {"commit": 7}))
+    later.start()
+    began = time.monotonic()
+    assert cli.main(["codeval", "status", home.name, "--json", "--wait", "30"]) == cli.LATER
+    assert time.monotonic() - began < 10 and json.loads(capsys.readouterr().out)["done"] == 1
+    later.join()
+
+    run.needs({"code": "container_required", "ask": "?", "options": [], "action_url": None}, "kennet codeval x")
+    assert cli.main(["codeval", "status", "--json", "--wait", "30"]) == cli.NEEDS_PERSON
+    said = json.loads(capsys.readouterr().out)
+    assert said["needs"]["code"] == "container_required"
+    assert said["next_step"] == f"cd {tmp_path / 'elsewhere'} && kennet codeval x"
+    run.finished()
+    assert cli.main(["codeval", "status"]) == 0
+    assert capsys.readouterr().out.startswith(f"{home.name}  done  done  3 of 3")
+    assert cli.main(["codeval", "status", "run_ffffffffffffffff", "--json"]) == cli.FAILED
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "run_not_found"
+    assert cli.main(["codeval", "status", "../../etc", "--json"]) == cli.FAILED
+
+
+def test_a_worker_that_died_reads_as_stopped(tmp_path, capsys):
+    from metaphi import codeval_runs
+
+    home = tmp_path / "kennet-codeval" / "run_00000000000000aa"
+    codeval_runs.Run(home, home.name, "kennet codeval . --yes --detach")
+    codeval_runs.register(home.name, home)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    codeval_runs.started(home, home.name, dead.pid, "kennet codeval . --yes --detach")
+    assert cli.main(["codeval", "status", "--json"]) == cli.FAILED
+    said = json.loads(capsys.readouterr().out)
+    assert said["state"] == "stopped" and said["next_step"] == "kennet codeval . --yes --detach"
+
+
+class _Started:
+    def __init__(self, calls, pid):
+        self.calls, self.pid = calls, pid
+
+    def __call__(self, command, **kw):
+        self.calls.append((command, kw))
+        return self
+
+
+@respx.mock
+def test_detach_starts_the_run_in_its_own_session_and_keeps_the_machine_awake(tested, capsys, tmp_path, monkeypatch):
+    import os
+    import sys
+
+    from metaphi import codeval_runs
+
+    calls: list = []
+    monkeypatch.setattr(codeval_runs, "_start", _Started(calls, os.getpid()))
+    monkeypatch.setattr(codeval_runs.sys, "platform", "darwin")
+    monkeypatch.setattr(codeval_runs.shutil, "which", lambda name: f"/usr/bin/{name}")
+    ref = "cv_" + "e" * 16
+    got = _server(ref, commits=((2,),))
+    assert cli.main(["codeval", str(tested), "--test", "true", "--detach", "--json"]) != 0
+    err = json.loads(capsys.readouterr().out)["error"]
+    assert err["code"] == "confirmation_required" and err["next_step"].endswith("--json --yes --detach")
+    assert not calls and not got["profile"].called
+
+    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--detach", "--json"]) == 0
+    said = json.loads(capsys.readouterr().out)
+    run = said["run"]
+    assert said["pid"] == os.getpid() and said["state"] == "running" and said["awake"] == "caffeinate"
+    assert said["next_step"] == f"kennet codeval status {run} --json --wait 600"
+    (worker, kw), (awake, _) = calls
+    assert worker[: len(codeval_runs._self())] == [sys.executable, "-m", "metaphi"]
+    assert worker[len(codeval_runs._self()) :] == [
+        "codeval",
+        str(tested),
+        "--test",
+        "true",
+        "--yes",
+        "--worker",
+        run,
+        "--json",
+    ]
+    assert kw["start_new_session"] and kw["stdin"] is subprocess.DEVNULL
+    assert awake == ["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())]
+    assert not got["profile"].called
+    assert cli.main(["codeval", "status", "--json"]) == cli.LATER
+    assert json.loads(capsys.readouterr().out)["run"] == run
+
+    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--detach", "--json"]) == 0
+    again = json.loads(capsys.readouterr().out)
+    assert len(calls) == 2 and (again["run"], again["state"]) == (run, "running")
+    with monkeypatch.context() as m:
+        m.setattr(cli.os, "getpid", lambda: 1)
+        assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) == cli.FAILED
+    busy = json.loads(capsys.readouterr().out)["error"]
+    assert busy["code"] == "run_in_progress" and busy["next_step"] == said["next_step"]
+
+    assert cli.main(["codeval", *worker[len(codeval_runs._self()) + 1 :]]) in (0, None)
+    done = json.loads(capsys.readouterr().out)
+    assert done["run"] == run and done["sent"] is True and got["checks"].called
+    with codeval.profiled([str(tested)], lambda s: None) as (doc, _kept):
+        assert codeval.run_id(doc) == run
+    assert cli.main(["codeval", "status", run, "--json"]) == 0
+    said = json.loads(capsys.readouterr().out)
+    assert said["state"] == "done" and said["reference"] == ref and said["next_step"] is None
+
+
+def test_linux_keeps_awake_with_systemd_inhibit_when_there(monkeypatch):
+    from metaphi import codeval_runs
+
+    calls: list = []
+    monkeypatch.setattr(codeval_runs, "_start", _Started(calls, 1))
+    monkeypatch.setattr(codeval_runs.sys, "platform", "linux")
+    monkeypatch.setattr(codeval_runs.shutil, "which", lambda name: None)
+    assert codeval_runs.awake(42) is None and not calls
+    monkeypatch.setattr(codeval_runs.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert codeval_runs.awake(42) == "systemd-inhibit"
+    command, kw = calls[0]
+    assert command[0] == "/usr/bin/systemd-inhibit" and "--what=sleep:idle" in command and kw["start_new_session"]
+    assert command[-1] == "while kill -0 42 2>/dev/null; do sleep 30; done"

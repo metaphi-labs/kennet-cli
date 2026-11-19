@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -245,9 +246,21 @@ def view(run: str, home: Path) -> dict[str, Any]:
     elif state == "needs_person":
         step = s.get("next_step")
     elif state in ("failed", "stopped"):
-        step = (error or {}).get("next_step") or s.get("resume")
+        said = (error or {}).get("next_step")
+        step = said if isinstance(said, str) and said.startswith("kennet ") else s.get("resume")
     else:
         step = None
+    needs = s.get("needs") if state == "needs_person" else None
+    if _elsewhere(home):
+        go = f"cd {shlex.quote(str(home.parent.parent))} && "
+
+        def there(command: str | None) -> str | None:
+            runs = command and command.startswith("kennet codeval ") and not command.startswith("kennet codeval status")
+            return go + command if runs else command
+
+        step = there(step)
+        if needs:
+            needs = {**needs, "options": [{**o, "run": there(o.get("run"))} for o in needs.get("options") or []]}
     return {
         "run": run,
         "state": state,
@@ -259,10 +272,18 @@ def view(run: str, home: Path) -> dict[str, Any]:
         "pid": s.get("pid") if state == "running" else None,
         "started": s.get("started"),
         "updated": s.get("updated"),
-        "needs": s.get("needs") if state == "needs_person" else None,
+        "needs": needs,
         "error": error,
         "next_step": step,
     }
+
+
+def _elsewhere(home: Path) -> bool:
+    """A run goes on from the directory it started in, where ./kennet-codeval/<run> is."""
+    try:
+        return Path.cwd().resolve() != home.parent.parent.resolve()
+    except OSError:
+        return True
 
 
 def _moved(v: dict[str, Any]) -> tuple:
@@ -273,16 +294,21 @@ def wait(
     run: str,
     home: Path,
     seconds: float,
-    sleep: Callable[[float], None] = time.sleep,
-    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Where the run stands; with seconds, wait up to that long for it to move, end, or need a person."""
+    sleep, clock = sleep or time.sleep, clock or time.monotonic
     first = now = view(run, home)
     until = clock() + max(0.0, seconds)
     while now["state"] == "running" and _moved(now) == _moved(first) and clock() < until:
         sleep(min(WAIT_POLL_S, max(0.0, until - clock())))
         now = view(run, home)
     return now
+
+
+def _start(command: list[str], **kw: Any) -> subprocess.Popen:
+    return subprocess.Popen(command, **kw)
 
 
 def _self() -> list[str]:
@@ -307,7 +333,7 @@ def awake(pid: int) -> str | None:
     else:
         return None
     try:
-        subprocess.Popen(
+        _start(
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -325,7 +351,7 @@ def detach(home: Path, argv: list[str]) -> tuple[int, str | None]:
     with (home / LOG).open("ab") as log:
         log.write(f"\n--- {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} kennet {' '.join(argv)}\n".encode())
         log.flush()
-        child = subprocess.Popen(
+        child = _start(
             [*_self(), *argv],
             stdin=subprocess.DEVNULL,
             stdout=log,

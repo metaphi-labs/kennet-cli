@@ -703,6 +703,13 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
         steps = Steps()
         name = worker or codeval.run_id(doc)
         home = Path.cwd() / CODEVAL_HOME / name
+        now = codeval_runs.view(name, home)
+        if not worker and now["state"] == "running" and now["pid"] != os.getpid():
+            raise errors.MetaphiError(
+                f"{name} is already running here (pid {now['pid']}); one process runs it at a time",
+                code="run_in_progress",
+                next_step=now["next_step"],
+            )
         home.mkdir(parents=True, exist_ok=True)
         (home / "codeval.json").write_text(json.dumps(doc, indent=1))
         run = held.get("run") or codeval_runs.Run(home, name, _codeval_again(a) if commits else None)

@@ -212,6 +212,7 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes`, `dry_run_with_detach` | `kennet codeval` was given flags that do not go together. Fix the flags and run it again; nothing ran or was sent. |
 | `container_required`, `test_command_missing`, `nda_unsigned` | `kennet codeval` needs the user (exit 6): put `needs.ask` to them, word for word, and on their answer run the `needs.options` command it picks, or `next_step`. `kennet skill show partner` is the CodeVal guide. |
 | `run_not_found`, `bad_wait` | `kennet codeval status` found no such run on this machine, or `--wait` was negative. `kennet codeval status --json` names the run updated last. |
+| `run_in_progress` | That `kennet codeval` run is already going in another process. Run `next_step` to follow it. |
 | `confirmation_required` | Nothing was sent. Ask the user; on yes, run `next_step`, the same command with `--yes`. |
 | `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
 | `rate_limited_concurrent`, `rate_limited_daily` | Too many runs at once, or today. Wait for a run to end, or tell the user. |
@@ -523,6 +524,7 @@ It answers `pending` with its `url`: give the user the link to sign in the brows
 | `confirmation_required` | Ask the user; on yes run `next_step`. |
 | `container_required`, `test_command_missing`, `nda_unsigned` | Exit 6: put `needs.ask` to the user and run the option they choose (step 2). |
 | `run_not_found` | `kennet codeval status` knows no such run on this machine: `kennet codeval status --json` names the last one. |
+| `run_in_progress` | The run is already going in another process: run `next_step` to follow it. |
 | `git_too_old` | Ask the user to update git; nothing was sent. |
 | `no_repository` | No full git clone at a path given; each path's reason is in the output. Ask the user to clone it in full, then run the same command. |
 | `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes`, `dry_run_with_detach`, `bad_wait` | The flags do not go together: fix them. |
