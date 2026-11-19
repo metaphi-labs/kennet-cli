@@ -2,6 +2,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest import mock
@@ -1122,3 +1123,55 @@ def _fails_on(n: int):
         return real(*a, **k)
 
     return commit, made
+
+
+def test_units_at_once_follow_cores_free_memory_and_the_cap(monkeypatch):
+    monkeypatch.setattr(codebase_checks.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(codebase_checks, "free_memory", lambda: 4 << 30)
+    monkeypatch.delenv(codebase_checks.AT_ONCE_ENV, raising=False)
+    assert codebase_checks.workers(20) == (8, 2), "half the cores' worth of units"
+    assert codebase_checks.workers(20, 1 << 30) == (3, 5), "no more than 80% of free memory at the tip's peak"
+    assert codebase_checks.workers(2, 1 << 20) == (2, 8)
+    monkeypatch.setenv(codebase_checks.AT_ONCE_ENV, "2")
+    assert codebase_checks.workers(20) == (2, 8)
+
+
+def _at_once(monkeypatch, n=2):
+    monkeypatch.setattr(codebase_checks, "workers", lambda units, peak=None: (n, 1))
+
+
+def test_units_run_at_once_and_each_run_says_how_many_ran_with_it(tested, monkeypatch):
+    _at_once(monkeypatch)
+    got = _checked(tested, test="sleep 1; " + PYTEST.format(py=sys.executable))[1]["repos"][0]
+    assert [t["concurrency"] for t in got["tip"]["tests"]] == [1]
+    for c in got["commits"]:
+        runs = [*c["pre"]["tests"], *c["post"]["tests"]]
+        assert {r["concurrency"] for r in runs} == {2} and all(r["wall_s"] >= 1 for r in runs)
+
+
+def test_a_unit_that_collided_with_another_runs_again_alone_before_it_counts(tested, monkeypatch, tmp_path):
+    _at_once(monkeypatch)
+    lock = tmp_path / "port"
+    test = (
+        f"mkdir {lock} 2>/dev/null || {{ echo 'listen tcp :8080: bind: address already in use'; exit 1; }}; "
+        f"sleep 1; {PYTEST.format(py=sys.executable)}; rc=$?; rmdir {lock}; exit $rc"
+    )
+    lines: list[str] = []
+    got = _checked(tested, say=lines.append, test=test, logs=tmp_path / "logs")[1]["repos"][0]
+    by = {c["commit"]: c for c in got["commits"]}
+    assert [t["exit"] for t in by[2]["post"]["tests"]] == [0, 0] and [t["exit"] for t in by[3]["post"]["tests"]] == [
+        0,
+        0,
+    ]
+    alone = [c for c in got["commits"] if {r["concurrency"] for r in c["post"]["tests"]} == {1}]
+    assert alone, "the unit that met the other's port ran again alone"
+    assert any(p.name.endswith(".alone.post.test-1.log") for p in (tmp_path / "logs" / "falcon_calc").iterdir())
+    assert any("ran again alone" in line for line in lines)
+
+
+def test_an_edit_that_fails_its_tests_alone_is_not_run_again():
+    row = {"post": {"build": {"exit": 0}, "tests": [{"exit": 1}]}}
+    tip = {"tests": [{"exit": 0}]}
+    assert not codebase_checks._suspect(row, tip, Path("/nonexistent"), "001-tip", edit=True)
+    assert codebase_checks._suspect(row, tip, Path("/nonexistent"), "001-abc", edit=False)
+    assert codebase_checks._suspect({"post": {"tests": [{"exit": None}]}}, tip, Path("/x"), "001-tip", edit=True)

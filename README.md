@@ -380,7 +380,11 @@ kennet codeval ./core -- 'make && make test'
 On a large repository this takes hours. Every finished commit is kept in `./kennet-codeval/<run>/checks.jsonl`, and
 the machine is kept awake while it runs (`caffeinate` on macOS, `systemd-inhibit` on Linux). If it stops (the machine
 slept, a toolchain is missing, the process was stopped), run the same command again: it goes on where it stopped and
-never runs a finished commit twice. When it is stuck it exits 1 with one sentence and a `next_step`, such as
+never runs a finished commit twice. Past commits and edits run several at once, each in its own copy: half the
+cores' worth, no more than free memory holds at the latest commit's peak, and at most `KENNET_CODEVAL_AT_ONCE` when
+set. Every copy shares one dependency cache, so nothing is downloaded twice. One that fails beside the others with
+signs of getting in their way (a port or lock already held, a timeout), or worse than the latest commit did alone,
+runs again alone before it counts; each run records `concurrency` and `wall_s`. When it is stuck it exits 1 with one sentence and a `next_step`, such as
 `commit 3: JDK 8 is missing on this machine` / `install JDK 8, then run the same command again; finished commits are
 kept`.
 

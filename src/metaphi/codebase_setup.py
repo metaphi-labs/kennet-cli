@@ -103,7 +103,10 @@ CACHES = {
     "GOCACHE": f"{CACHE}/gobuild",
     "GOFLAGS": "-count=1 -buildvcs=false",
     "GRADLE_USER_HOME": f"{CACHE}/gradle",
-    "MAVEN_OPTS": f"-Dmaven.repo.local={CACHE}/m2 -Dmaven.javadoc.skip=true -Dgpg.skip=true",
+    "MAVEN_OPTS": (
+        f"-Dmaven.repo.local={CACHE}/m2 -Dmaven.javadoc.skip=true -Dgpg.skip=true "
+        "-Daether.syncContext.named.factory=file-lock -Daether.syncContext.named.nameMapper=file-gav"
+    ),
     "CARGO_HOME": f"{CACHE}/cargo",
 }
 

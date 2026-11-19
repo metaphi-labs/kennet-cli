@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import hashlib
 import os
 import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -289,7 +291,7 @@ def _tail(path: Path, lines: int = 15) -> list[str]:
 
 
 def _ran(code: int | None, took: float) -> dict[str, Any]:
-    return {"exit": code, "seconds": round(took)}
+    return {"exit": code, "seconds": round(took), "wall_s": round(took, 3)}
 
 
 def _tested(code: int | None, took: float, cases: dict[str, str] | None, log: Path) -> dict[str, Any]:
@@ -530,10 +532,146 @@ def _commit(
     return {"pre": pre, "post": post}
 
 
-def workers(n: int) -> tuple[int, int]:
+AT_ONCE_ENV = "KENNET_CODEVAL_AT_ONCE"  # the most units at once, under what the machine holds
+MEMORY_SHARE = 0.8  # of the memory free when units start, what they may take together
+
+
+def free_memory() -> int | None:
+    """Bytes the machine can give without swapping: Linux's MemAvailable; macOS's free, inactive and purgeable
+    pages."""
+    try:
+        if os.path.exists("/proc/meminfo"):
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        if sys.platform == "darwin":
+            said = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10, check=False).stdout
+            page = int(re.search(r"page size of (\d+) bytes", said).group(1))  # type: ignore[union-attr]
+            pages = dict(re.findall(r"^Pages (free|inactive|speculative|purgeable):\s+(\d+)", said, re.MULTILINE))
+            return page * sum(int(v) for v in pages.values()) or None
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def host_peak() -> int | None:
+    """The largest resident size of any process this one has waited for, in bytes (a build's biggest process)."""
+    try:
+        import resource
+
+        got = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    except (ImportError, OSError):
+        return None
+    return (got if sys.platform == "darwin" else got * 1024) or None
+
+
+def workers(n: int, peak: int | None = None) -> tuple[int, int]:
+    """(units at once, jobs each): half the cores' worth of units, no more than free memory holds at the tip's peak
+    each, nor than KENNET_CODEVAL_AT_ONCE; the cores shared out among them."""
     cores = os.cpu_count() or 2
-    at_once = max(1, min(n, cores // 4))
+    at_once = max(1, min(n, cores // 2))
+    if peak and (free := free_memory()):
+        at_once = min(at_once, max(1, int(free * MEMORY_SHARE // peak)))
+    try:
+        at_once = min(at_once, max(1, int(os.environ.get(AT_ONCE_ENV) or at_once)))
+    except ValueError:
+        pass
     return at_once, max(1, cores // at_once)
+
+
+class Gate:
+    """Units run together through it; a unit rerun alone waits for the others to end and holds new ones back. It
+    keeps, for each unit, the most that ran at once with it, itself counted."""
+
+    def __init__(self) -> None:
+        self.cv = threading.Condition()
+        self.active: set[object] = set()
+        self.alone, self.waiting = False, 0
+        self.most: dict[object, int] = {}
+
+    @contextlib.contextmanager
+    def shared(self, key: object) -> Iterator[None]:
+        with self.cv:
+            self.cv.wait_for(lambda: not self.alone and not self.waiting)
+            self.active.add(key)
+            for k in self.active:
+                self.most[k] = max(self.most.get(k, 0), len(self.active))
+        try:
+            yield
+        finally:
+            with self.cv:
+                self.active.discard(key)
+                self.cv.notify_all()
+
+    @contextlib.contextmanager
+    def solo(self, key: object) -> Iterator[None]:
+        with self.cv:
+            self.waiting += 1
+            self.cv.wait_for(lambda: not self.active and not self.alone)
+            self.waiting -= 1
+            self.alone = True
+            self.most[key] = 1
+        try:
+            yield
+        finally:
+            with self.cv:
+                self.alone = False
+                self.cv.notify_all()
+
+    def concurrency(self, key: object) -> int:
+        with self.cv:
+            return self.most.pop(key, 1)
+
+
+CONTENTION = re.compile(
+    rb"address already in use|EADDRINUSE|bind: address|port \d+ (?:is )?(?:already )?in use|database is locked"
+    rb"|could not (?:obtain|acquire) (?:a |the )?lock|lock(?:ed)? by another process|Text file busy"
+    rb"|Too many open files|Resource temporarily unavailable|LockObtainFailed",
+    re.IGNORECASE,
+)
+
+
+def _contended(logs: Path, label: str) -> bool:
+    """Whether a log of this unit shows units getting in each other's way: ports, locks, files held."""
+    for f in logs.glob(f"{label}.*.log"):
+        try:
+            with f.open("rb") as r:
+                tail = b""
+                while chunk := r.read(8 << 20):
+                    if CONTENTION.search(tail + chunk):
+                        return True
+                    tail = chunk[-256:]
+        except OSError:
+            continue
+    return False
+
+
+def _runs(side: dict | None) -> list[dict]:
+    if not side:
+        return []
+    return [r for r in (side.get("build"), *side.get("tests", []), side.get("offline")) if r]
+
+
+def _suspect(row: dict, tip: dict | None, logs: Path, label: str, edit: bool) -> bool:
+    """Whether a unit run beside others must run again alone before it counts: it timed out, its logs show
+    contention, or (a past commit) it built or tested worse than the tip did alone."""
+    runs = [r for k in ("pre", "post") for r in _runs(row.get(k))]
+    if all(r["exit"] == 0 for r in runs):
+        return False
+    if any(r["exit"] is None for r in runs) or _contended(logs, label):
+        return True
+    if edit or not tip:
+        return False
+    alone_ok = (tip.get("build") or {}).get("exit", 0) == 0 and bool(tip.get("tests")) and tip["tests"][0]["exit"] == 0
+    return alone_ok and any(r["exit"] != 0 for r in _runs(row.get("post")))
+
+
+def _stamped(row: dict, at_once: int) -> dict:
+    """Each build and test run of a unit carries how many units ran at once with it, itself counted."""
+    for k in ("pre", "post"):
+        for r in _runs(row.get(k)):
+            r["concurrency"] = at_once
+    return row
 
 
 def about(seconds: float) -> str:
@@ -692,7 +830,7 @@ def _checks(
         "commits": [],
         "edits": [],
     }
-    at_once, jobs = (1, os.cpu_count() or 1) if given else workers(len(targets))
+    at_once, jobs = 1, os.cpu_count() or 1  # the tip runs alone, on every core
     if not given and found is None:
         out["commits"] = [{"commit": i, "id": shas.get(i), "broke": True} for i in targets]
         out["edits"] = [{**b, "broke": True} for b in edits]
@@ -700,8 +838,9 @@ def _checks(
     tip_s: float | None = None
     ledger = plan.ledger
     kept_tip = ledger.get(name, "tip") if ledger else None
+    peak: int | None = None
     if kept_tip:
-        out["tip"], tip_s = kept_tip["tip"], kept_tip["seconds"]
+        out["tip"], tip_s, peak = kept_tip["tip"], kept_tip["seconds"], kept_tip.get("peak")
         say(f"{name}: the latest commit was run before; using that result")
     else:
         try:
@@ -733,8 +872,11 @@ def _checks(
             out["tip"] = (
                 {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
             )
+            for r in _runs(out["tip"]):
+                r.setdefault("concurrency", 1)
+            peak = out["tip"].get("memory_peak_bytes") or host_peak()
             if ledger:
-                ledger.put(name, "tip", "", {"tip": out["tip"], "seconds": tip_s})
+                ledger.put(name, "tip", "", {"tip": out["tip"], "seconds": tip_s, "peak": peak})
             said = out["tip"]
             built = "build" not in said or said["build"]["exit"] == 0
             t = said["tests"][0] if said["tests"] else None
@@ -764,6 +906,7 @@ def _checks(
     )
     if before:
         say(f"{name}: {before} of {len(targets) + len(edits)} past commits and edits were run before; running the rest")
+    at_once, jobs = workers(len(targets) + len(edits) - before, peak)
     eta = Eta(len(targets) + len(edits) - before, at_once, tip_s, deadline)
     if targets or edits:
         work = " and ".join(
@@ -778,6 +921,22 @@ def _checks(
             + f"; it stops after {plan.hours:g} h"
         )
     halt: list[Stuck] = []
+    gate = Gate()
+    tip_side = out.get("tip")
+
+    def measured(key: object, label: str, attempt: Callable[[str], dict], edit: bool) -> tuple[dict, float]:
+        """A unit run beside the others, and run again alone when what it shows may be the others' doing."""
+        began = time.monotonic()
+        with gate.shared(key):
+            row = attempt(label)
+        took = time.monotonic() - began
+        if at_once > 1 and _suspect(row, tip_side, logs.root, label, edit):
+            board.say(f"    {name}: {label} ran again alone, to rule out the others getting in its way")
+            began = time.monotonic()
+            with gate.solo(key):
+                row = attempt(f"{label}.alone")
+            took = time.monotonic() - began
+        return _stamped(row, gate.concurrency(key)), took
 
     def one(n: int, i: int) -> dict | None:
         if ledger and (kept := ledger.get(name, "commit", i)) is not None:
@@ -790,11 +949,13 @@ def _checks(
         board.begin(label)
         try:
             c = by_id[i]
-            row = {
-                "commit": i,
-                "id": shas[i],
-                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], lambda _s: None, found, jobs),
-            }
+            parent = shas[c["parents"][0]]
+
+            def attempt(at: str) -> dict:
+                return _commit(repo, plan, runs, logs, at, parent, shas[i], lambda _s: None, found, jobs)
+
+            got, _took = measured(("commit", i), label, attempt, False)
+            row = {"commit": i, "id": shas[i], **got}
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
             board.end(label, False, f"{name}: {label} could not run ({n}/{len(targets)})", eta.end(n, 0.0, False))
@@ -810,75 +971,69 @@ def _checks(
             ledger.put(name, "commit", i, row)
         return row
 
-    rows: list[dict | None] = []
-    if targets:
-        board.stage("past commits", len(targets))
-        with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("commits", at_once=at_once):
-            rows = list(pool.map(one, range(1, len(targets) + 1), targets))
-        board.close(_summary(name, "past commits", rows, len(targets), board))
-    if halt:
-        raise halt[0]
-    if None in rows:
-        out["stopped"] = "hours"
-        rows = rows[: rows.index(None)]
-    out["commits"] = rows
-    if edits:
-        out["edits"] = _edits(repo, name, tip, edits, len(targets), runs, plan, logs, found, jobs, paths, board, eta)
-        if len(out["edits"]) < len(edits):
-            out["stopped"] = "hours"
-    return out
-
-
-def _edits(
-    repo: Path,
-    name: str,
-    tip: str,
-    edits: list[dict],
-    after: int,
-    runs: int,
-    plan: Plan,
-    logs: _Logs,
-    found: tuple[Recipe, str | None] | None,
-    jobs: int,
-    paths: dict[int, str] | None,
-    board: live.Board,
-    eta: Eta,
-) -> list[dict]:
-    """Each planted swap at the tip, built and tested; a swap whose file is not at the tip is broke."""
-    tip_tree, paths = _tree(repo, tip), paths or {}
-    ledger, deadline = plan.ledger, time.monotonic() + plan.hours * 3600
-    at_once = 1 if plan.test is not None else workers(len(edits))[0]
+    tip_tree, where = _tree(repo, tip), paths or {}
 
     def edited(n: int, b: dict) -> dict | None:
         key = [b.get("file"), b.get("op"), b.get("nth")]
         if ledger and (kept := ledger.get(name, "edit", key)) is not None:
             return kept
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or halt:
             return None
         label = f"{n:03d}-tip"
         began = time.monotonic()
         eta.begin(n)
         board.begin(label)
         try:
-            row = {
-                **b,
-                **_edited(repo, tip_tree, plan, runs, logs, label, paths[b["file"]], b["op"], b["nth"], found, jobs),
-            }
+
+            def attempt(at: str) -> dict:
+                return _edited(repo, tip_tree, plan, runs, logs, at, where[b["file"]], b["op"], b["nth"], found, jobs)
+
+            got, took = measured(("edit", n), label, attempt, True)
+            row = {**b, **got, "concurrency": _concurrency(got), "wall_s": round(took, 3)}
         except Exception as e:  # noqa: BLE001
             board.end(label, False, f"{name}: {label} could not run ({type(e).__name__})", eta.end(n, 0.0, False))
             return {**b, "broke": True}
         built = (row["post"].get("build") or {}).get("exit", 0)
-        line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - after}/{len(edits)})"
+        line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)})"
         board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
         if ledger:
             ledger.put(name, "edit", key, row)
         return row
 
-    board.stage("edits", len(edits))
-    with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("edits", at_once=at_once):
-        done = list(pool.map(edited, range(after + 1, after + len(edits) + 1), edits))
-    board.close(_summary(name, "edits", done, len(edits), board))
-    return done[: done.index(None)] if None in done else done
+    units = [(one, n, i) for n, i in enumerate(targets, 1)] + [
+        (edited, n, b) for n, b in enumerate(edits, len(targets) + 1)
+    ]
+    rows: list[dict | None] = []
+    done: list[dict | None] = []
+    if units:
+        board.stage(
+            "past commits and edits" if targets and edits else "past commits" if targets else "edits", len(units)
+        )
+        with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("commits", at_once=at_once):
+            got = list(pool.map(lambda u: u[0](u[1], u[2]), units))
+        rows, done = got[: len(targets)], got[len(targets) :]
+        board.close(
+            "; ".join(
+                _summary(name, what, part, len(part), board)
+                for what, part in (("past commits", rows), ("edits", done))
+                if part
+            )
+        )
+    if halt:
+        raise halt[0]
+    if None in rows:
+        out["stopped"] = "hours"
+        rows = rows[: rows.index(None)]
+    out["commits"] = rows
+    if None in done:
+        out["stopped"] = "hours"
+        done = done[: done.index(None)]
+    out["edits"] = done
+    return out
+
+
+def _concurrency(row: dict) -> int:
+    return max((r.get("concurrency") or 1 for k in ("pre", "post") for r in _runs(row.get(k))), default=1)
 
 
 __all__ = ["Eta", "Plan", "Stuck", "about", "between", "outcomes", "run"]

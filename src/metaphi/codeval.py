@@ -934,9 +934,17 @@ def checked(
         say("No Docker or Podman: running on this machine")
     engine = box or (codebase_setup.engine() if any(k.get("start") for k in kept) else None)
     with (
-        tempfile.TemporaryDirectory(prefix="kennet-cache-", ignore_cleanup_errors=True) as caches,
         contextlib.ExitStack() as done,
     ):
+        # One dependency cache for the run, shared by every repository and every commit's copy, kept beside the
+        # run's logs so a run that stops does not download the same dependency again when it goes on.
+        caches = (
+            plan.logs.parent / "cache"
+            if plan.logs
+            else Path(
+                done.enter_context(tempfile.TemporaryDirectory(prefix="kennet-cache-", ignore_cleanup_errors=True))
+            )
+        )
         done.callback(codebase_setup.forget, box, images)
         net = None
         if box:
@@ -960,12 +968,10 @@ def checked(
                 out.append(finished)
                 continue
             repo, logs = local["path"], (plan.logs or Path.cwd() / "kennet-codeval") / local["name"]
-            mine = dataclasses.replace(
-                plan, cache=Path(caches) / str(n) if box else None, steps=Steps(logs / "steps.jsonl")
-            )
+            mine = dataclasses.replace(plan, cache=caches if box else None, steps=Steps(logs / "steps.jsonl"))
             mine.steps.total["history"] = local.get("seconds", 0.0)
             if mine.cache:
-                mine.cache.mkdir()
+                mine.cache.mkdir(parents=True, exist_ok=True)
             found, setup, tip = None, [] if plan.test is None else None, {}
             services = None
             if engine and local.get("start"):

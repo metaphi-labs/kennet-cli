@@ -598,6 +598,7 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                 got["blobs"] = codeval.blobs(local, ids)
             (home / "checks.json").write_text(json.dumps(report, indent=1))
             codeval.payload(home, doc, report, kept, picked["pick_id"])
+            shutil.rmtree(home / "cache", ignore_errors=True)
             held = _payload(home)
             assert held is not None
             for local, got in zip(kept, report["repos"], strict=True):
