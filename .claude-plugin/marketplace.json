@@ -1,0 +1,18 @@
+{
+  "name": "metaphi",
+  "owner": {
+    "name": "Metaphi AI",
+    "url": "https://metaphi.ai"
+  },
+  "metadata": {
+    "description": "CodeVal is a tool that helps data owners to monetize their private code with a completely private, and local only assessment. It collects data and de identified logs that help Metaphi AI evaluate your data for commercial licensing for AI training"
+  },
+  "plugins": [
+    {
+      "name": "codeval",
+      "source": "./plugins/codeval",
+      "description": "CodeVal is a tool that helps data owners to monetize their private code with a completely private, and local only assessment. It collects data and de identified logs that help Metaphi AI evaluate your data for commercial licensing for AI training",
+      "category": "productivity"
+    }
+  ]
+}

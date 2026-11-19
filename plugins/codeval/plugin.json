@@ -1,0 +1,12 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "codeval",
+  "description": "CodeVal is a tool that helps data owners to monetize their private code with a completely private, and local only assessment. It collects data and de identified logs that help Metaphi AI evaluate your data for commercial licensing for AI training",
+  "author": {
+    "name": "Metaphi AI",
+    "url": "https://metaphi.ai"
+  },
+  "homepage": "https://metaphi.ai",
+  "repository": "https://github.com/metaphi-labs/kennet-cli",
+  "license": "Apache-2.0"
+}

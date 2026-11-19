@@ -331,3 +331,21 @@ def test_seconds_left_come_from_the_pace_of_finished_commits():
     assert codeval_runs.left(s, "running", now=1100.0) == 300
     assert codeval_runs.left({**s, "done": 2}, "running", now=1100.0) is None
     assert codeval_runs.left(s, "done", now=1100.0) is None
+
+
+def test_the_command_line_measures_in_the_background_without_a_yes(tested, tmp_path, monkeypatch, capsys):
+    workers = Workers(monkeypatch)
+    monkeypatch.setattr(codeval, "key_ready", lambda: pytest.fail("a dry run needs no sign-in"))
+    assert cli.main(["codeval", str(tested), "--test", "true", "--dry-run", "--detach", "--json"]) == 0
+    said = json.loads(capsys.readouterr().out)
+    assert said["state"] == "running" and workers.cwd == tmp_path
+    assert workers.started[-1] == [
+        "codeval",
+        str(tested),
+        "--test",
+        "true",
+        "--dry-run",
+        "--worker",
+        said["run"],
+        "--json",
+    ]

@@ -63,6 +63,13 @@ jobs:
           uv run --frozen --no-sync pyinstaller --log-level WARN --onefile --name kennet --add-data src/metaphi/data:metaphi/data \
             src/metaphi/__main__.py
       - run: ./dist/kennet --version
+      - name: kennet mcp answers over stdio, and how fast
+        run: |
+          init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
+          list='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+          time (printf '%s\n%s\n' "$init" "$list" | ./dist/kennet mcp > mcp.out)
+          grep -q '"codeval_send"' mcp.out && grep -q '"anthropic/requiresUserInteraction":true' mcp.out
+          ls -l dist/kennet
 
   workflows:
     runs-on: ubuntu-latest

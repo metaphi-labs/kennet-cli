@@ -24,6 +24,7 @@ from typing import IO, Any
 import httpx
 
 from metaphi import __version__, accounts, api, config, errors
+from metaphi.skill import ABOUT
 
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 NAME = "metaphi"
@@ -34,11 +35,6 @@ WAIT_MAX_S = {"claude-code": 240}
 WAIT_MAX_DEFAULT_S = 50
 END_S = 10.0
 ASK = "Send this no-code assessment to Metaphi AI for commercial diligence?"
-ABOUT = (
-    "CodeVal is a tool that helps data owners to monetize their private code with a completely private, and local "
-    "only assessment. It collects data and de identified logs that help Metaphi AI evaluate your data for "
-    "commercial licensing for AI training"
-)
 
 INSTRUCTIONS = f"""{ABOUT}.
 

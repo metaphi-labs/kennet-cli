@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "metaphi": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "PATH=\"$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin\"; kennet mcp --help >/dev/null 2>&1 || curl -fsSL --proto =https https://github.com/metaphi-labs/kennet-cli/releases/latest/download/install.sh | KENNET_SETUP_AGENTS=0 sh >&2; hash -r; exec kennet mcp"
+      ]
+    }
+  }
+}
