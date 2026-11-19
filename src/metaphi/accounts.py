@@ -167,6 +167,7 @@ def _keep(body: dict[str, Any], token: str) -> None:
     for name in (
         "test_api_key",
         "org",
+        "org_name",
         "scopes",
         "no_api_key",
         "no_api_key_code",
@@ -180,6 +181,8 @@ def _keep(body: dict[str, Any], token: str) -> None:
         cfg.update({"api_key": body["api_key"], "test_api_key": body["test_api_key"], "api_key_from": "login"})
         if isinstance(body.get("org"), str) and body["org"]:
             cfg["org"] = body["org"]
+        if isinstance(body.get("org_name"), str) and body["org_name"]:
+            cfg["org_name"] = body["org_name"]
         if isinstance(body.get("scopes"), list):
             cfg["scopes"] = [x for x in body["scopes"] if isinstance(x, str)]
     else:

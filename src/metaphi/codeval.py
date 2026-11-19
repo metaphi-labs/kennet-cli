@@ -477,7 +477,7 @@ TRAILER_KEYS = frozenset(
         "generated-by",
     ]
 )
-TOOLS = (
+VENDORS = (
     ("anthropic", ("anthropic.com", "claude.ai")),
     ("openai", ("openai.com",)),
     ("cursor", ("cursor.com", "cursor.sh", "anysphere.co")),
@@ -496,7 +496,7 @@ TOOLS = (
 
 
 def _tool(domain: str) -> str | None:
-    return next((t for t, ds in TOOLS for d in ds if domain == d or domain.endswith("." + d)), None)
+    return next((t for t, ds in VENDORS for d in ds if domain == d or domain.endswith("." + d)), None)
 
 
 """Trailer keys sent as they are; any other (a project's own, `project-falcon`) is sent as `other`."""

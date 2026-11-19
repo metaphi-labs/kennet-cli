@@ -11,21 +11,13 @@ from pathlib import Path
 NAMES = frozenset(
     [
         "history",
-        "send",
-        "plan",
-        "token",
         "setup",
-        "setup_model",
-        "setup_commands",
         "setup_proposals",
         "tip",
         "commits",
-        "edits",
         "build",
         "test",
         "offline",
-        "post_checks",
-        "build_remote",
         "services",
     ]
 )
