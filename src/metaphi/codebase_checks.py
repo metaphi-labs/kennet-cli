@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from metaphi import codebase_reading as reading
-from metaphi import live
+from metaphi import errors, live
 from metaphi.codebase_setup import Recipe, Shell, allowed
 from metaphi.steps import NONE, Steps
 
@@ -30,13 +30,11 @@ RANK = {"skipped": 0, "passed": 1, "failed": 2, "error": 3}
 @dataclass(frozen=True)
 class Plan:
     test: str | None = None
-    build: str | None = None
     run_minutes: float = RUN_MINUTES
     hours: float = HOURS
     logs: Path | None = None
     cache: Path | None = None
     steps: Steps = NONE
-    deep: bool = False
     ledger: Any = None
 
 
@@ -303,6 +301,7 @@ def _tested(code: int | None, took: float, cases: dict[str, str] | None, log: Pa
         report = "summary" if counts else None
     return {
         **_ran(code, took),
+        "error": reading.error_class(code, log) if code != 0 or not counts or counts[0] != counts[1] else None,
         "report": report,
         "reported": counts[0] if counts else None,
         "passed": counts[1] if counts else None,
@@ -351,7 +350,7 @@ def _ran_side(
 ) -> dict[str, Any]:
     junit = shell.junit
     if not recipe:
-        build = plan.build
+        build = None
     elif recipe.image:
         build = (
             f"({recipe.setup or 'true'}) || echo 'setup failed at this commit; building on the set-up image' >&2; "
@@ -380,7 +379,7 @@ def _ran_side(
                 seconds,
                 log,
             )
-        side["build"] = _ran(code, took)
+        side["build"] = {**_ran(code, took), "error": reading.error_class(code, path)}
         shown("build", code, path)
         if code is None:
             shell.stop()
@@ -537,9 +536,6 @@ def workers(n: int) -> tuple[int, int]:
     return at_once, max(1, cores // at_once)
 
 
-Repair = Callable[[int, str, str], "tuple[Recipe, str | None] | None"]
-
-
 def about(seconds: float) -> str:
     if seconds < 60:
         return "under a minute"
@@ -624,8 +620,22 @@ def _summary(name: str, what: str, rows: list[dict | None], total: int, board: l
     return f"\u2713 {name}: {len(ran)} of {total} {what} run, {built} built ({took})"
 
 
-def _neither_built(row: dict) -> bool:
-    return not row.get("broke") and all((row[s].get("build") or {}).get("exit", 0) != 0 for s in ("pre", "post"))
+class Stuck(errors.MetaphiError):
+    """A person must act before the run can go on: a tool is missing here. What finished is kept."""
+
+
+def _stuck(where: str, side: dict[str, Any], logs: _Logs, label: str) -> Stuck | None:
+    """Stuck when a build or test failed because a tool is not installed on this machine."""
+    for step, got in (("build", side.get("build")), *(("test-1", t) for t in side.get("tests", [])[:1])):
+        if got and got.get("error") == "toolchain_missing":
+            log = logs.root / f"{label}.{step}.log"
+            tool = reading.missing(log) or "a tool the build needs"
+            return Stuck(
+                f"{where}: {tool} is missing on this machine",
+                code="toolchain_missing",
+                next_step=f"install {tool}, then run the same command again; finished commits are kept",
+            )
+    return None
 
 
 def run(
@@ -639,32 +649,15 @@ def run(
     plan: Plan,
     say: Callable[[str], None],
     found: tuple[Recipe, str | None] | None = None,
-    eras: list[int | None] | None = None,
-    repair: Repair | None = None,
-    edits: list[dict] | None = None,
     paths: dict[int, str] | None = None,
     tipped: dict[str, Any] | None = None,
     stream: IO[str] | None = None,
+    edits: list[dict] | None = None,
 ) -> dict[str, Any]:
     board = live.Board(name, stream, say)
     try:
         return _checks(
-            repo,
-            name,
-            tip,
-            commits,
-            order,
-            targets,
-            runs,
-            plan,
-            board.say,
-            found,
-            eras,
-            repair,
-            edits,
-            paths,
-            tipped,
-            board,
+            repo, name, tip, commits, order, targets, runs, plan, board.say, found, paths, tipped, board, edits or []
         )
     finally:
         board.close()
@@ -681,12 +674,10 @@ def _checks(
     plan: Plan,
     say: Callable[[str], None],
     found: tuple[Recipe, str | None] | None,
-    eras: list[int | None] | None,
-    repair: Repair | None,
-    edits: list[dict] | None,
     paths: dict[int, str] | None,
     tipped: dict[str, Any] | None,
     board: live.Board,
+    edits: list[dict],
 ) -> dict[str, Any]:
     shas = {i: sha for sha, i in order.items()}
     by_id = {c["commit"]: c for c in commits}
@@ -696,7 +687,6 @@ def _checks(
     out: dict[str, Any] = {
         "from": "tip",
         "runs": runs,
-        "build_given": plan.build is not None,
         "test_given": given,
         "stopped": "done",
         "commits": [],
@@ -704,8 +694,8 @@ def _checks(
     }
     at_once, jobs = (1, os.cpu_count() or 1) if given else workers(len(targets))
     if not given and found is None:
-        out["commits"] = [{"commit": i, "broke": True} for i in targets]
-        out["edits"] = [{**b, "broke": True} for b in edits or []]
+        out["commits"] = [{"commit": i, "id": shas.get(i), "broke": True} for i in targets]
+        out["edits"] = [{**b, "broke": True} for b in edits]
         return out
     tip_s: float | None = None
     ledger = plan.ledger
@@ -735,6 +725,11 @@ def _checks(
                     measure=paths or {},
                 )
             tip_s = time.monotonic() - began
+        except Exception as e:  # noqa: BLE001
+            say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
+        else:
+            if stuck := _stuck(f"{name}, the latest commit", measured, logs, "000-tip"):
+                raise stuck
             out["tip"] = (
                 {**tipped, **{k: v for k, v in measured.items() if k not in MEASURED_RUNS}} if tipped else measured
             )
@@ -760,10 +755,7 @@ def _checks(
                 + (" builds" if built else " does not build")
                 + tested
             )
-        except Exception as e:  # noqa: BLE001
-            say(f"\u2717 {name} could not run ({type(e).__name__}: {e})")
 
-    edits = edits or []
     before = (
         sum(ledger.get(name, "commit", i) is not None for i in targets)
         + sum(ledger.get(name, "edit", [b.get("file"), b.get("op"), b.get("nth")]) is not None for b in edits)
@@ -785,45 +777,38 @@ def _checks(
             + (f", {took}" if took else "")
             + f"; it stops after {plan.hours:g} h"
         )
+    halt: list[Stuck] = []
 
-    def label_of(n: int, i: int) -> str:
-        return f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
-
-    def one(n: int, i: int, with_: tuple[Recipe, str | None] | None = found, again: str = "") -> dict | None:
-        if not again and ledger and (kept := ledger.get(name, "commit", i)) is not None:
+    def one(n: int, i: int) -> dict | None:
+        if ledger and (kept := ledger.get(name, "commit", i)) is not None:
             return kept
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or halt:
             return None
-        label = label_of(n, i) + again
+        label = f"{n:03d}-{shas[i][:12]}" if i in shas else f"{n:03d}"
         began = time.monotonic()
-        if not again:
-            eta.begin(n)
-            board.begin(label)
+        eta.begin(n)
+        board.begin(label)
         try:
             c = by_id[i]
             row = {
                 "commit": i,
-                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], lambda _s: None, with_, jobs),
+                "id": shas[i],
+                **_commit(repo, plan, runs, logs, label, shas[c["parents"][0]], shas[i], lambda _s: None, found, jobs),
             }
-            b = (row["post"].get("build") or {}).get("exit", 0)
-            line = f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})"
-            if again:
-                say(line)
-            else:
-                board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
-                if ledger:
-                    ledger.put(name, "commit", i, row)
-            return row
         except Exception as e:  # noqa: BLE001
             say(f"    {label}: could not run ({type(e).__name__}: {e})")
-            if not again:
-                board.end(
-                    label,
-                    False,
-                    f"{name}: {label} could not run ({n}/{len(targets)})",
-                    eta.end(n, time.monotonic() - began, False),
-                )
-            return {"commit": i, "broke": True}
+            board.end(label, False, f"{name}: {label} could not run ({n}/{len(targets)})", eta.end(n, 0.0, False))
+            return {"commit": i, "id": shas.get(i), "broke": True}
+        if stuck := _stuck(f"{name}, commit {n} of {len(targets)}", row["post"], logs, f"{label}.post"):
+            halt.append(stuck)
+            board.end(label, False, f"{name}: {label} stopped: {stuck}", "")
+            return None
+        b = (row["post"].get("build") or {}).get("exit", 0)
+        line = f"{name}: {label} build {'ok' if b == 0 else 'failed'} ({n}/{len(targets)})"
+        board.end(label, b == 0, line, eta.end(n, time.monotonic() - began, b == 0))
+        if ledger:
+            ledger.put(name, "commit", i, row)
+        return row
 
     rows: list[dict | None] = []
     if targets:
@@ -831,92 +816,69 @@ def _checks(
         with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("commits", at_once=at_once):
             rows = list(pool.map(one, range(1, len(targets) + 1), targets))
         board.close(_summary(name, "past commits", rows, len(targets), board))
+    if halt:
+        raise halt[0]
     if None in rows:
         out["stopped"] = "hours"
         rows = rows[: rows.index(None)]
-    if repair and eras and not given:
-        by_era: dict[int, list[int]] = {}
-        for k, row in enumerate(rows):
-            if eras[k] is not None:
-                by_era.setdefault(eras[k], []).append(k)
-        for era, ks in sorted(by_era.items()):
-            ran = [k for k in ks if _neither_built(rows[k])]
-            if not ran or time.monotonic() > deadline:
-                continue
-            k = ran[0]
-            tail = "\n".join(
-                line[6:] for line in _tail(logs.root / f"{label_of(k + 1, targets[k])}.post.build.log", 60)
-            )
-            say(f"{name}: {len(ran)} builds failed; setting up again")
-            try:
-                with plan.steps.step("setup", era=era):
-                    fixed = repair(era, shas[targets[k]], tail)
-            except Exception as e:  # noqa: BLE001
-                say(f"    setup failed ({type(e).__name__}: {e})")
-                continue
-            if not fixed:
-                continue
-            with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("commits", era=era):
-                again = list(
-                    pool.map(
-                        one,
-                        [k + 1 for k in ran],
-                        [targets[k] for k in ran],
-                        [fixed] * len(ran),
-                        [f".era{era}"] * len(ran),
-                    )
-                )
-            for k, row in zip(ran, again, strict=True):
-                if row is not None and not _neither_built(row):
-                    rows[k] = row
-                    if ledger and not row.get("broke"):
-                        ledger.put(name, "commit", targets[k], row)
     out["commits"] = rows
     if edits:
-        tip_tree, paths = _tree(repo, tip), paths or {}
-
-        def edited(n: int, b: dict) -> dict | None:
-            key = [b.get("file"), b.get("op"), b.get("nth")]
-            if ledger and (kept := ledger.get(name, "edit", key)) is not None:
-                return kept
-            if time.monotonic() > deadline:
-                return None
-            label = f"{n:03d}-tip"
-            began = time.monotonic()
-            eta.begin(n)
-            board.begin(label)
-            try:
-                row = {
-                    **b,
-                    **_edited(
-                        repo, tip_tree, plan, runs, logs, label, paths[b["file"]], b["op"], b["nth"], found, jobs
-                    ),
-                }
-                built = (row["post"].get("build") or {}).get("exit", 0)
-                line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - len(targets)}/{len(edits)})"
-                board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
-                if ledger:
-                    ledger.put(name, "edit", key, row)
-                return row
-            except Exception as e:  # noqa: BLE001
-                say(f"    {label}: could not run ({type(e).__name__}: {e})")
-                board.end(
-                    label,
-                    False,
-                    f"{name}: {label} could not run ({n - len(targets)}/{len(edits)})",
-                    eta.end(n, time.monotonic() - began, False),
-                )
-                return {**b, "broke": True}
-
-        board.stage("edits", len(edits))
-        with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("edits", at_once=at_once):
-            done = list(pool.map(edited, range(len(targets) + 1, len(targets) + len(edits) + 1), edits))
-        board.close(_summary(name, "edits", done, len(edits), board))
-        if None in done:
+        out["edits"] = _edits(repo, name, tip, edits, len(targets), runs, plan, logs, found, jobs, paths, board, eta)
+        if len(out["edits"]) < len(edits):
             out["stopped"] = "hours"
-            done = done[: done.index(None)]
-        out["edits"] = done
     return out
 
 
-__all__ = ["Eta", "Plan", "about", "between", "outcomes", "run"]
+def _edits(
+    repo: Path,
+    name: str,
+    tip: str,
+    edits: list[dict],
+    after: int,
+    runs: int,
+    plan: Plan,
+    logs: _Logs,
+    found: tuple[Recipe, str | None] | None,
+    jobs: int,
+    paths: dict[int, str] | None,
+    board: live.Board,
+    eta: Eta,
+) -> list[dict]:
+    """Each planted swap at the tip, built and tested; a swap whose file is not at the tip is broke."""
+    tip_tree, paths = _tree(repo, tip), paths or {}
+    ledger, deadline = plan.ledger, time.monotonic() + plan.hours * 3600
+    at_once = 1 if plan.test is not None else workers(len(edits))[0]
+
+    def edited(n: int, b: dict) -> dict | None:
+        key = [b.get("file"), b.get("op"), b.get("nth")]
+        if ledger and (kept := ledger.get(name, "edit", key)) is not None:
+            return kept
+        if time.monotonic() > deadline:
+            return None
+        label = f"{n:03d}-tip"
+        began = time.monotonic()
+        eta.begin(n)
+        board.begin(label)
+        try:
+            row = {
+                **b,
+                **_edited(repo, tip_tree, plan, runs, logs, label, paths[b["file"]], b["op"], b["nth"], found, jobs),
+            }
+        except Exception as e:  # noqa: BLE001
+            board.end(label, False, f"{name}: {label} could not run ({type(e).__name__})", eta.end(n, 0.0, False))
+            return {**b, "broke": True}
+        built = (row["post"].get("build") or {}).get("exit", 0)
+        line = f"{name}: {label} build {'ok' if built == 0 else 'failed'} ({n - after}/{len(edits)})"
+        board.end(label, built == 0, line, eta.end(n, time.monotonic() - began, built == 0))
+        if ledger:
+            ledger.put(name, "edit", key, row)
+        return row
+
+    board.stage("edits", len(edits))
+    with concurrent.futures.ThreadPoolExecutor(at_once) as pool, plan.steps.step("edits", at_once=at_once):
+        done = list(pool.map(edited, range(after + 1, after + len(edits) + 1), edits))
+    board.close(_summary(name, "edits", done, len(edits), board))
+    return done[: done.index(None)] if None in done else done
+
+
+__all__ = ["Eta", "Plan", "Stuck", "about", "between", "outcomes", "run"]

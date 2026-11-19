@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import IO, Any
+from typing import IO
 
 import httpx
 
@@ -341,80 +341,30 @@ def cmd_twin(a: argparse.Namespace) -> None:
 
 
 CODEVAL_HOME = "kennet-codeval"
+SEND_ASK = "Send to Metaphi AI for commercial diligence? [y/N] "
+SENT = "Sent. Metaphi AI will reach out if there is a commercial fit."
 
 
-def _rerun(given: str, tries: list[dict] | None = None) -> str:
-    q = shlex.quote(given)
-    ran = [t for t in tries or [] if t.get("test")]
-    if ran:
-        t = max(ran, key=lambda t: t["test"].get("reported") or 0)["test"]
-        if t.get("reported") is None and t.get("exit") == 0:
-            head = f"In {given}, the tests passed but how many ran could not be read. Give your commands:\n"
-        else:
-            what = (
-                f"{t['passed']} of {t['reported']} tests passed"
-                if t.get("reported") is not None
-                else f"the tests exited {t.get('exit')}"
-            )
-            head = (
-                f"In {given}, {what}. If the tests need a service (a database, a cache), start it, or give your "
-                "commands:\n"
-            )
-    else:
-        head = f"No build or test found in {given}. Give your commands:\n"
-    return (
-        head + f"  kennet codeval {q} --build '<build>' --test '<test>'\n"
-        "Or let a model set it up (sends file contents to Metaphi AI):\n"
-        f"  kennet codeval {q} --deep"
-    )
+def _codeval_line(a: argparse.Namespace) -> str:
+    """The command the owner runs to review and send: the same paths and command as this run."""
+    return shlex.join(["kennet", "codeval", *a.paths, *(["--", a.run_command] if a.run_command else [])])
 
 
-def _sent(
-    home: Path, name: str, route: str, body: bytes, answer: dict | None, say: Callable[[str], None], **more: Any
-) -> None:
-    out = home / "sent"
-    out.mkdir(exist_ok=True)
-    (out / name).write_bytes(body)
-    here = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
-    got = (answer or {}).get("received") if isinstance((answer or {}).get("received"), dict) else None
-    row = {
-        "file": name,
-        "route": route,
-        **here,
-        **more,
-        "sent": answer is not None,
-        "received": got,
-        "matched": None if got is None else got == here,
-        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    ledger = out / "sent.json"
-    try:
-        rows = [r for r in json.loads(ledger.read_text()) if r.get("file") != name]
-    except (OSError, ValueError):
-        rows = []
-    ledger.write_text(json.dumps([*rows, row], indent=1))
-    if row["matched"] is False:
-        say(f"The server received {got.get('bytes')} bytes for {name}, not the {len(body)} sent ({ledger})")
-
-
-def _codeval_key(a: argparse.Namespace, say: Callable[[str], None]) -> None:
+def _codeval_signin(say: Callable[[str], None]) -> None:
+    """Signed in with a key that holds CodeVal, or signed in now: the device code is printed, so an agent can relay
+    it and it works over SSH."""
     from metaphi import codeval
 
     try:
         codeval.key_ready()
     except accounts.Error as e:
         if e.code == "no_api_key" and accounts.pickup() is not None:
-            codeval.key_ready()
-        elif e.code != "not_signed_in" or a.json or not _interactive():
+            return codeval.key_ready()
+        if e.code != "not_signed_in":
             raise
-        else:
-            got = accounts.login(say=say)
-            say(palette.paint("\u2713", "ok", sys.stdout) + f" Signed in as {got.get('email')}")
-            codeval.key_ready()
-
-
-SEND_ASK = "? Send to Metaphi AI? [y/N] "
-_PATH = re.compile(r" \((/[^)]*)\)")
+        got = accounts.login(say=say, device=True)
+        say(f"✓ Signed in as {got.get('email')}")
+        codeval.key_ready()
 
 
 def _codeval_say(say: Callable[[str], None], stream: IO[str]) -> Callable[[str], None]:
@@ -424,501 +374,177 @@ def _codeval_say(say: Callable[[str], None], stream: IO[str]) -> Callable[[str],
     def styled(line: str) -> None:
         if line[:1].isspace():
             return say(palette.paint(line, "dim", stream))
-        line = _PATH.sub(lambda m: " " + palette.paint(f"({m.group(1)})", "dim", stream), line)
-        mark = {"\u2713": "ok", "\u2717": "no"}.get(line[:1])
+        mark = {"✓": "ok", "✗": "no"}.get(line[:1])
         say(palette.paint(line[0], mark, stream) + line[1:] if mark else line)
 
     return styled
 
 
-def _send_ask(stream: IO[str]) -> str:
-    return (
-        (
-            palette.paint("?", "accent", stream, bold=True)
-            + " "
-            + palette.paint("Send to Metaphi AI?", None, stream, bold=True)
-            + " "
-            + palette.paint("[y/N]", "dim", stream)
-            + " "
-        )
-        if palette.on(stream)
-        else SEND_ASK
-    )
-
-
-def _result_line(name: str, got: dict | None) -> str:
-    tip = (got or {}).get("tip") or {}
+def _result_line(name: str, got: dict) -> str:
+    tip = got.get("tip") or {}
     build, tests = tip.get("build"), tip.get("tests") or []
-    parts = [f"build exit {build['exit']}" if build else "no build step" if tip else "not run"]
+    parts = ["builds" if not build or build["exit"] == 0 else f"build exit {build['exit']}"] if tip else ["not run"]
     if tests:
         t = tests[0]
-        parts.append(
-            f"{t['passed']} of {t['reported']} tests passed, exit {t['exit']}"
-            if t.get("reported")
-            else f"tests exit {t['exit']}"
+        parts.append(f"{t['passed']} of {t['reported']} tests pass" if t.get("reported") else f"tests exit {t['exit']}")
+    rows = [r for r in got.get("commits") or [] if not r.get("broke")]
+    if got.get("commits"):
+        built = sum((r["post"].get("build") or {}).get("exit", 0) == 0 for r in rows)
+        parts.append(f"{len(got['commits'])} past commits, {built} built")
+    if got.get("edits"):
+        parts.append(f"{len(got['edits'])} edits")
+    return f"  {name}: " + " · ".join(parts)
+
+
+def _send_screen(home: Path, manifest: dict) -> list[str]:
+    """Exactly what would leave: each file, its size, what was de-identified in it by kind, where its bytes are, the
+    commands that ran, and the bundle's sha256."""
+    from metaphi import codeval
+
+    out = home / codeval.PAYLOAD
+    lines = [f"What would be sent to Metaphi AI, from {out}:"]
+    for f in manifest["files"]:
+        cleared = f.get("deidentified")
+        said = (
+            "; de-identified: " + (", ".join(f"{n} {k}" for k, n in sorted(cleared.items())) or "nothing found")
+            if cleared is not None
+            else ""
         )
-    if (got or {}).get("services"):
-        parts.append("services up" if got["services"].get("up") else "services did not start")
-    return f"  {name}: " + " \u00b7 ".join(parts)
-
-
-def _codeval_words(a: argparse.Namespace, paths: list[str] | None = None, deep: bool | None = None) -> list[str]:
-    line = ["kennet", "codeval", *(a.paths if paths is None else paths)]
-    for flag in ("build", "test"):
-        if getattr(a, flag):
-            line += [f"--{flag}", getattr(a, flag)]
-    if a.deep if deep is None else deep:
-        line.append("--deep")
-    return line
-
-
-def _codeval_tail(a: argparse.Namespace) -> list[str]:
-    detached = bool(getattr(a, "detach", False) or getattr(a, "worker", None))
-    return [*(["--json"] if a.json else []), "--yes", *(["--detach"] if detached else [])]
-
-
-def _codeval_again(a: argparse.Namespace, deep: bool | None = None) -> str:
-    return shlex.join([*_codeval_words(a, deep=deep), *_codeval_tail(a)])
-
-
-def _unconfirmed(a: argparse.Namespace) -> errors.MetaphiError:
-    return errors.MetaphiError(
-        "nothing was sent: sending needs --yes away from a terminal"
-        if not getattr(a, "detach", False)
-        else "nothing was started: --detach needs --yes, the person's yes to send",
-        code="confirmation_required",
-        next_step=_codeval_again(a),
-    )
-
-
-def _needs_block(a: argparse.Namespace, e: errors.MetaphiError, missing: list[str] | None = None) -> dict:
-    if e.code == "test_command_missing":
-        names = ", ".join(missing or [])
-        options = []
-        tail = _codeval_tail(a)
-        for given in missing or []:
-            options.append(
-                {
-                    "label": f"Give the build and test commands for {given}",
-                    "run": shlex.join(["kennet", "codeval", given])
-                    + " --build '<build>' --test '<test>' "
-                    + shlex.join(tail),
-                }
-            )
-            if not a.deep:
-                options.append(
-                    {
-                        "label": f"Let a model set up {given}; this sends the contents of the files it reads to "
-                        "Metaphi AI",
-                        "run": shlex.join(["kennet", "codeval", given, "--deep", *tail]),
-                    }
-                )
-        ask = (
-            f"CodeVal could not set up {names}, even with a model. What are the commands that build and test it?"
-            if a.deep
-            else f"CodeVal could not find how to build and test {names}. Do you want to give the build and test "
-            "commands, or let a model set it up, which sends the contents of the files it reads to Metaphi AI?"
-        )
-    else:  # container_required
-        ask = (
-            "CodeVal --deep runs its commands in containers, and no Docker or Podman is running. Can you start "
-            "Docker or Podman, or should it run without --deep?"
-        )
-        options = [
-            {"label": "Docker or Podman is running now: run it again", "run": _codeval_again(a)},
-            {"label": "Run without --deep", "run": _codeval_again(a, deep=False)},
-        ]
-    return {"code": e.code, "ask": ask, "options": options, "action_url": e.action_url}
-
-
-def _needed(
-    a: argparse.Namespace,
-    run: Any,
-    e: errors.MetaphiError,
-    missing: list[str] | None = None,
-    result: dict | None = None,
-) -> int:
-    block = _needs_block(a, e, missing)
-    step = None if e.code == "test_command_missing" else _codeval_again(a)
-    if run is not None:
-        run.needs(block, step)
-    if a.json:
-        said = {
-            **(result or {}),
-            "run": run.run if run is not None else None,
-            "state": "needs_person",
-            "needs": block,
-            "next_step": step,
-        }
-        if result is None:
-            said["error"] = {**e.to_dict(), "next_step": step}
-        print(json.dumps(said, indent=2))
-    if result is None:
-        print(f"error: {e}", file=sys.stderr)
-    elif not a.json:
-        return NEEDS_PERSON
-    print(f"Ask: {block['ask']}", file=sys.stderr)
-    for n, o in enumerate(block["options"], 1):
-        print(f"  {n}. {o['label']}: {o['run']}", file=sys.stderr)
-    if block["action_url"]:
-        print(f"  {block['action_url']}", file=sys.stderr)
-    if step:
-        print(f"Next: {step}", file=sys.stderr)
-    return NEEDS_PERSON
-
-
-def cmd_codeval(a: argparse.Namespace) -> int | None:
-    from metaphi import codeval_runs
-
-    held: dict[str, Any] = {}
-    try:
-        return _codeval(a, held)
-    except errors.MetaphiError as e:
-        if e.code in codeval_runs.NEEDS:
-            return _needed(a, held.get("run"), e)
-        if held.get("run"):
-            held["run"].failed(e.to_dict())
-        raise
-    except config.Error as e:
-        if held.get("run"):
-            held["run"].failed(errors.MetaphiError(str(e)).to_dict())
-        raise
-    except KeyboardInterrupt:
-        if held.get("run"):
-            held["run"].failed(errors.MetaphiError("interrupted", code="interrupted").to_dict(), stopped=True)
-        raise
-    except httpx.TransportError as e:
-        if held.get("run"):
-            held["run"].failed(network(e).to_dict())
-        raise
-    except Exception as e:
-        if held.get("run"):
-            held["run"].failed(
-                errors.MetaphiError(f"kennet stopped on something it did not expect ({type(e).__name__})").to_dict()
-            )
-        raise
-
-
-def _codeval_detach(a: argparse.Namespace, say: Callable[[str], None], stream: IO[str]) -> int:
-    from metaphi import codeval, codeval_runs
-
-    _codeval_key(a, say)
-    paths = codeval.repositories(a.paths or ["."])
-    run = codeval.run_key(paths)
-    if run is None:
-        raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
-    home = Path.cwd() / CODEVAL_HOME / run
-    home.mkdir(parents=True, exist_ok=True)
-    now = codeval_runs.view(run, home)
-    if now["state"] == "running":
-        said = {"run": run, "pid": now["pid"], "state": "running", "results": str(home), "next_step": now["next_step"]}
-        _out(a, said, f"{run} is already running (pid {now['pid']}).", f"Next: {now['next_step']}")
-        return 0
-    if not a.json:
-        for line in (*codeval.sent_lines(a.deep), codeval.TAKES):
-            say(line)
-    argv = [*_codeval_words(a)[1:], "--yes", "--worker", run, *(["--json"] if a.json else [])]
-    pid, awake = codeval_runs.detach(home, argv)
-    codeval_runs.started(home, run, pid, _codeval_again(a))
-    codeval_runs.register(run, home)
-    step = f"kennet codeval status {run} --json --wait 600"
-    said = {
-        "run": run,
-        "pid": pid,
-        "state": "running",
-        "results": str(home),
-        "log": str(home / codeval_runs.LOG),
-        "awake": awake,
-        "next_step": step,
-    }
-    _out(
-        a,
-        said,
-        "",
-        palette.paint("\u2713", "ok", stream) + f" Started {run} in the background (pid {pid}).",
-        f"Its log: {home / codeval_runs.LOG}",
-        f"Next: {step}",
-    )
-    return 0
-
-
-def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
-    from metaphi import codebase_checks, codebase_setup, codeval, codeval_runs
-    from metaphi.steps import Steps
-
-    worker = getattr(a, "worker", None)
-    if a.build and not a.test:
-        raise errors.MetaphiError("--build runs only with --test", code="build_without_test")
-    if a.deep and a.test:
-        raise errors.MetaphiError("--deep finds the build and test: give --test or --deep", code="deep_with_test")
-    if a.dry_run and a.deep:
-        raise errors.MetaphiError("--dry-run runs without --deep", code="dry_run_with_deep")
-    commits = not a.dry_run
-    if a.dry_run and a.yes:
-        raise errors.MetaphiError("--dry-run sends nothing: give --dry-run or --yes", code="dry_run_with_yes")
-    if a.dry_run and a.detach:
-        raise errors.MetaphiError("--dry-run runs here: give --dry-run or --detach", code="dry_run_with_detach")
-    if a.detach and not a.yes:
-        raise _unconfirmed(a)
-    if worker:
-        held["run"] = codeval_runs.Run(Path.cwd() / CODEVAL_HOME / worker, worker, _codeval_again(a))
-    if a.deep and not codebase_setup.engine():
-        raise errors.MetaphiError(
-            "--deep runs its commands in containers, and no Docker or Podman is running",
-            code="container_required",
-            next_step="start Docker or Podman, then run the same command again",
-        )
-    interactive = not a.json and _interactive()
-    if commits and not interactive and not a.yes:
-        raise _unconfirmed(a)
-    say = _progress(a)
-    update.current_for(sys.argv[1:], say)
-    stream = sys.stderr if a.json else sys.stdout
-    say = codeval.say = _codeval_say(say, stream)
-    codeval.stream = stream
-    if a.detach:
-        return _codeval_detach(a, say, stream)
-    agreed = a.yes
-    if agreed:
-        _codeval_key(a, say)
-    say(palette.paint(codeval.NOTICE if agreed else codeval.LOCAL_NOTICE, "dim", stream))
-    say("")
-
-    def ask() -> bool:
-        try:
-            said = input(_send_ask(stream)).strip().lower()
-        except EOFError:
-            said = ""
-        return said in ("y", "yes")
-
-    with codeval.profiled(codeval.repositories(a.paths or ["."]), say) as (doc, kept):
-        if not doc["repos"]:
-            raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
-        steps = Steps()
-        name = worker or codeval.run_id(doc)
-        home = Path.cwd() / CODEVAL_HOME / name
-        now = codeval_runs.view(name, home)
-        if not worker and now["state"] == "running" and now["pid"] != os.getpid():
-            raise errors.MetaphiError(
-                f"{name} is already running here (pid {now['pid']}); one process runs it at a time",
-                code="run_in_progress",
-                next_step=now["next_step"],
-            )
-        home.mkdir(parents=True, exist_ok=True)
-        (home / "codeval.json").write_text(json.dumps(doc, indent=1))
-        run = held.get("run") or codeval_runs.Run(home, name, _codeval_again(a) if commits else None)
-        held["run"] = run
-        codeval_runs.register(name, home)
-
-        def sent_profile() -> str:
-            try:
-                return (home / "reference").read_text().strip()
-            except OSError:
-                pass
-            body = codeval.packed(doc)
-            with steps.step("send"):
-                answer = codeval.post(body)
-            _sent(home, "codeval.json.gz", "/codeval", body, answer, say)
-            (home / "reference").write_text(answer["id"])
-            for sent in ("checks.sent", "logs.sent"):
-                (home / sent).unlink(missing_ok=True)
-            return answer["id"]
-
-        if commits:
-            for line in (*codeval.sent_lines(a.deep), codeval.TAKES):
-                say(line)
-            if not agreed:
-                if not ask():
-                    say("Nothing sent. Results are in " + palette.paint(str(home), "dim", stream))
-                    run.finished()
-                    return None
-                agreed = True
-                _codeval_key(a, say)
-        ref = sent_profile() if commits else None
-        if ref:
-            run.ref = ref
-            run.write(reference=ref)
-            run.phase("plan")
-        asked = {"test": a.test, "build": a.build, "deep": a.deep, "commits": commits}
-        done, report = home / "checks.json", None
-        try:
-            same = json.loads((home / "asked.json").read_text()) == asked
-        except (OSError, ValueError):
-            same = False
-        if same and done.is_file():
-            try:
-                report = json.loads(done.read_text())
-                say("Using the checks from the last run")
-            except (OSError, ValueError):
-                pass
-        if report is None:
-            for sent in ("checks.sent", "logs.sent"):
-                (home / sent).unlink(missing_ok=True)
-            if not same:
-                run.forget()
-                (home / "plan.json").unlink(missing_ok=True)
-                (home / "asked.json").write_text(json.dumps(asked))
-            planned: dict = {}
-            if commits:
-                try:
-                    planned = json.loads((home / "plan.json").read_text())
-                except (OSError, ValueError):
-                    with steps.step("plan"):
-                        planned = codeval.plan(ref)
-                    (home / "plan.json").write_text(json.dumps(planned, indent=1))
-            first = planned.get("first")
-            run.plan(
-                {
-                    k["name"]: len(targets[:first] if first is not None else targets) + len(edits or [])
-                    for k, targets, edits in zip(
-                        kept,
-                        planned.get("repos") or [[] for _ in kept],
-                        planned.get("edits") or [[] for _ in kept],
-                        strict=True,
-                    )
-                }
-            )
-            plan = codebase_checks.Plan(
-                test=a.test,
-                build=a.build,
-                deep=a.deep,
-                logs=home / "logs",
-                run_minutes=planned.get("run_minutes") or codebase_checks.RUN_MINUTES,
-                hours=planned.get("hours") or codebase_checks.HOURS,
-                ledger=run,
-            )
-            report = codeval.checked(kept, planned or None, plan, say, ref, steps)
-        if commits and not (home / "checks.sent").is_file():
-            try:
-                codeval.add_blobs(kept, report, json.loads((home / "plan.json").read_text()))
-            except (OSError, ValueError):
-                pass
-        done.write_text(json.dumps(report, indent=1))
-        missing = [
-            (k["given"], [t for x in r.get("setup") or [] for t in x.get("tries") or []])
-            for k, r in zip(kept, report["repos"], strict=True)
-            if r and not r.get("test_given") and not any(x.get("worked") for x in r.get("setup") or [])
-        ]
-        if not a.json:
-            print(
-                "\n".join(
-                    [
-                        "",
-                        "Results",
-                        *(_result_line(k["name"], r) for k, r in zip(kept, report["repos"], strict=True)),
-                        "",
-                    ]
-                )
-            )
-        for given, tries in missing:
-            say(_rerun(given, tries))
-        if a.dry_run:
-            for line in codeval.sent_lines(a.deep):
-                say(line)
-            _sent(home, "codeval.json.gz", "/codeval", codeval.packed(doc), None, say)
-            checks, cleared = codeval.checks_packed(report, kept)
-            _sent(home, "checks.json.gz", "/codeval/<reference>/checks", checks, None, say, deidentified=cleared)
-            logs, cleared = codeval.logs_packed(home / "logs", "", kept)
-            _sent(home, "logs.tar.gz", "/codeval/<reference>/logs", logs, None, say, deidentified=cleared)
-            say(codeval.deid_line(cleared))
-            run.finished()
-            if a.json:
-                print(json.dumps({"reference": None, "sent": False, "results": str(home), "run": name}, indent=2))
-            else:
-                say(
-                    "Nothing sent (--dry-run). What would be sent is in "
-                    + palette.paint(str(home / "sent"), "dim", stream)
-                )
-            return None
-        run.phase("logs")
-        try:
-            if not (home / "checks.sent").is_file():
-                body, cleared = codeval.checks_packed(report, kept)
-                with steps.step("post_checks"):
-                    answered = codeval.post_checks(ref, body)
-                _sent(home, "checks.json.gz", f"/codeval/{ref}/checks", body, answered, say, deidentified=cleared)
-                (home / "checks.sent").touch()
-            if not (home / "logs.sent").is_file():
-                logs, cleared = codeval.logs_packed(home / "logs", ref, kept)
-                say(codeval.deid_line(cleared))
-                _sent(
-                    home,
-                    "logs.tar.gz",
-                    f"/codeval/{ref}/logs",
-                    logs,
-                    codeval.post_logs(ref, logs),
-                    say,
-                    deidentified=cleared,
-                )
-                (home / "logs.sent").touch()
-        except errors.MetaphiError as e:
-            e.next_step = "run the same command again: it sends what was kept, and runs nothing twice"
-            raise
-    result = {"reference": ref, "sent": True, "results": str(home), "run": name}
-    if not a.json:
-        if interactive:
-            say("")
-        say(palette.paint("\u2713", "ok", stream) + " Sent " + palette.paint(ref, "accent", stream, bold=True) + ".")
-    if missing:
-        run.phase("done")
-        return _needed(
-            a,
-            run,
-            errors.MetaphiError("no build or test found", code="test_command_missing"),
-            [given for given, _ in missing],
-            result,
-        )
-    run.finished()
-    if a.json:
-        print(json.dumps(result, indent=2))
-    return None
-
-
-def _status_lines(got: dict) -> list[str]:
-    head = f"{got['run']}  {got['state']}"
-    if got.get("phase"):
-        head += f"  {got['phase']}"
-    if got.get("total"):
-        head += f"  {got['done']} of {got['total']}"
-    if got.get("pid"):
-        head += f"  (pid {got['pid']})"
-    lines = [head, f"Results: {got['results']}"]
-    if got.get("reference"):
-        lines.append(f"Reference: {got['reference']}")
-    if got.get("error"):
-        lines.append(f"error: {got['error'].get('message')} (code: {got['error'].get('code')})")
-    needs = got.get("needs")
-    if needs:
-        lines.append(f"Ask: {needs['ask']}")
-        lines += [f"  {n}. {o['label']}: {o['run']}" for n, o in enumerate(needs["options"], 1)]
-        if needs.get("action_url"):
-            lines.append(f"  {needs['action_url']}")
-    if got.get("next_step"):
-        lines.append(f"Next: {got['next_step']}")
+        lines.append(f"  {f['file']:<16} {_size(f['bytes']):>8}  sha256 {f['sha256'][:16]}{said}")
+    lines.append(f"  Model pass: {manifest['model_pass']}")
+    lines.append("Commands that ran:")
+    for c in manifest["commands"]:
+        ran = [f"{k}: {c[k]}" for k in ("setup", "build", "test") if c.get(k)]
+        lines.append(f"  {c['repo']}: " + ("; ".join(ran) or "none"))
+    lines.append(f"Bundle sha256: {manifest['bundle_sha256']}")
     return lines
 
 
-def cmd_codeval_status(a: argparse.Namespace) -> int:
-    from metaphi import codeval_runs
+def _payload(home: Path) -> tuple[dict, dict[str, bytes]] | None:
+    """The run's payload as written when it finished, its bytes checked against its manifest; None if not whole."""
+    from metaphi import codeval
 
-    if a.wait is not None and a.wait < 0:
-        raise errors.MetaphiError("--wait takes seconds, 0 or more", code="bad_wait")
-    found = codeval_runs.located(a.run)
-    if found is None:
-        raise errors.MetaphiError(
-            f"no CodeVal run {a.run} on this machine" if a.run else "no CodeVal run on this machine yet",
-            code="run_not_found",
-            next_step="kennet codeval <path> --dry-run --json",
+    out = home / codeval.PAYLOAD
+    try:
+        manifest = json.loads((out / "manifest.json").read_text())
+        bodies = {f["file"]: (out / f["file"]).read_bytes() for f in manifest["files"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if any(hashlib.sha256(bodies[f["file"]]).hexdigest() != f["sha256"] for f in manifest["files"]):
+        return None
+    return manifest, bodies
+
+
+def _upload(home: Path, manifest: dict, bodies: dict[str, bytes], say: Callable[[str], None]) -> str:
+    """The three files, in order, as the bytes shown; a send cut short goes on where it stopped."""
+    from metaphi import codeval
+
+    receipt = home / "sent.json"
+    try:
+        got = json.loads(receipt.read_text())
+    except (OSError, ValueError):
+        got = {}
+    if got.get("bundle_sha256") != manifest["bundle_sha256"]:
+        got = {"bundle_sha256": manifest["bundle_sha256"], "files": []}
+
+    def keep() -> None:
+        receipt.write_text(json.dumps(got, indent=1))
+
+    if not got.get("id"):
+        got["id"] = codeval.post(bodies[codeval.PROFILE])["id"]
+        got["files"].append(codeval.PROFILE)
+        keep()
+    for name, post in ((codeval.CHECKS, codeval.post_checks), (codeval.LOGS, codeval.post_logs)):
+        if name not in got["files"]:
+            post(got["id"], bodies[name])
+            got["files"].append(name)
+            keep()
+    got["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    keep()
+    return got["id"]
+
+
+def _sent_before(home: Path) -> dict | None:
+    from metaphi import codeval
+
+    try:
+        got = json.loads((home / "sent.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return got if got.get("at") and codeval.LOGS in got.get("files", []) else None
+
+
+def cmd_codeval(a: argparse.Namespace) -> int | None:
+    from metaphi import codebase_checks, codeval, codeval_draws, codeval_runs
+    from metaphi.steps import Steps
+
+    stream = sys.stderr if a.json else sys.stdout
+    say = codeval.say = _codeval_say(_progress(a), stream)
+    codeval.stream = stream
+    update.current_for(sys.argv[1:], say)
+    say(palette.paint(codeval.NOTICE, "dim", stream))
+    _codeval_signin(say)
+    with codeval.profiled(codeval.repositories(a.paths or ["."]), say) as (doc, kept):
+        if not doc["repos"]:
+            raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
+        name = codeval.run_id(doc)
+        home = Path.cwd() / CODEVAL_HOME / name
+        run = codeval_runs.Run(home)
+        if sent := _sent_before(home):
+            _out(a, {"run": name, "state": "sent", **sent}, f"Already sent, on {sent['at']} ({sent['id']}).")
+            return 0
+        held = _payload(home)
+        if held is None:
+            codeval_runs.awake(os.getpid())
+            asked = {"command": a.run_command}
+            try:
+                same = json.loads((home / "asked.json").read_text()) == asked
+            except (OSError, ValueError):
+                same = False
+            if not same:
+                run.forget()
+                (home / "picks.json").unlink(missing_ok=True)
+                (home / "asked.json").write_text(json.dumps(asked))
+            try:
+                picked = json.loads((home / "picks.json").read_text())
+            except (OSError, ValueError):
+                picked = codeval.picks(doc, kept)
+                (home / "picks.json").write_text(json.dumps(picked, indent=1))
+            edits, revealed = codeval_draws.drawn(doc, picked["seed"])
+            plan = codebase_checks.Plan(test=a.run_command, logs=home / "logs", ledger=run)
+            report = codeval.checked(kept, codeval.targets(doc, kept, picked), edits, plan, say, Steps())
+            for local, got, ids in zip(kept, report["repos"], revealed, strict=True):
+                got["blobs"] = codeval.blobs(local, ids)
+            (home / "checks.json").write_text(json.dumps(report, indent=1))
+            codeval.payload(home, doc, report, kept, picked["pick_id"])
+            held = _payload(home)
+            assert held is not None
+            for local, got in zip(kept, report["repos"], strict=True):
+                say(_result_line(local["name"], got))
+    manifest, bodies = held
+    screen = _send_screen(home, manifest)
+    if a.json or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        step = f"the owner runs `{_codeval_line(a)}` in a terminal to review and send"
+        _out(
+            a,
+            {"run": name, "state": "measured", "results": str(home), "payload": manifest, "next_step": step},
+            "",
+            *screen,
+            "",
+            "Nothing has left this machine. To send, the owner runs in a terminal: " + _codeval_line(a),
         )
-    got = codeval_runs.wait(*found, a.wait or 0)
-    _out(a, got, *_status_lines(got))
-    if got["state"] == "done":
-        return 0
-    if got["state"] == "running":
-        return LATER
-    if got["state"] == "needs_person":
         return NEEDS_PERSON
-    return AUTH if (got.get("error") or {}).get("type") == "auth_error" else FAILED
+    print("\n".join(["", *screen, ""]))
+    try:
+        said = input(SEND_ASK).strip().lower()
+    except EOFError:
+        said = ""
+    if said not in ("y", "yes"):
+        print(f"Nothing sent. The payload stays in {home / codeval.PAYLOAD}")
+        return 0
+    _upload(home, manifest, bodies, say)
+    print(SENT)
+    return 0
 
 
 def _live(a: argparse.Namespace) -> str:
@@ -1809,8 +1435,7 @@ examples:
   kennet twin trace.json --out twins/    write the twin into a directory
   kennet twins list                  your organization's twins, newest first
   kennet twins wait twin_...         come back for a twin: wait until it ends, write its file
-  kennet codeval ./core <git-url>    profile git repositories' history and tests, and send the results
-  kennet codeval status --wait 600   where the last CodeVal run stands; waits until it moves on
+  kennet codeval ./core <git-url>    measure git repositories on this machine; the owner reviews and sends
   kennet delivery list               the task sets your organization holds
   kennet pull <name>@<version>       fetch one into ./<name>-<version>; again, only what differs
   kennet verify ./<name>-<version>   check it against its lock, offline
@@ -1823,22 +1448,16 @@ from an agent or a script (no terminal): add --json; stdout is then the result o
   METAPHI_API_KEY=mai_sk_... kennet twin trace.json --json    no sign-in: a key from the console
 
 exit status: 0 done, 1 failed, 2 usage, 3 sign-in or key needed, 4 try the same call later, 5 upgrade kennet,
-  6 a person must decide (kennet codeval)
+  6 a person must act (kennet codeval: the owner reviews and sends at a terminal)
 """
 
-CODEVAL_STATUS = "codeval-status"
 CODEVAL_EPILOG = """\
-from an agent: ask the person first, then
-  kennet codeval ./core --dry-run --json          what would be sent; nothing is sent
-  kennet codeval ./core --yes --detach --json     on their yes: start it in the background, get its run id
-  kennet codeval status <run> --json --wait 600   come back for it, in this session or the next
-  kennet codeval status --json                    the run updated last, from any directory
+Measures on this machine; the only call before sending asks which past commits to test (commit ids and times).
+Run it again and it goes on where it stopped. When it is done, the same command at a terminal shows exactly what
+would be sent and asks the owner; nothing is sent any other way.
 
-The run is kept in ./kennet-codeval/<run>/; run the same command again and it goes on from the last finished
-commit. A directory named status is given as ./status.
-
-exit status: 0 done, 1 failed, 3 sign-in needed, 4 running (status), 6 a person must decide: `needs.ask` is the
-question to put to them and `needs.options` the commands their answer runs
+exit status: 0 done or sent, 1 stuck (`next_step` says what to do), 3 sign-in needed, 6 measured: the owner runs
+the same command in a terminal to review and send
 """
 
 
@@ -1875,14 +1494,21 @@ def _agents_remove(v: argparse.ArgumentParser) -> None:
 
 
 class _Parser(argparse.ArgumentParser):
-    """`kennet codeval status` reads a run, and `kennet codeval <paths>` starts one: the first word after codeval
-    decides which parser reads the rest."""
+    """`kennet codeval <paths> -- <command>`: what follows `--` is the build-and-test command, one shell line."""
 
     def parse_args(self, args=None, namespace=None):  # type: ignore[override]
         said = list(sys.argv[1:] if args is None else args)
-        if said[:2] == ["codeval", "status"]:
-            said = [CODEVAL_STATUS, *said[2:]]
-        return super().parse_args(said, namespace)
+        command = None
+        if said[:1] == ["codeval"] and "--" in said:
+            at = said.index("--")
+            said, rest = said[:at], said[at + 1 :]
+            if not rest:
+                self.error("give the build-and-test command after --")
+            command = rest[0] if len(rest) == 1 else shlex.join(rest)
+        got = super().parse_args(said, namespace)
+        if said[:1] == ["codeval"]:
+            got.run_command = command
+        return got
 
 
 def parser() -> argparse.ArgumentParser:
@@ -2164,51 +1790,14 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser(
         "codeval",
-        help="profile a git repository's history and tests",
+        help="measure git repositories' history, builds and tests on this machine; the owner reviews and sends",
+        usage="kennet codeval [<path-or-url> ...] [--json] [-- <build-and-test command>]",
         epilog=CODEVAL_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     s.add_argument("paths", nargs="*", metavar="<path-or-url>", help="git clones or URLs (default: this directory)")
-    s.add_argument("--build", metavar="<command>", help="your build command, run before --test")
-    s.add_argument("--test", metavar="<command>", help="your test command; sees KENNET_TESTS and KENNET_JUNIT")
-    s.add_argument(
-        "--deep",
-        action="store_true",
-        help="let a model set up the build when no recipe fits; sends the "
-        "contents of files it reads; needs Docker or Podman",
-    )
-    s.add_argument("--yes", action="store_true", help="send without asking (required away from a terminal)")
-    s.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="run and write what would be sent to ./kennet-codeval/<run>/sent/, sending nothing",
-    )
-    s.add_argument(
-        "--detach",
-        action="store_true",
-        help="run in the background, keeping the machine awake, and return its run id at once; needs --yes",
-    )
-    s.add_argument("--worker", metavar="<run>", help=argparse.SUPPRESS)
     _json_flag(s)
     s.set_defaults(fn=cmd_codeval)
-
-    s = sub.add_parser(
-        CODEVAL_STATUS,
-        prog="kennet codeval status",
-        description="Where a CodeVal run stands, read on this machine: its state, phase and progress, and what a "
-        "person must decide when it needs one.",
-        epilog="exit status: 0 done, 1 failed or stopped, 3 sign-in or key needed, 4 still running, "
-        "6 a person must decide (needs)",
-    )
-    s.add_argument("run", nargs="?", metavar="<run>", help="the run id (default: the run updated last)")
-    s.add_argument(
-        "--wait",
-        type=float,
-        metavar="<seconds>",
-        help="wait up to this long, returning as soon as the run moves on, ends or needs a person",
-    )
-    _json_flag(s)
-    s.set_defaults(fn=cmd_codeval_status)
 
     s = sub.add_parser(
         "tail",

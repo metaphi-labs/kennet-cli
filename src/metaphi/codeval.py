@@ -10,6 +10,8 @@ import json
 import os
 import re
 import secrets
+import shlex
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -21,18 +23,17 @@ from typing import IO, Any
 import httpx
 
 from metaphi import __version__, api, codebase_checks, codebase_env, codebase_sites, config, deid, deid_model, errors
+from metaphi import codebase_reading as reading
 from metaphi.o200k import tokens as _tokens
 from metaphi.steps import Steps
 
-SCHEMA = "kennet.repo_metadata.v15"
-CHECKS_SCHEMA = "kennet.repo_checks.v3"
-LOGS_SCHEMA = "kennet.repo_logs.v1"
+SCHEMA = "kennet.repo_metadata.v16"
+CHECKS_SCHEMA = "kennet.repo_checks.v4"
+LOGS_SCHEMA = "kennet.repo_logs.v2"
 LOG_FILE_MOST = 4 << 20
 NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
-NOTICE = "Runs locally. Results are sent to Metaphi AI."
-LOCAL_NOTICE = "Runs locally."
+NOTICE = "Runs on this machine. Nothing is sent until the owner runs `kennet codeval send`."
 MAX_BLOB = 2_000_000
-MAX_BLOBS = 64
 
 SOURCE = frozenset(
     [
@@ -902,79 +903,30 @@ def run_id(doc: dict[str, Any]) -> str:
     return _key([[r["name"], r["tip"]] for r in doc["repos"]])
 
 
-def _remote_tip(url: str) -> str | None:
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    try:
-        got = subprocess.run(
-            ["git", "-c", "protocol.ext.allow=never", "ls-remote", "--", url, "HEAD"],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    sha = got.stdout.split()[0] if got.returncode == 0 and got.stdout.split() else ""
-    return sha if re.fullmatch(r"[0-9a-f]{40,64}", sha) else None
-
-
-def run_key(paths: list[str]) -> str | None:
-    """The run id `profiled` would give these repositories, read from each one's latest commit alone: a detached
-    run is named before its history is read. None when no repository can be read."""
-    pairs: list[list[str]] = []
-    used: set[str] = set()
-    for n, given in enumerate(paths, 1):
-        name = _name_of(given, n, used)
-        if is_url(given):
-            tip = _remote_tip(given)
-        else:
-            path = Path(given).expanduser().resolve()
-            ok = path.is_dir() and why_not(path) is None
-            tip = _ask(path, "rev-parse", "HEAD") if ok else None
-        if tip:
-            pairs.append([name, tip])
-    return _key(pairs) if pairs else None
+RUNS = 3
+"""Test runs at each past commit, after the change: what tells a flaky test from a broken one."""
 
 
 def checked(
     kept: list[dict],
-    planned: dict[str, Any] | None,
+    picks: list[list[int]],
+    edits: list[list[dict]],
     plan: codebase_checks.Plan,
     say: Callable[[str], None] = print,
-    ref: str | None = None,
     steps: Steps | None = None,
 ) -> dict[str, Any]:
+    """Build and test each repository's tip and its picked past commits. Raises `codebase_checks.Stuck` when a
+    person must act; every unit finished before it is kept in the plan's ledger."""
     import dataclasses
 
-    from metaphi import codebase_harwell, codebase_recipes, codebase_setup
+    from metaphi import codebase_recipes, codebase_setup
 
-    out, images, box, models = [], [], None, []
+    out, images = [], []
     steps = steps or Steps()
-    if plan.test is None:
-        box = codebase_setup.engine()
-        if not box and plan.deep:
-            raise errors.MetaphiError(
-                "--deep runs its commands in containers, and no Docker or Podman is running",
-                code="container_required",
-                next_step="start Docker or Podman, then run the same command again",
-            )
-        if not box:
-            say("No Docker or Podman: running on this machine")
+    box = codebase_setup.engine() if plan.test is None else None
+    if plan.test is None and not box:
+        say("No Docker or Podman: running on this machine")
     engine = box or (codebase_setup.engine() if any(k.get("start") for k in kept) else None)
-
-    def model() -> codebase_setup.Model | None:
-        if not plan.deep or not ref:
-            return None
-        if not models or time.time() > models[-1][1] - 3600:
-            with steps.step("token"):
-                reach = setup_reach(ref)
-            models.append((codebase_setup.Model(reach), reach.get("expires_at") or time.time() + 8 * 3600))
-        return models[-1][0]
-
-    planned = planned or {"repos": [[] for _ in kept], "runs": 0}
-    first = planned.get("first")
     with (
         tempfile.TemporaryDirectory(prefix="kennet-cache-", ignore_cleanup_errors=True) as caches,
         contextlib.ExitStack() as done,
@@ -996,8 +948,7 @@ def checked(
             else:
                 net = None
             done.callback(codebase_setup.NETWORK.clear)
-        for n, (local, targets) in enumerate(zip(kept, planned["repos"], strict=True)):
-            targets = targets[:first] if first is not None else targets
+        for n, (local, targets, planted) in enumerate(zip(kept, picks, edits, strict=True)):
             if plan.ledger and (finished := plan.ledger.get(local["name"], "repo")) is not None:
                 say(f"{local['name']}: checked before; using that result")
                 out.append(finished)
@@ -1010,56 +961,6 @@ def checked(
             if mine.cache:
                 mine.cache.mkdir()
             found, setup, tip = None, [] if plan.test is None else None, {}
-
-            def setup_at(
-                sha: str,
-                where: Path,
-                era: int | None,
-                later: tuple[codebase_setup.Recipe, str] | None,
-                repo=repo,
-                mine=mine,
-                setup=setup,
-                tip=tip,
-            ) -> codebase_setup.Recipe | None:
-                tree = codebase_checks._tree(repo, sha)
-
-                def write(d: Path) -> None:
-                    codebase_checks._write(repo, tree, d)
-
-                with mine.steps.step("setup", era=era):
-                    recipe, how = codebase_recipes.find(
-                        write,
-                        _reader(repo, tree),
-                        set(tree),
-                        "",
-                        box,
-                        where,
-                        say,
-                        plan.run_minutes,
-                        mine.cache,
-                        mine.steps,
-                        skip=later[0] if later else None,
-                        tip=tip if era is None else None,
-                    )
-                    setup.append({"era": era, **how})
-                    if recipe is None and (m := model()) is not None:
-                        recipe, how = codebase_setup.find(
-                            write,
-                            "",
-                            m,
-                            box,
-                            where / "model",
-                            say,
-                            plan.run_minutes,
-                            mine.cache,
-                            mine.steps,
-                            later=later,
-                        )
-                        setup.append({"era": era, **how})
-                if recipe and recipe.image:
-                    images.append(recipe.image)
-                return recipe
-
             services = None
             if engine and local.get("start"):
                 tip_tree = codebase_checks._tree(repo, local["tip"])
@@ -1077,29 +978,30 @@ def checked(
                     say(f"\u2717 {local['name']}'s services did not start ({logs / 'services.log'})")
                 elif services.shared:
                     codebase_setup.NETWORK[:] = ["--network", f"container:{services.shared}"]
-            built = (
-                codebase_harwell.checked(repo, local["tip"], local["name"], api.key(None, False), say, mine.steps)
-                if plan.deep and ref
-                else None
-            )
             try:
-                if plan.ledger:
-                    plan.ledger.phase("setup")
                 if plan.test is None:
                     say(f"Setting up {local['name']}\u2026")
-                    recipe = setup_at(local["tip"], logs / "setup", None, None)
-                    if not recipe:
-                        say(f"\u2717 Could not set up {local['name']} ({logs / 'setup'})")
-                    if recipe:
-                        found = (recipe, box)
-                era_of = (planned.get("eras") or [[]] * len(kept))[n][: len(targets)] or None
-                if plan.ledger:
-                    plan.ledger.phase("checks")
-
-                def repair(era: int, sha: str, tail: str, logs=logs, found=found, setup_at=setup_at):
-                    recipe = setup_at(sha, logs / f"setup-era{era}", era, (found[0], tail))
-                    return (recipe, box) if recipe else None
-
+                    tree = codebase_checks._tree(repo, local["tip"])
+                    with mine.steps.step("setup"):
+                        recipe, how = codebase_recipes.find(
+                            lambda d, r=repo, t=tree: codebase_checks._write(r, t, d),
+                            _reader(repo, tree),
+                            set(tree),
+                            "",
+                            box,
+                            logs / "setup",
+                            say,
+                            plan.run_minutes,
+                            mine.cache,
+                            mine.steps,
+                            tip=tip,
+                        )
+                    setup.append(how)
+                    if recipe is None:
+                        raise _undetected(local, logs / "setup", box)
+                    if recipe.image:
+                        images.append(recipe.image)
+                    found = (recipe, box)
                 got = codebase_checks.run(
                     repo,
                     local["name"],
@@ -1107,38 +1009,31 @@ def checked(
                     local["commits"],
                     local["order"],
                     targets,
-                    planned["runs"],
+                    RUNS,
                     mine,
                     say,
                     found,
-                    era_of,
-                    repair if found and setup is not None else None,
-                    (planned.get("edits") or [[]] * len(kept))[n],
                     local.get("paths"),
                     tip or None,
                     stream,
+                    planted,
                 )
+            except errors.MetaphiError:
+                raise
             except Exception as e:  # noqa: BLE001
                 say(f"\u2717 {local['name']}: tests stopped ({type(e).__name__}: {e})")
-                got = {
-                    "from": "tip",
-                    "runs": planned["runs"],
-                    "build_given": plan.build is not None,
-                    "test_given": plan.test is not None,
-                    "stopped": "error",
-                    "commits": [],
-                    "edits": [],
-                }
+                got = {"from": "tip", "runs": RUNS, "test_given": plan.test is not None, "stopped": "error"}
+                got.update(commits=[], edits=[])
             finally:
                 if services:
                     services.down()
                     codebase_setup.NETWORK[:] = ["--network", net] if net else []
+            got["commands"] = _commands(found, plan.test)
+            got["toolchain"] = _toolchain(found, plan.test)
             if setup:
                 got["setup"] = setup
             if services:
                 got["services"] = services.got
-            if built:
-                got["build_remote"] = built
             got["seconds"] = mine.steps.seconds()
             out.append(got)
             if plan.ledger and got.get("stopped") != "error":
@@ -1168,44 +1063,66 @@ def checked(
     return {"schema": CHECKS_SCHEMA, "tool_version": __version__, "repos": out, "seconds": steps.seconds()}
 
 
-def add_blobs(kept: list[dict], report: dict[str, Any], planned: dict[str, Any] | None) -> None:
-    if not planned or "blobs" not in planned:
-        return
-    for local, got, ids in zip(kept, report["repos"], planned["blobs"], strict=True):
-        if got is None or "blobs" in got:
+def blobs(local: dict, ids: list[int]) -> dict[str, str]:
+    """The raw git blob ids at the tip of the files `codeval_draws.reveal` names: whether the code is public."""
+    tree, paths = codebase_checks._tree(local["path"], local["tip"]), local.get("paths") or {}
+    return {
+        str(i): tree[paths[i]][1]
+        for i in ids
+        if paths.get(i) in tree and re.fullmatch(r"[0-9a-f]{40}", tree[paths[i]][1])
+    }
+
+
+def _undetected(local: dict, logs: Path, box: str | None) -> codebase_checks.Stuck:
+    """No build and test recipe worked: name a missing tool when the tries' logs show one."""
+    tool = next((t for f in sorted(logs.glob("*.log")) if (t := reading.missing(f))), None)
+    paths = shlex.join([local["given"]])
+    if tool and not box:
+        said, step = (
+            f"could not build {local['name']}: {tool} is missing on this machine",
+            f"install {tool} (or start Docker or Podman), then run the same command again",
+        )
+    else:
+        said = f"could not find how to build and test {local['name']}"
+        step = f"give the command that builds and tests it: kennet codeval {paths} -- '<build and test command>'"
+    return codebase_checks.Stuck(said, code="test_command_missing", next_step=step)
+
+
+def _commands(found: tuple | None, given: str | None) -> dict[str, str | None]:
+    """The commands that ran, as they will be shown before sending."""
+    if given is not None:
+        return {"setup": None, "build": None, "test": given}
+    recipe = found[0] if found else None
+    return {k: getattr(recipe, k, None) for k in ("setup", "build", "test")}
+
+
+TOOLS = ("java", "mvn", "gradle", "go", "node", "npm", "python3", "cargo", "rustc", "gcc", "cmake", "dotnet", "make")
+
+
+def _toolchain(found: tuple | None, given: str | None) -> dict[str, str]:
+    """The versions of the tools the commands name, as this machine reports them; in a container, its image."""
+    recipe = found[0] if found else None
+    if recipe is not None and recipe.image and found[1]:
+        return {"image": recipe.image}
+    words = set(re.findall(r"[\w.+-]+", " ".join(filter(None, _commands(found, given).values()))))
+    out = {}
+    for tool in TOOLS:
+        if tool not in words or not shutil.which(tool):
             continue
-        tree, paths = codebase_checks._tree(local["path"], local["tip"]), local.get("paths") or {}
-        got["blobs"] = {
-            str(i): tree[paths[i]][1]
-            for i in ids[:MAX_BLOBS]
-            if isinstance(i, int) and paths.get(i) in tree and re.fullmatch(r"[0-9a-f]{40}", tree[paths[i]][1])
-        }
-
-
-SENT = (
-    "What is sent to Metaphi AI:",
-    "  \u00b7 counts and ids for files, folders, commits and authors",
-    "  \u00b7 the shape of commit messages, never their text",
-    "  \u00b7 build and test output and logs, de-identified on this machine first",
-    "  \u00b7 the git ids of files Metaphi AI names",
-)
-DEEP_SENT = "  \u00b7 with --deep: the contents of files read to set up the build"
-TAKES = "Then it builds and tests past commits here, which can take hours; the time left shows as it runs."
-
-
-def deid_line(summary: dict[str, Any]) -> str:
-    """One line for the preview: what de-identification replaced, by kind, and whether the model pass ran."""
-    got = summary.get("replaced") or {}
-    said = ", ".join(f"{n} {k}" for k, n in sorted(got.items(), key=lambda x: (-x[1], x[0]))) or "nothing found"
-    return f"De-identified here: {said}. Model pass: {summary.get('model')}"
-
-
-def sent_lines(deep: bool = False) -> tuple[str, ...]:
-    return (*SENT, DEEP_SENT) if deep else SENT
-
-
-def packed(doc: dict[str, Any]) -> bytes:
-    return gzip.compress(json.dumps(doc, separators=(",", ":")).encode(), mtime=0)
+        try:
+            got = subprocess.run(
+                [tool, "-version" if tool == "java" else "--version"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        line = next((x.strip() for x in (got.stdout + got.stderr).splitlines() if x.strip()), "")
+        if line:
+            out[tool] = line[:200]
+    return out
 
 
 SEND = httpx.Timeout(30.0, connect=10.0, read=90.0, write=600.0)
@@ -1266,6 +1183,45 @@ def post(body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, 
     )
 
 
+def fingerprint(roots: list[str]) -> str:
+    """A repository's name for the service: the sha256 of its root commit ids, sorted, one per line."""
+    return hashlib.sha256("\n".join(sorted(roots)).encode()).hexdigest()
+
+
+def history(local: dict) -> list[dict[str, Any]]:
+    """The first-parent history, oldest first: commit ids and author times, nothing else."""
+    by_id = {c["commit"]: c for c in local["commits"]}
+    return [
+        {"id": sha, "at": by_id[i]["authored_at"]}
+        for sha, i in sorted(local["order"].items(), key=lambda x: x[1])
+        if by_id[i]["first_parent"]
+    ]
+
+
+def picks(doc: dict[str, Any], kept: list[dict], sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    """Ask which past commits to test. The one call before `kennet codeval send`: ids and times only."""
+    body = {
+        "tool_version": __version__,
+        "repos": [
+            {"fingerprint": fingerprint(r["roots"]), "commits": history(k)}
+            for r, k in zip(doc["repos"], kept, strict=True)
+        ],
+    }
+    got = _call("POST", "/codeval/picks", sleep, json=body)
+    if not isinstance(got.get("pick_id"), str) or not isinstance(got.get("repos"), list):
+        raise errors.APIError("the service sent no picks; run the same command again", code="unavailable")
+    return got
+
+
+def targets(doc: dict[str, Any], kept: list[dict], picked: dict[str, Any]) -> list[list[int]]:
+    """Each repository's picked commits, as its commit numbers in the profile."""
+    by_print = {r.get("fingerprint"): r.get("commits") or [] for r in picked["repos"] if isinstance(r, dict)}
+    return [
+        [k["order"][sha] for sha in by_print.get(fingerprint(r["roots"]), []) if sha in k["order"]]
+        for r, k in zip(doc["repos"], kept, strict=True)
+    ]
+
+
 SCOPE = "kennet:codeval:write"
 
 
@@ -1276,16 +1232,6 @@ def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
             return
         raise _named(errors.AuthError("this API key does not hold access to CodeVal", code="insufficient_scope"))
     _call("GET", "/codeval/access", sleep, answered=False)
-
-
-def plan(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    return _call("POST", f"/codeval/{ref}/plan", sleep)
-
-
-def setup_reach(ref: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    got = _call("POST", f"/codeval/{ref}/setup", sleep)
-    config.check_url(got.get("base_url"), "the setup model's address")
-    return got
 
 
 def post_logs(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
@@ -1300,6 +1246,54 @@ def post_checks(ref: str, body: bytes, sleep: Callable[[float], None] = time.sle
         content=body,
         headers={"content-encoding": "gzip", "content-type": "application/json"},
     )
+
+
+def packed(doc: dict[str, Any]) -> bytes:
+    return gzip.compress(json.dumps(doc, separators=(",", ":")).encode(), mtime=0)
+
+
+PAYLOAD = "payload"
+PROFILE, CHECKS, LOGS = "profile.json.gz", "checks.json.gz", "logs.tar.gz"
+
+
+def bundle_sha256(checks: bytes, logs: bytes) -> str:
+    """The sha256 of the manifest of the checks and logs (`<sha256>  <file>` lines). The profile carries it, so the
+    three files sent are bound to each other."""
+    lines = "".join(f"{hashlib.sha256(b).hexdigest()}  {name}\n" for name, b in ((CHECKS, checks), (LOGS, logs)))
+    return hashlib.sha256(lines.encode()).hexdigest()
+
+
+def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[dict], pick_id: str) -> dict:
+    """Write what `kennet codeval send` would send into <home>/payload/, de-identified here, with its manifest.
+    Raises `deid.Unsafe`, and writes nothing, when a known identifier is left."""
+    checks, checks_said = checks_packed(report, kept)
+    logs, logs_said = logs_packed(home / "logs", pick_id, kept)
+    bundle = bundle_sha256(checks, logs)
+    profile = packed({**doc, "pick_id": pick_id, "bundle_sha256": bundle})
+    out = home / PAYLOAD
+    out.mkdir(exist_ok=True)
+    files = []
+    for name, body, said in ((PROFILE, profile, None), (CHECKS, checks, checks_said), (LOGS, logs, logs_said)):
+        (out / name).write_bytes(body)
+        files.append(
+            {
+                "file": name,
+                "bytes": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                **({"deidentified": said["replaced"]} if said else {}),
+            }
+        )
+    manifest = {
+        "pick_id": pick_id,
+        "bundle_sha256": bundle,
+        "files": files,
+        "model_pass": logs_said["model"],
+        "commands": [
+            {"repo": k["name"], **(r.get("commands") or {})} for k, r in zip(kept, report["repos"], strict=True)
+        ],
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    return manifest
 
 
 def _cut(data: bytes) -> bytes:
@@ -1318,7 +1312,7 @@ def _scrubbers(kept: list[dict]) -> tuple[list[deid.Scrubber], str]:
     return [deid.Scrubber(k, model) for k in deid.known(kept)], said
 
 
-def logs_packed(root: Path, ref: str, kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
+def logs_packed(root: Path, pick_id: str, kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
     """The run's logs as a tar.gz, de-identified here, with what was replaced by kind. Raises `deid.Unsafe`, and
     nothing is sent, when a known identifier is still in the packed bytes."""
     scrubbers, said = _scrubbers(kept)
@@ -1330,7 +1324,10 @@ def logs_packed(root: Path, ref: str, kept: list[dict]) -> tuple[bytes, dict[str
             info.size, info.mode, info.mtime = len(data), 0o644, 0
             tar.addfile(info, io.BytesIO(data))
 
-        add("kennet-logs.json", json.dumps({"schema": LOGS_SCHEMA, "ref": ref, "tool_version": __version__}).encode())
+        add(
+            "kennet-logs.json",
+            json.dumps({"schema": LOGS_SCHEMA, "pick_id": pick_id, "tool_version": __version__}).encode(),
+        )
         for n, (local, scrub) in enumerate(zip(kept, scrubbers, strict=True)):
             repo = local["name"]
             for f in sorted((root / repo).rglob("*")) if (root / repo).is_dir() else []:
@@ -1375,21 +1372,17 @@ __all__ = [
     "LOGS_SCHEMA",
     "NOTICE",
     "SCHEMA",
-    "SENT",
-    "TAKES",
-    "add_blobs",
     "checked",
     "checks_packed",
     "compute",
-    "deid_line",
     "key_ready",
     "logs_packed",
     "packed",
-    "plan",
+    "payload",
+    "picks",
     "post",
     "post_checks",
     "post_logs",
     "profiled",
-    "setup_reach",
     "why_not",
 ]
