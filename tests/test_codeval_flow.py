@@ -1,0 +1,273 @@
+"""`kennet codeval <paths>`, the one command, end to end against a stub service."""
+
+import gzip
+import hashlib
+import json
+import shutil
+import sys
+
+import httpx
+import pytest
+import respx
+from test_codeval import _home, git
+
+from metaphi import cli, codebase_checks, codebase_setup, codeval, codeval_runs, config
+
+API = config.DEFAULT_API
+REF = "cv_" + "5" * 16
+SEED = "ab" * 32
+AWAKE = codeval_runs.awake
+
+
+@pytest.fixture(autouse=True)
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("METAPHI_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("METAPHI_API_KEY", "mai_sk_" + "a" * 43)
+    for var in ("METAPHI_ACCOUNTS", "METAPHI_API", "METAPHI_ALLOW_CUSTOM_HOST"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
+    monkeypatch.setattr(codeval_runs, "awake", lambda pid: None)
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+
+
+@pytest.fixture
+def made(tmp_path):
+    r = tmp_path / "falcon_made"
+    (r / "tests").mkdir(parents=True)
+    git(r, "init", "-q", "-b", "main")
+    (r / "Makefile").write_text(
+        f"test:\n\tPYTHONPATH=. {sys.executable} -m pytest -q -p no:cacheprovider "
+        "--junitxml=$$KENNET_JUNIT/r.xml tests\n"
+    )
+    (r / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    (r / "tests/test_calc.py").write_text("from calc import *\ndef test_add():\n    assert add(1, 2) == 3\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "add")
+    (r / "calc.py").write_text("def add(a, b):\n    return a + b\ndef mul(a, b):\n    return a * b\n")
+    (r / "tests/test_calc.py").write_text(
+        "from calc import *\ndef test_add():\n    assert add(1, 2) == 3\ndef test_mul():\n    assert mul(2, 3) == 6\n"
+    )
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "mul")
+    (r / "calc.py").write_text("def add(a, b):\n    return sum((a, b))\ndef mul(a, b):\n    return a * b\n")
+    git(r, "commit", "-qam", "refactor")
+    return r
+
+
+def _server(picked=(2,), checks=200, logs=200):
+    """The service: /picks names commits by their place in the history it was sent (1 is the oldest)."""
+
+    def picks(request):
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "object": "codeval_picks",
+                "pick_id": "cvp_" + "1" * 16,
+                "repos": [
+                    {
+                        "fingerprint": r["fingerprint"],
+                        "seed": SEED,
+                        "commits": [r["commits"][i - 1]["id"] for i in picked],
+                    }
+                    for r in body["repos"]
+                ],
+            },
+        )
+
+    return {
+        "access": respx.get(f"{API}/codeval/access").mock(return_value=httpx.Response(204)),
+        "picks": respx.post(f"{API}/codeval/picks").mock(side_effect=picks),
+        "profile": respx.post(f"{API}/codeval").mock(return_value=httpx.Response(200, json={"id": REF})),
+        "checks": respx.post(f"{API}/codeval/{REF}/checks").mock(return_value=httpx.Response(checks, json={"id": REF})),
+        "logs": respx.post(f"{API}/codeval/{REF}/logs").mock(return_value=httpx.Response(logs, json={"id": REF})),
+    }
+
+
+def _left(got) -> list[str]:
+    """Every request that carried anything off the machine."""
+    return [c.request.url.path for c in respx.calls if c.request.method != "GET"]
+
+
+@respx.mock
+def test_an_agent_runs_it_and_only_commit_ids_and_times_leave_before_the_owner_sends(made, capsys, tmp_path):
+    got = _server()
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    out = json.loads(capsys.readouterr().out)
+    assert _left(got) == ["/v1/kennet/codeval/picks"]
+    sent = json.loads(got["picks"].calls[0].request.content)
+    assert set(sent) == {"tool_version", "repos"} and len(sent["repos"][0]["commits"]) == 3
+    assert all({"id", "at"} <= set(c) for c in sent["repos"][0]["commits"])
+    for word in ("falcon", "calc", "Sam Seller", "seller@acme.test", "refactor"):
+        assert word not in json.dumps(sent), word
+    assert out["state"] == "measured" and out["next_step"] == (
+        f"the owner runs `kennet codeval {made}` in a terminal to review and send"
+    )
+    payload = _home(tmp_path) / codeval.PAYLOAD
+    assert sorted(p.name for p in payload.iterdir()) == [
+        "checks.json.gz",
+        "logs.tar.gz",
+        "manifest.json",
+        "profile.json.gz",
+    ]
+    checks = json.loads(gzip.decompress((payload / "checks.json.gz").read_bytes()))
+    repo = checks["repos"][0]
+    assert checks["schema"] == codeval.CHECKS_SCHEMA and repo["tip"]["tests"][0]["passed"] == 2
+    assert [(c["commit"], len(c["id"])) for c in repo["commits"]] == [(2, 40)]
+    assert repo["commands"]["test"] == "make test" and repo["toolchain"]
+    assert set(repo["blobs"]) <= {
+        str(f["file"])
+        for f in json.loads(gzip.decompress((payload / "profile.json.gz").read_bytes()))["repos"][0]["files"]
+    }
+    profile = json.loads(gzip.decompress((payload / "profile.json.gz").read_bytes()))
+    assert profile["pick_id"] == "cvp_" + "1" * 16 and profile["bundle_sha256"] == out["payload"]["bundle_sha256"]
+
+    assert cli.main(["codeval", str(made), "--json"]) == cli.NEEDS_PERSON
+    capsys.readouterr()
+    assert _left(got) == ["/v1/kennet/codeval/picks"], "a measured run is not measured again"
+
+
+@respx.mock
+def test_at_a_terminal_the_owner_sees_exactly_what_is_sent_and_yes_sends_those_bytes(
+    made, capsys, tmp_path, monkeypatch
+):
+    got = _server()
+    assert cli.main(["codeval", str(made)]) == cli.NEEDS_PERSON
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    asked = []
+    monkeypatch.setattr("builtins.input", lambda q: asked.append(q) or "n")
+    assert cli.main(["codeval", str(made)]) == 0
+    out = capsys.readouterr().out
+    assert asked == [cli.SEND_ASK] and "Nothing sent" in out and _left(got) == ["/v1/kennet/codeval/picks"]
+    manifest = json.loads((_home(tmp_path) / codeval.PAYLOAD / "manifest.json").read_text())
+    assert f"Bundle sha256: {manifest['bundle_sha256']}" in out and "Commands that ran:" in out
+    assert "  falcon_made: test: make test\n" in out and "de-identified:" in out
+
+    monkeypatch.setattr("builtins.input", lambda q: "y")
+    assert cli.main(["codeval", str(made)]) == 0
+    assert capsys.readouterr().out.rstrip().endswith(cli.SENT)
+    payload = _home(tmp_path) / codeval.PAYLOAD
+    for name, route in (("profile.json.gz", "profile"), ("checks.json.gz", "checks"), ("logs.tar.gz", "logs")):
+        body = got[route].calls[-1].request.content
+        assert body == (payload / name).read_bytes()
+        assert hashlib.sha256(body).hexdigest()[:16] in out
+    assert _left(got)[1:] == [
+        "/v1/kennet/codeval",
+        f"/v1/kennet/codeval/{REF}/checks",
+        f"/v1/kennet/codeval/{REF}/logs",
+    ]
+
+    assert cli.main(["codeval", str(made)]) == 0
+    assert "Already sent, on " in capsys.readouterr().out and got["profile"].call_count == 1
+
+
+@respx.mock
+def test_a_send_cut_short_goes_on_where_it_stopped(made, capsys, monkeypatch):
+    got = _server(checks=503)
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda q: "y")
+    monkeypatch.setattr(codeval.time, "sleep", lambda s: None)
+    assert cli.main(["codeval", str(made)]) != 0
+    assert got["profile"].call_count == 1 and not got["logs"].called
+    got["checks"].mock(return_value=httpx.Response(200, json={"id": REF}))
+    assert cli.main(["codeval", str(made)]) == 0
+    assert got["profile"].call_count == 1 and got["logs"].call_count == 1 and got["picks"].call_count == 1
+
+
+@respx.mock
+def test_no_build_found_stops_with_the_command_to_give(tmp_path, capsys):
+    r = tmp_path / "falcon_bare"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    (r / "notes.txt").write_text("x\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "x")
+    got = _server(picked=())
+    assert cli.main(["codeval", str(r), "--json"]) == cli.FAILED
+    err = json.loads(capsys.readouterr().out)["error"]
+    assert err["code"] == "test_command_missing" and f"kennet codeval {r} -- '" in err["next_step"]
+    assert _left(got) == ["/v1/kennet/codeval/picks"]
+
+
+@respx.mock
+def test_a_command_after_double_dash_is_the_test_and_another_starts_afresh(made, capsys, tmp_path, monkeypatch):
+    got = _server(picked=(2, 3))
+    real, made_runs = codebase_checks._commit, []
+
+    def commit(*a, **k):
+        made_runs.append(a[6])
+        if len(made_runs) == 2:
+            raise KeyboardInterrupt
+        return real(*a, **k)
+
+    monkeypatch.setattr(codebase_checks, "_commit", commit)
+    assert cli.main(["codeval", str(made), "--json", "--", "make", "test"]) == 130
+    capsys.readouterr()
+    journal = (_home(tmp_path) / codeval_runs.JOURNAL).read_text()
+    assert journal.count('"kind":"commit"') == 1 and '"kind":"tip"' in journal
+
+    made_runs.clear()
+    monkeypatch.setattr(codebase_checks, "_commit", lambda *a, **k: made_runs.append(a[6]) or real(*a, **k))
+    assert cli.main(["codeval", str(made), "--json", "--", "make", "test"]) == cli.NEEDS_PERSON
+    out = json.loads(capsys.readouterr().out)
+    assert len(made_runs) == 1 and got["picks"].call_count == 1
+    assert out["next_step"] == f"the owner runs `kennet codeval {made} -- 'make test'` in a terminal to review and send"
+    checks = json.loads(gzip.decompress((_home(tmp_path) / codeval.PAYLOAD / "checks.json.gz").read_bytes()))
+    assert checks["repos"][0]["test_given"] and [c["commit"] for c in checks["repos"][0]["commits"]] == [2, 3]
+
+    shutil.rmtree(_home(tmp_path) / codeval.PAYLOAD)
+    made_runs.clear()
+    assert cli.main(["codeval", str(made), "--json", "--", "true"]) == cli.NEEDS_PERSON
+    capsys.readouterr()
+    assert len(made_runs) == 2 and got["picks"].call_count == 2
+
+
+@respx.mock
+def test_not_signed_in_it_signs_in_with_a_printed_code_and_goes_on(made, capsys, monkeypatch):
+    monkeypatch.delenv("METAPHI_API_KEY")
+    _server()
+    asked = []
+
+    def login(say=print, device=None, **kw):
+        asked.append(device)
+        say("To sign in, open https://accounts.metaphi.ai/device and enter the code ABCD-EFGH")
+        monkeypatch.setenv("METAPHI_API_KEY", "mai_sk_" + "b" * 43)
+        return {"email": "owner@example.com"}
+
+    monkeypatch.setattr(cli.accounts, "login", login)
+    assert cli.main(["codeval", str(made)]) == cli.NEEDS_PERSON
+    out = capsys.readouterr().out
+    assert asked == [True] and "enter the code ABCD-EFGH" in out and "Signed in as owner@example.com" in out
+
+
+@pytest.mark.parametrize(
+    "gone",
+    [["--yes"], ["--dry-run"], ["--detach"], ["--deep"], ["--build", "make"], ["--test", "make"], ["--wait", "5"]],
+)
+def test_removed_flags_are_unknown(gone, capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["codeval", ".", *gone])
+    assert e.value.code == 2 and "unrecognized arguments" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("gone", ["send", "status"])
+def test_removed_subcommands_are_unknown(gone, capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["codeval", gone])
+    assert e.value.code == 2 and f"`kennet codeval {gone}` is gone" in capsys.readouterr().err
+
+
+def test_linux_keeps_awake_with_systemd_inhibit_when_there(monkeypatch):
+    runs = codeval_runs
+    calls: list = []
+    monkeypatch.setattr(runs.subprocess, "Popen", lambda command, **kw: calls.append((command, kw)))
+    monkeypatch.setattr(runs.sys, "platform", "linux")
+    monkeypatch.setattr(runs.shutil, "which", lambda name: None)
+    assert AWAKE(42) is None and not calls
+    monkeypatch.setattr(runs.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert AWAKE(42) == "systemd-inhibit"
+    command, kw = calls[0]
+    assert command[0] == "/usr/bin/systemd-inhibit" and "--what=sleep:idle" in command and kw["start_new_session"]
+    assert command[-1] == "while kill -0 42 2>/dev/null; do sleep 30; done"

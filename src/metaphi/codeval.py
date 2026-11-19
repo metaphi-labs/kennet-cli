@@ -32,7 +32,10 @@ CHECKS_SCHEMA = "kennet.repo_checks.v4"
 LOGS_SCHEMA = "kennet.repo_logs.v2"
 LOG_FILE_MOST = 4 << 20
 NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
-NOTICE = "Runs on this machine. Nothing is sent until the owner runs `kennet codeval send`."
+NOTICE = (
+    "Runs on this machine. Before the owner says yes at a terminal, only commit ids and times leave it, to pick the"
+    " commits to test."
+)
 MAX_BLOB = 2_000_000
 
 SOURCE = frozenset(
@@ -1188,37 +1191,45 @@ def fingerprint(roots: list[str]) -> str:
     return hashlib.sha256("\n".join(sorted(roots)).encode()).hexdigest()
 
 
-def history(local: dict) -> list[dict[str, Any]]:
-    """The first-parent history, oldest first: commit ids and author times, nothing else."""
-    by_id = {c["commit"]: c for c in local["commits"]}
+def history(repo: dict, local: dict) -> list[dict[str, Any]]:
+    """The first-parent history, oldest first: commit ids, author times and the counts `/picks` picks by, no names."""
+    from metaphi import codeval_draws
+
+    by_id, of = {c["commit"]: c for c in local["commits"]}, codeval_draws.facts(repo)
     return [
-        {"id": sha, "at": by_id[i]["authored_at"]}
+        {"id": sha, "at": by_id[i]["authored_at"], **of[i]}
         for sha, i in sorted(local["order"].items(), key=lambda x: x[1])
-        if by_id[i]["first_parent"]
+        if i in of
     ]
 
 
 def picks(doc: dict[str, Any], kept: list[dict], sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Ask which past commits to test. The one call before `kennet codeval send`: ids and times only."""
+    """Ask which past commits to test. The one call before the owner sends: ids and times only."""
     body = {
         "tool_version": __version__,
         "repos": [
-            {"fingerprint": fingerprint(r["roots"]), "commits": history(k)}
+            {"fingerprint": fingerprint(r["roots"]), "commits": history(r, k)}
             for r, k in zip(doc["repos"], kept, strict=True)
         ],
     }
     got = _call("POST", "/codeval/picks", sleep, json=body)
-    if not isinstance(got.get("pick_id"), str) or not isinstance(got.get("repos"), list):
-        raise errors.APIError("the service sent no picks; run the same command again", code="unavailable")
+    repos = got.get("repos")
+    if (
+        not isinstance(got.get("pick_id"), str)
+        or not isinstance(repos, list)
+        or [r.get("fingerprint") if isinstance(r, dict) else None for r in repos]
+        != [r["fingerprint"] for r in body["repos"]]
+        or not all(isinstance(r.get("seed"), str) and re.fullmatch(r"(?:[0-9a-f]{2})+", r["seed"]) for r in repos)
+    ):
+        raise errors.APIError("the service sent no usable picks; run the same command again", code="unavailable")
     return got
 
 
-def targets(doc: dict[str, Any], kept: list[dict], picked: dict[str, Any]) -> list[list[int]]:
-    """Each repository's picked commits, as its commit numbers in the profile."""
-    by_print = {r.get("fingerprint"): r.get("commits") or [] for r in picked["repos"] if isinstance(r, dict)}
+def targets(kept: list[dict], picked: dict[str, Any]) -> list[list[int]]:
+    """Each repository's picked commits, as its commit numbers in the profile; the reply is in profile order."""
     return [
-        [k["order"][sha] for sha in by_print.get(fingerprint(r["roots"]), []) if sha in k["order"]]
-        for r, k in zip(doc["repos"], kept, strict=True)
+        [k["order"][sha] for sha in r.get("commits") or [] if sha in k["order"]]
+        for k, r in zip(kept, picked["repos"], strict=True)
     ]
 
 
@@ -1264,7 +1275,7 @@ def bundle_sha256(checks: bytes, logs: bytes) -> str:
 
 
 def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[dict], pick_id: str) -> dict:
-    """Write what `kennet codeval send` would send into <home>/payload/, de-identified here, with its manifest.
+    """Write what would be sent into <home>/payload/, de-identified here, with its manifest.
     Raises `deid.Unsafe`, and writes nothing, when a known identifier is left."""
     checks, checks_said = checks_packed(report, kept)
     logs, logs_said = logs_packed(home / "logs", pick_id, kept)

@@ -792,7 +792,7 @@ class Unsafe(errors.MetaphiError):
     type = "deid_error"
 
 
-def check(found: collections.Counter, what: str, where: Path | None = None) -> None:
+def check(found: collections.Counter, what: str) -> None:
     """Raise, so that nothing is sent, when a known identifier is still in a payload."""
     if not found:
         return

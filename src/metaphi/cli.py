@@ -414,7 +414,7 @@ def _send_screen(home: Path, manifest: dict) -> list[str]:
     lines.append(f"  Model pass: {manifest['model_pass']}")
     lines.append("Commands that ran:")
     for c in manifest["commands"]:
-        ran = [f"{k}: {c[k]}" for k in ("setup", "build", "test") if c.get(k)]
+        ran = [f"{k}: {c[k]}" for k in ("setup", "build", "test") if c.get(k) not in (None, "", "true")]
         lines.append(f"  {c['repo']}: " + ("; ".join(ran) or "none"))
     lines.append(f"Bundle sha256: {manifest['bundle_sha256']}")
     return lines
@@ -510,9 +510,9 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
             except (OSError, ValueError):
                 picked = codeval.picks(doc, kept)
                 (home / "picks.json").write_text(json.dumps(picked, indent=1))
-            edits, revealed = codeval_draws.drawn(doc, picked["seed"])
+            edits, revealed = codeval_draws.drawn(doc, [r["seed"] for r in picked["repos"]])
             plan = codebase_checks.Plan(test=a.run_command, logs=home / "logs", ledger=run)
-            report = codeval.checked(kept, codeval.targets(doc, kept, picked), edits, plan, say, Steps())
+            report = codeval.checked(kept, codeval.targets(kept, picked), edits, plan, say, Steps())
             for local, got, ids in zip(kept, report["repos"], revealed, strict=True):
                 got["blobs"] = codeval.blobs(local, ids)
             (home / "checks.json").write_text(json.dumps(report, indent=1))
@@ -523,7 +523,7 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                 say(_result_line(local["name"], got))
     manifest, bodies = held
     screen = _send_screen(home, manifest)
-    if a.json or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if a.json or not _interactive():
         step = f"the owner runs `{_codeval_line(a)}` in a terminal to review and send"
         _out(
             a,
@@ -1499,6 +1499,8 @@ class _Parser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):  # type: ignore[override]
         said = list(sys.argv[1:] if args is None else args)
         command = None
+        if said[:1] == ["codeval"] and said[1:2] in (["send"], ["status"]) and not os.path.exists(said[1]):
+            self.error(f"`kennet codeval {said[1]}` is gone: run `kennet codeval <paths>`; it says what to do next")
         if said[:1] == ["codeval"] and "--" in said:
             at = said.index("--")
             said, rest = said[:at], said[at + 1 :]

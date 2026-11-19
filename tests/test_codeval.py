@@ -1,17 +1,16 @@
-import gzip
 import json
 import re
-import shlex
 import shutil
 import subprocess
 import time
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import pytest
 import respx
 
-from metaphi import cli, codebase_checks, codeval, config, errors
+from metaphi import codebase_checks, codeval, config, errors
 
 API = config.DEFAULT_API
 SECRET = [
@@ -263,87 +262,6 @@ def test_blank_lines():
     assert time.monotonic() - started < 5
 
 
-@respx.mock
-def test_key_checked_first(repo, capsys, monkeypatch):
-    respx.get(f"{API}/codeval/access").mock(
-        return_value=httpx.Response(
-            403,
-            json={
-                "error": {
-                    "type": "authentication_error",
-                    "code": "insufficient_scope",
-                    "retryable": False,
-                    "request_id": "r",
-                    "message": "this API key does not hold access to CodeVal",
-                }
-            },
-        )
-    )
-    monkeypatch.setattr(codeval, "compute", lambda *a: pytest.fail("computed"))
-    assert cli.main(["codeval", str(repo), "--yes"]) == 1
-    err = capsys.readouterr().err
-    assert "kennet:codeval:write" in err and "kennet login" in err
-
-
-@respx.mock
-def test_at_a_terminal_nothing_is_sent_or_signed_in_until_the_person_says_yes(made, capsys, tmp_path, monkeypatch):
-    from metaphi import codebase_setup
-
-    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
-    monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))
-    monkeypatch.delenv("METAPHI_API_KEY")
-    monkeypatch.setattr(cli, "_interactive", lambda: True)
-    signed, asked = [], []
-
-    def login(say=print, **kw):
-        signed.append(True)
-        monkeypatch.setenv("METAPHI_API_KEY", "mai_sk_" + "b" * 43)
-        return {"email": "owner@example.com"}
-
-    monkeypatch.setattr(cli.accounts, "login", login)
-    ref = "cv_" + "5" * 16
-    got = _server(ref)
-    monkeypatch.setattr("builtins.input", lambda q: asked.append(q) or "n")
-    assert cli.main(["codeval", str(made)]) in (0, None)
-    out = capsys.readouterr().out
-    assert asked == [cli.SEND_ASK] and "Nothing sent" in out and out.startswith("Runs locally.\n")
-    assert "build ok" not in out and "can take hours" in out
-    assert not signed and not any(r.called for r in got.values())
-    monkeypatch.setattr("builtins.input", lambda q: "y")
-    assert cli.main(["codeval", str(made)]) in (0, None)
-    out = capsys.readouterr().out
-    assert signed and "✓ Signed in as owner@example.com\n" in out and ref in out
-    assert all(got[r].called for r in ("profile", "plan", "checks", "logs"))
-    assert json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]["blobs"] == {}
-
-
-@respx.mock
-def test_signed_in_with_no_key_saved_saves_the_keys_and_goes_on(repo, monkeypatch):
-    monkeypatch.delenv("METAPHI_API_KEY")
-    config.save({"token": "tok", "email": "owner@example.com"})
-    saved = respx.post(f"{config.DEFAULT_ACCOUNTS}/keys/cli").respond(
-        json={
-            "email": "owner@example.com",
-            "org": "acme",
-            "api_key": "mai_sk_" + "c" * 43,
-            "test_api_key": "mai_sk_test_" + "d" * 40,
-        }
-    )
-    respx.get(f"{API}/codeval/access").mock(return_value=httpx.Response(204))
-    monkeypatch.setattr(codeval, "profiled", lambda *a, **k: (_ for _ in ()).throw(SystemExit(0)))
-    with pytest.raises(SystemExit):
-        cli.main(["codeval", str(repo), "--json", "--yes"])
-    assert saved.called
-
-
-def test_away_from_a_terminal_not_signed_in_names_kennet_login(repo, capsys, monkeypatch):
-    monkeypatch.delenv("METAPHI_API_KEY")
-    monkeypatch.setattr(cli, "_interactive", lambda: False)
-    monkeypatch.setattr(cli.accounts, "login", lambda **kw: pytest.fail("signed in"))
-    assert cli.main(["codeval", str(repo), "--yes"]) == 3
-    assert "kennet login" in capsys.readouterr().err
-
-
 def test_tokens_offline(repo, monkeypatch):
     import socket
 
@@ -389,11 +307,30 @@ PYTEST = "PYTHONPATH=. {py} -m pytest -q -p no:cacheprovider --junitxml=$KENNET_
 def _checked(r, say=lambda s: None, commits=(2, 3), runs=2, **kw):
     import sys
 
-    from metaphi import codebase_checks
-
     plan = codebase_checks.Plan(**{"test": PYTEST.format(py=sys.executable), **kw})
-    with codeval.profiled([str(r)], say=say) as (doc, kept):
-        return doc, codeval.checked(kept, {"runs": runs, "repos": [list(commits)]}, plan, say)
+    with mock.patch.object(codeval, "RUNS", runs), codeval.profiled([str(r)], say=say) as (doc, kept):
+        return doc, codeval.checked(kept, [list(commits)], [[]], plan, say)
+
+
+def test_a_test_run_past_its_minutes_is_cut_off(tested):
+    slow = _checked(tested, test='test -z "$KENNET_TESTS" || sleep 30', run_minutes=0.02)[1]["repos"][0]
+    assert all(c["post"]["tests"][0]["exit"] is None for c in slow["commits"])
+
+
+def test_a_command_missing_at_the_tip_stops_the_run_with_what_to_install(tested, tmp_path):
+    lines: list[str] = []
+    with pytest.raises(codebase_checks.Stuck) as e:
+        _checked(
+            tested,
+            say=lines.append,
+            runs=1,
+            test="echo 'cc: FALCON-TOOLCHAIN at /home/sam'; falcon-cc tests",
+            logs=tmp_path / "logs",
+        )
+    told = "\n".join(lines)
+    assert e.value.code == "toolchain_missing" and "falcon-cc is missing" in str(e.value)
+    assert "finished commits are kept" in e.value.next_step and "falcon-cc" in told
+    assert "FALCON-TOOLCHAIN" in (tmp_path / "logs" / "falcon_calc" / "000-tip.test-1.log").read_text()
 
 
 def test_runs_recorded(tested):
@@ -411,24 +348,6 @@ def test_runs_recorded(tested):
     sent = json.dumps(report) + json.dumps(doc)
     for word in ("hunter2", "test_mul", "calc.py"):
         assert word not in sent, word
-
-
-def test_blobs_named_by_the_plan(tested):
-    from metaphi import codebase_checks
-
-    plan = codebase_checks.Plan(test="true")
-    with codeval.profiled([str(tested)], say=lambda s: None) as (_doc, kept):
-        f = next(i for i, p in kept[0]["paths"].items() if p == "calc.py")
-        gone = max(kept[0]["paths"]) + 1
-        report = codeval.checked(kept, {"runs": 0, "repos": [[]]}, plan)
-        plain = json.loads(json.dumps(report))
-        codeval.add_blobs(kept, report, {"runs": 0, "repos": [[]], "blobs": [[f, gone]]})
-        codeval.add_blobs(kept, plain, {"runs": 0, "repos": [[]]})
-    blob = subprocess.run(
-        ["git", "-C", str(tested), "rev-parse", "HEAD:calc.py"], capture_output=True, text=True, check=True
-    ).stdout
-    assert report["repos"][0]["blobs"] == {str(f): blob.strip()} and "blobs" not in plain["repos"][0]
-    assert any("never their text" in x for x in codeval.SENT)
 
 
 def test_commit_order(tested):
@@ -452,31 +371,6 @@ def test_no_junit(tested):
     by = {c["commit"]: c for c in report["repos"][0]["commits"]}
     assert by[2]["post"]["tests"][0]["outcomes"] == {} and by[2]["post"]["tests"][0]["reported"] is None
     assert [t["exit"] for t in by[2]["pre"]["tests"]] == [1] and [t["exit"] for t in by[2]["post"]["tests"]] == [0, 0]
-
-
-def test_build_fail_and_timeout(tested):
-    old_only = 'test -z "$KENNET_TESTS"'
-    got = _checked(tested, build=old_only)[1]["repos"][0]
-    assert got["tip"]["build"]["exit"] == 0 and len(got["commits"]) == 2
-    assert all(c["post"]["build"]["exit"] == 1 and c["post"]["tests"] == [] for c in got["commits"])
-    slow = _checked(tested, test=f"{old_only} || sleep 30", run_minutes=0.02)[1]["repos"][0]
-    assert all(c["post"]["tests"][0]["exit"] is None for c in slow["commits"])
-
-
-def test_failed_run_output(tested, tmp_path, capfd):
-    lines: list[str] = []
-    doc, report = _checked(
-        tested,
-        say=lines.append,
-        runs=1,
-        test="./run-tests.sh",
-        logs=tmp_path / "logs",
-        build='test -z "$KENNET_TESTS" || { echo "cc: FALCON-TOOLCHAIN missing"; exit 4; }',
-    )
-    told = "\n".join(lines)
-    assert "FALCON-TOOLCHAIN" not in told and told.count(" build failed (") == 2
-    assert "exit 127" in told and "run-tests.sh: not found" in told.replace("No such file or directory", "not found")
-    assert str(tmp_path / "logs") in told and "FALCON" not in json.dumps(report) + json.dumps(doc)
 
 
 def test_repo_untouched(tested):
@@ -547,100 +441,6 @@ def test_logs_packed(tmp_path):
     big = said["0/big.log"]
     assert len(big) < codeval.LOG_FILE_MOST + 100 and big.startswith(b"A") and big.endswith(b"BZ")
     assert said["kennet-logs.json"]["schema"] == codeval.LOGS_SCHEMA
-
-
-def _said(*calls):
-    return httpx.Response(
-        200,
-        json={
-            "content": [
-                {"type": "tool_use", "id": f"t{n}", "name": name, "input": args} for n, (name, args) in enumerate(calls)
-            ],
-            "usage": {"input_tokens": 100, "output_tokens": 10},
-        },
-    )
-
-
-def _no_commands(tested, model_said, first=1, ended=(0, None)):
-    import sys  # noqa: F401
-
-    ref = "cv_" + "2" * 16
-    respx.get(f"{API}/codeval/access").mock(return_value=httpx.Response(204))
-    respx.post(f"{API}/codeval").mock(return_value=httpx.Response(200, json={"id": ref}))
-    respx.post(f"{API}/codeval/{ref}/plan").mock(
-        return_value=httpx.Response(200, json={"runs": 1, "repos": [[2, 3]], "first": first})
-    )
-    setup = respx.post(f"{API}/codeval/{ref}/setup").mock(
-        return_value=httpx.Response(
-            200,
-            json={"base_url": "https://gateway.metaphi.ai/anthropic", "token": "kgw1.t", "model": "claude-sonnet-5-5"},
-        )
-    )
-    model = respx.post("https://gateway.metaphi.ai/anthropic/v1/messages").mock(side_effect=model_said)
-    checks = respx.post(f"{API}/codeval/{ref}/checks").mock(return_value=httpx.Response(200, json={"id": ref}))
-    logs = respx.post(f"{API}/codeval/{ref}/logs").mock(return_value=httpx.Response(200, json={"id": ref}))
-    respx.post(f"{API}/codeval/{ref}/progress").mock(return_value=httpx.Response(204))
-    assert cli.main(["codeval", str(tested), "--deep", "--yes"]) in ended
-    names, said = _unpacked(logs.calls[-1].request.content)
-    assert not any("conversation.jsonl" in n or "/run-" in n for n in names)
-    for line in said.get("0/setup/turns.jsonl", b"").splitlines():
-        for a in json.loads(line)["content"] if json.loads(line)["role"] == "user" else []:
-            assert isinstance(a, dict) and "\n" not in a["content"]
-    return setup, model, json.loads(gzip.decompress(checks.calls[-1].request.content))["repos"][0]
-
-
-@respx.mock
-def test_setup(tested, capsys, tmp_path, engine):
-    import sys
-
-    setup, model, sent = _no_commands(
-        tested,
-        [
-            _said(("start", {"image": "python:3.12"})),
-            _said(("run", {"command": "ls tests"})),
-            _said(("propose", {"setup": "", "build": "true", "test": PYTEST.format(py=sys.executable)})),
-        ],
-    )
-    assert setup.call_count == 1 and model.call_count == 3
-    first = json.loads(model.calls[0].request.content)
-    assert model.calls[0].request.headers["x-api-key"] == "kgw1.t" and first["model"] == "claude-sonnet-5-5"
-    assert "ls tests" in json.dumps(json.loads(model.calls[2].request.content)["messages"])
-    assert (sent["test_given"], sent["build_given"]) == (False, False)
-    assert [
-        (s["by"], s["era"], s["worked"], s["steps"], s["container"], s["tokens"], s["why"]) for s in sent["setup"]
-    ] == [("local", None, False, 0, True, 0, "none_found"), ("model", None, True, 3, True, 330, None)]
-    assert sent["tip"]["tests"][0]["reported"] == 2 and sent["tip"]["tests"][0]["passed"] == 2
-    assert [c["commit"] for c in sent["commits"]] == [2]
-    assert sorted(sent["commits"][0]["pre"]["tests"][0]["outcomes"].values()) == ["failed", "passed"]
-    assert "pytest" not in json.dumps(sent) and "ls tests" not in json.dumps(sent)
-    from metaphi.steps import NAMES
-
-    assert {"history", "setup", "setup_model", "setup_proposals", "tip", "commits", "build", "test"} <= set(
-        sent["seconds"]
-    ) <= NAMES and all(isinstance(v, int) for v in sent["seconds"].values())
-    logs = _home(tmp_path) / "logs" / "falcon_calc"
-    steps = [json.loads(x)["step"] for x in (logs / "steps.jsonl").open()]
-    assert "setup_model" in steps and "build" in steps
-    assert "pytest" in (logs / "setup" / "model" / "recipe.json").read_text()
-    out = capsys.readouterr().out
-    assert "builds · 2 of 2 tests pass" in out
-    calls = [json.loads(x) for x in (engine.parent / "calls.jsonl").open()]
-    started = [c for c in calls if c[:2] == ["run", "-d"]]
-    assert started and all("--cap-drop=ALL" in c and "--security-opt=no-new-privileges" in c for c in started)
-    assert any(c[:2] == ["network", "create"] for c in calls)
-
-
-@respx.mock
-def test_setup_fails(tested, tmp_path, engine):
-    _, _, sent = _no_commands(
-        tested, [_said(("give_up", {"why": "license", "reason": "needs a licensed compiler"}))], first=2, ended=(6,)
-    )
-    assert [x["worked"] for x in sent["setup"]] == [False, False] and "tip" not in sent
-    assert sent["setup"][1]["why"] == "gave_up_license"
-    assert sent["commits"] == [{"commit": 2, "broke": True}, {"commit": 3, "broke": True}]
-    assert "licensed" not in json.dumps(sent)
-    logs = _home(tmp_path) / "logs" / "falcon_calc"
-    assert "licensed" in (logs / "setup" / "model" / "gave-up.txt").read_text()
 
 
 def test_recipe_edits_files():
@@ -736,60 +536,6 @@ def test_folder_of_clones(repo, tested, tmp_path):
     assert codeval.repositories([str(repo)]) == [str(repo)]
 
 
-def test_prompt_cache():
-    from metaphi import codebase_setup
-
-    got = codebase_setup._cached(
-        [{"role": "user", "content": "a"}, {"role": "user", "content": [{"type": "text", "text": "b"}]}]
-    )
-    assert got[0] == {"role": "user", "content": "a"} and got[1]["content"][-1]["cache_control"] == {
-        "type": "ephemeral"
-    }
-
-
-def test_setup_again(monkeypatch, tmp_path):
-    from metaphi import codebase_checks
-    from metaphi.codebase_setup import Recipe
-
-    tip, old = (
-        (Recipe("", "cmake", "ctest", "img:tip"), "docker"),
-        (Recipe("", "./configure", "make check", "img:old"), "docker"),
-    )
-    side = lambda code: {"build": {"exit": code, "seconds": 1}, "tests": []}
-    monkeypatch.setattr(codebase_checks, "_side", lambda *a, **k: (side(0), []))
-    monkeypatch.setattr(
-        codebase_checks,
-        "_commit",
-        lambda repo, plan, runs, logs, label, parent, sha, say, with_, jobs: {
-            "pre": side(0 if with_ is old or sha.startswith("new") else 1),
-            "post": side(0 if with_ is old or sha.startswith("new") else 1),
-        },
-    )
-    commits = [{"commit": i, "parents": [0]} for i in (1, 2, 3)]
-    order = {"base": 0, "old1": 1, "old2": 2, "new3": 3}
-    asked = []
-
-    def repair(era, sha, tail):
-        asked.append((era, sha))
-        return old
-
-    plan = codebase_checks.Plan(logs=tmp_path)
-    got = codebase_checks.run(
-        tmp_path, "r", "tip", commits, order, [1, 2, 3], 1, plan, lambda s: None, tip, [1, 1, 2], repair
-    )
-    assert asked == [(1, "old1")]
-    assert [r["post"]["build"]["exit"] for r in got["commits"]] == [0, 0, 0]
-    asked.clear()
-    got = codebase_checks.run(
-        tmp_path, "r", "tip", commits, order, [1, 3, 2], 1, plan, lambda s: None, tip, [1, 1, 1], repair
-    )
-    assert asked == [(1, "old1")] and [r["post"]["build"]["exit"] for r in got["commits"]] == [0, 0, 0]
-    got = codebase_checks.run(
-        tmp_path, "r", "tip", commits, order, [1, 2], 1, plan, lambda s: None, tip, [1, 1], lambda era, sha, tail: tip
-    )
-    assert [r["post"]["build"]["exit"] for r in got["commits"]] == [1, 1]
-
-
 def test_sites():
     from metaphi import codebase_sites as cs
 
@@ -844,7 +590,8 @@ def test_breaks(planted):
             {"file": f, "op": "logic", "nth": 0},
         ]
         lines: list[str] = []
-        got = codeval.checked(kept, {"runs": 2, "repos": [[]], "edits": [edits]}, plan, lines.append)
+        with mock.patch.object(codeval, "RUNS", 2):
+            got = codeval.checked(kept, [[]], [edits], plan, lines.append)
     out = got["repos"][0]
     assert out["stopped"] == "done" and out["commits"] == []
     rows = out["edits"]
@@ -858,52 +605,6 @@ def test_breaks(planted):
     for word in ("hunter2", "sums.py", "test_add", "assert", "caught", "flaky"):
         assert word not in sent, word
     assert not any("assert" in line for line in lines) and sum("-tip build ok (" in x for x in lines) == 3
-
-
-def _server(ref, commits=((2,),), runs=1, checks=200, logs=200, blobs=None, **more):
-    respx.get(f"{API}/codeval/access").mock(return_value=httpx.Response(204))
-    blobs = blobs or [[] for _ in commits]
-    return {
-        "profile": respx.post(f"{API}/codeval").mock(return_value=httpx.Response(200, json={"id": ref})),
-        "plan": respx.post(f"{API}/codeval/{ref}/plan").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "runs": runs,
-                    "repos": [list(p) for p in commits],
-                    "run_minutes": 5,
-                    "hours": 1,
-                    "blobs": blobs,
-                    **more,
-                },
-            )
-        ),
-        "setup": respx.post(f"{API}/codeval/{ref}/setup"),
-        "checks": respx.post(f"{API}/codeval/{ref}/checks").mock(return_value=httpx.Response(checks, json={"id": ref})),
-        "logs": respx.post(f"{API}/codeval/{ref}/logs").mock(return_value=httpx.Response(logs, json={"id": ref})),
-        "progress": respx.post(f"{API}/codeval/{ref}/progress").mock(return_value=httpx.Response(204)),
-    }
-
-
-@respx.mock
-def test_default_finds_nothing(repo, capsys, tmp_path, monkeypatch):
-    from metaphi import codebase_setup
-
-    monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))
-    ref = "cv_" + "4" * 16
-    got = _server(ref, commits=((2,),))
-    assert cli.main(["codeval", str(repo), "--yes"]) == cli.NEEDS_PERSON
-    assert not got["setup"].called and got["plan"].called and got["checks"].called and got["logs"].called
-    said = json.loads(got["progress"].calls[-1].request.content)
-    assert said == {"phase": "done", "done": 1, "total": 1, "needs": "test_command_missing"}
-    sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
-    assert [(s["by"], s["worked"], s["why"], s["tries"]) for s in sent["setup"]] == [("local", False, "none_found", [])]
-    assert sent["commits"] == [{"commit": 2, "broke": True}] and sent["edits"] == []
-    out = capsys.readouterr().out
-    assert f"No build or test found in {repo}" in out and "--build '<build>' --test '<test>'" in out
-    assert "--deep" in out and "✓ Sent cv_" in out
-    assert out.index("the shape of commit messages, never their text") < out.index("✓ Sent")
-    assert json.loads((_home(tmp_path) / "codeval.json").read_text())["repos"]
 
 
 @pytest.fixture
@@ -928,109 +629,6 @@ def made(tmp_path):
     git(r, "add", ".")
     git(r, "commit", "-qm", "mul")
     return r
-
-
-@respx.mock
-def test_default_finds_commands(made, capsys, tmp_path, monkeypatch):
-    from metaphi import codebase_setup
-
-    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
-    monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))
-    ref = "cv_" + "6" * 16
-    got = _server(ref, commits=((2,),))
-    assert cli.main(["codeval", str(made), "--yes"]) in (0, None)
-    sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))["repos"][0]
-    assert [(s["by"], s["worked"], s["steps"], s["report"]) for s in sent["setup"]] == [("local", True, 1, "junit")]
-    assert [(t["build"]["exit"], t["test"]["reported"]) for t in sent["setup"][0]["tries"]] == [(0, 2)]
-    assert sent["tip"]["tests"][0]["reported"] == 2 and sent["tip"]["tests"][0]["passed"] == 2
-    assert got["plan"].call_count == 1 and sent["commits"][0]["pre"]["tests"][0]["outcomes"]
-    out = capsys.readouterr().out
-    assert not got["setup"].called and "No build or test found" not in out
-    assert "building and testing 1 past commit" in out and "it stops after 1 h" in out
-    assert "make test" in (_home(tmp_path) / "logs" / "falcon_made" / "setup" / "recipe.json").read_text()
-    assert json.loads((_home(tmp_path) / "plan.json").read_text())["repos"] == [[2]]
-
-
-@respx.mock
-def test_rerun_sends_what_was_kept(tested, capsys, tmp_path):
-    ref = "cv_" + "1" * 16
-    got = _server(ref, commits=((2,),), checks=503)
-    assert cli.main(["codeval", str(tested), "--test", "echo SAID-BY-TESTS", "--yes", "--json"]) != 0
-    assert "run the same command again" in json.loads(capsys.readouterr().out)["error"]["next_step"]
-    sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))
-    assert [c["commit"] for c in sent["repos"][0]["commits"]] == [2] and sent["repos"][0]["test_given"]
-    assert not got["logs"].called and got["plan"].call_count == 1
-    got["checks"].mock(return_value=httpx.Response(200, json={"id": ref}))
-    got["logs"].mock(return_value=httpx.Response(503))
-    assert cli.main(["codeval", str(tested), "--test", "echo SAID-BY-TESTS", "--yes"]) != 0
-    assert got["plan"].call_count == 1 and json.loads(gzip.decompress(got["checks"].calls[-1].request.content)) == sent
-    names, said = _unpacked(got["logs"].calls[-1].request.content)
-    assert said["kennet-logs.json"]["ref"] == ref and b"SAID-BY-TESTS" in said["0/000-tip.test-1.log"]
-    assert not any(tested.name in n for n in names)
-    checks = got["checks"].call_count
-    got["logs"].mock(return_value=httpx.Response(200, json={"id": ref}))
-    assert cli.main(["codeval", str(tested), "--test", "echo SAID-BY-TESTS", "--yes"]) in (0, None)
-    assert got["checks"].call_count == checks and got["plan"].call_count == 1
-    assert cli.main(["codeval", str(tested), "--test", "true", "--yes"]) in (0, None)
-    assert got["plan"].call_count == 2
-
-
-@respx.mock
-def test_blobs_in_the_one_run(tested, capsys, tmp_path):
-    ref = "cv_" + "7" * 16
-    doc = _document([str(tested)], say=lambda s: None)
-    f = next(r["file"] for r in doc["repos"][0]["files"] if r["at_tip"] and r["kind"] == "source")
-    got = _server(ref, commits=((2,),), checks=503, blobs=[[f]])
-    run = ["codeval", str(tested), "--test", "true", "--yes"]
-    assert cli.main(run) != 0
-    out = capsys.readouterr().out
-    assert "never their text" in out
-    kept = _home(tmp_path) / "checks.json"
-    old = json.loads(kept.read_text())
-    blob = old["repos"][0].pop("blobs")
-    kept.write_text(json.dumps(old))
-    got["checks"].mock(return_value=httpx.Response(200, json={"id": ref}))
-    assert cli.main(run) in (0, None) and "Using the checks from the last run" in capsys.readouterr().out
-    sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))
-    assert sent["schema"] == codeval.CHECKS_SCHEMA and sent["repos"][0]["blobs"] == blob
-    assert list(blob) == [str(f)] and len(blob[str(f)]) == 40 and got["plan"].call_count == 1
-
-
-@respx.mock
-def test_says_what_is_sent_before_sending(tested, capsys, tmp_path):
-    ref = "cv_" + "9" * 16
-    said = []
-    got = _server(ref)
-    got["profile"].mock(
-        side_effect=lambda request: said.append(capsys.readouterr().err) or httpx.Response(200, json={"id": ref})
-    )
-    assert cli.main(["codeval", str(tested), "--test", "true", "--json", "--yes"]) in (0, None)
-    assert "never their text" in said[0] and "can take hours" in said[0]
-    assert "build ok (1/1)" in capsys.readouterr().err
-
-
-@respx.mock
-def test_needs_login(repo, monkeypatch, tmp_path):
-    monkeypatch.delenv("METAPHI_API_KEY")
-    access = respx.get(f"{API}/codeval/access").mock(return_value=httpx.Response(204))
-    assert cli.main(["codeval", str(repo), "--json", "--yes"]) != 0
-    assert not access.called and not (tmp_path / "kennet-codeval").exists()
-
-
-@respx.mock
-def test_flag_errors(tested, capsys):
-    respx.get(f"{API}/codeval/access").mock(return_value=httpx.Response(204))
-    assert cli.main(["codeval", str(tested), "--build", "make"]) != 0
-    assert cli.main(["codeval", str(tested), "--test", "make", "--deep"]) != 0
-    said = capsys.readouterr().err
-    assert "build_without_test" in said and "deep_with_test" in said
-    assert cli.main(["codeval", str(tested), "--deep", "--dry-run"]) != 0
-    assert cli.main(["codeval", str(tested), "--dry-run", "--yes"]) != 0
-    said = capsys.readouterr().err
-    assert "dry_run_with_deep" in said and "dry_run_with_yes" in said
-    for gone in ("--commits", "--send", "--hide-names", "--stream", "--test-logs", "--run-minutes", "--test-hours"):
-        with pytest.raises(SystemExit):
-            cli.main(["codeval", str(tested), gone])
 
 
 WORKFLOW = """
@@ -1249,21 +847,6 @@ def test_work_dir_is_a_git_repo_with_its_submodules(tmp_path):
     )
 
 
-def test_the_closing_line_says_the_build_ran_when_only_the_tests_failed():
-    tries = [
-        {
-            "build": {"exit": 0, "seconds": 5},
-            "test": {"exit": 1, "seconds": 6, "report": "summary", "reported": 10, "passed": 0},
-        }
-    ]
-    said = cli._rerun("./core", tries)
-    assert "In ./core, 0 of 10 tests passed" in said and "No build or test found" not in said
-    assert "No build or test found in ./core" in cli._rerun("./core", [])
-    unread = [{"build": {"exit": 0, "seconds": 5}, "test": {"exit": 0, "seconds": 6, "report": None, "reported": None}}]
-    said = cli._rerun("./core", unread)
-    assert "the tests passed but how many ran could not be read" in said and "database" not in said
-
-
 @respx.mock
 def test_a_request_modal_cut_off_is_sent_again_and_said_never_a_crash(monkeypatch):
     said: list[str] = []
@@ -1335,81 +918,6 @@ def test_gaps_and_interface(tmp_path):
     assert c2["shared_idents"] == 1 and c1["shared_idents"] == 0
 
 
-@respx.mock
-def test_every_byte_sent_is_kept_and_matched_against_the_servers_receipt(made, capsys, tmp_path, monkeypatch):
-    import hashlib
-
-    from metaphi import codebase_setup
-
-    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
-    monkeypatch.setattr(codebase_setup, "find", lambda *a, **k: pytest.fail("model"))
-    ref = "cv_" + "8" * 16
-    got = _server(ref)
-
-    def receipt(route):
-        return lambda request: httpx.Response(
-            200,
-            json={
-                "id": ref,
-                "received": {"bytes": len(request.content), "sha256": hashlib.sha256(request.content).hexdigest()},
-            },
-        )
-
-    for route in ("profile", "checks", "logs"):
-        got[route].mock(side_effect=receipt(route))
-    assert cli.main(["codeval", str(made), "--yes"]) in (0, None)
-    sent = _home(tmp_path) / "sent"
-    rows = {r["file"]: r for r in json.loads((sent / "sent.json").read_text())}
-    assert sorted(rows) == ["checks.json.gz", "codeval.json.gz", "logs.tar.gz"]
-    for name, route in (("codeval.json.gz", "profile"), ("checks.json.gz", "checks"), ("logs.tar.gz", "logs")):
-        assert (sent / name).read_bytes() == got[route].calls[-1].request.content and rows[name]["matched"] is True
-
-
-def test_away_from_a_terminal_nothing_is_sent_without_yes(made, capsys, tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "_interactive", lambda: False)
-    monkeypatch.setattr(codeval, "post", lambda *a: pytest.fail("sent"))
-    assert cli.main(["codeval", str(made), "--json"]) != 0
-    err = json.loads(capsys.readouterr().out)["error"]
-    assert err["code"] == "confirmation_required" and err["next_step"].endswith(f"codeval {made} --json --yes")
-    assert not (tmp_path / "kennet-codeval").exists()
-
-
-def test_dry_run_writes_what_would_be_sent(made, capsys, tmp_path, monkeypatch):
-    monkeypatch.delenv("METAPHI_API_KEY")
-    monkeypatch.setattr(codeval, "post", lambda *a: pytest.fail("sent"))
-    assert cli.main(["codeval", str(made), "--dry-run", "--json"]) in (0, None)
-    got = json.loads(capsys.readouterr().out)
-    assert got["sent"] is False and got["reference"] is None
-    rows = json.loads((_home(tmp_path) / "sent" / "sent.json").read_text())
-    assert sorted(r["file"] for r in rows) == ["checks.json.gz", "codeval.json.gz", "logs.tar.gz"]
-    assert all(r["sent"] is False for r in rows)
-    for name in ("logs.tar.gz", "checks.json.gz"):
-        cleared = next(r for r in rows if r["file"] == name)["deidentified"]
-        assert set(cleared) == {"replaced", "model"} and cleared["model"].startswith("not run")
-
-
-def test_deep_needs_a_container_engine(tested, capsys, monkeypatch):
-    from metaphi import codebase_setup
-
-    monkeypatch.setattr(codebase_setup, "engine", lambda: None)
-    monkeypatch.setattr(codeval, "setup_reach", lambda *a: pytest.fail("model"))
-    assert cli.main(["codeval", str(tested), "--deep", "--yes", "--json"]) == cli.NEEDS_PERSON
-    got = json.loads(capsys.readouterr().out)
-    assert got["error"]["code"] == got["needs"]["code"] == "container_required" and got["state"] == "needs_person"
-    assert "Docker or Podman" in got["needs"]["ask"] and got["next_step"].endswith("--deep --json --yes")
-    assert [o["run"].endswith(f"codeval {tested} --json --yes") for o in got["needs"]["options"]] == [False, True]
-
-
-@respx.mock
-def test_the_setup_model_address_is_checked(monkeypatch):
-    ref = "cv_" + "3" * 16
-    respx.post(f"{API}/codeval/{ref}/setup").respond(
-        json={"base_url": "https://elsewhere.example/v1", "token": "t", "model": "m"}
-    )
-    with pytest.raises(config.Error, match="not on metaphi.ai"):
-        codeval.setup_reach(ref)
-
-
 def test_tags_carry_their_commit_date_and_release_shape_but_not_their_names(repo):
     git(repo, "tag", "falcon-launch", "HEAD~1")
     git(repo, "tag", "-a", "v2.1.0", "-m", "billing", "HEAD", GIT_COMMITTER_DATE="2024-03-01T00:00:00Z")
@@ -1428,7 +936,7 @@ def test_tags_carry_their_commit_date_and_release_shape_but_not_their_names(repo
 
 
 @pytest.mark.skipif(shutil.which("go") is None, reason="needs go")
-def test_the_tip_run_measures_go_line_coverage_by_file_id_and_what_the_build_installed(tmp_path):
+def test_the_tip_run_measures_go_line_coverage_by_file_id(tmp_path):
     from metaphi import codebase_checks
 
     r = tmp_path / "falcon_core"
@@ -1445,12 +953,13 @@ def test_the_tip_run_measures_go_line_coverage_by_file_id_and_what_the_build_ins
     )
     git(r, "add", "-A")
     git(r, "commit", "-qm", "ledger")
-    plan = codebase_checks.Plan(test="go test ./...", build="mkdir -p vendor && head -c 4096 /dev/zero > vendor/blob")
+    plan = codebase_checks.Plan(test="go test ./...")
     with codeval.profiled([str(r)], say=lambda s: None) as (_doc, kept):
         ledger = next(i for i, p in kept[0]["paths"].items() if p == "billing/ledger.go")
-        got = codeval.checked(kept, {"runs": 1, "repos": [[]], "edits": [[]]}, plan, lambda s: None)
+        with mock.patch.object(codeval, "RUNS", 1):
+            got = codeval.checked(kept, [[]], [[]], plan, lambda s: None)
     tip = got["repos"][0]["tip"]
-    assert tip["tests"][0]["exit"] == 0 and tip["installed_bytes"] >= 4096
+    assert tip["tests"][0]["exit"] == 0
     assert tip["coverage"] == [{"file": ledger, "unit": "statement", "total": 2, "covered": 1}]
     assert "offline" not in tip and tip["memory_peak_bytes"] is None
     for word in ("ledger", "billing", "falcon_core", "hunter2", "TestAdd"):
@@ -1601,205 +1110,3 @@ def _fails_on(n: int):
         return real(*a, **k)
 
     return commit, made
-
-
-@respx.mock
-def test_a_run_that_stops_goes_on_from_the_last_finished_commit(tested, capsys, tmp_path, monkeypatch):
-    from metaphi import codeval_runs
-
-    ref = "cv_" + "a" * 16
-    got = _server(ref, commits=((2, 3),))
-    run = ["codeval", str(tested), "--test", "echo SAID-BY-TESTS", "--yes", "--json"]
-    commit, made = _fails_on(2)
-    monkeypatch.setattr(codebase_checks, "_commit", commit)
-    assert cli.main(run) == 130
-    capsys.readouterr()
-    home = _home(tmp_path)
-    kept = [json.loads(x) for x in (home / codeval_runs.JOURNAL).read_text().splitlines()]
-    assert [(k["kind"], k["key"]) for k in kept] == [("tip", ""), ("commit", "2")]
-    assert not (home / "checks.json").exists() and not got["checks"].called
-    assert cli.main(["codeval", "status", "--json"]) == cli.FAILED
-    said = json.loads(capsys.readouterr().out)
-    assert said["state"] == "stopped" and said["error"]["code"] == "interrupted" and said["phase"] == "checks"
-    assert said["next_step"] == shlex.join(["kennet", "codeval", str(tested), "--test", "echo SAID-BY-TESTS"]) + (
-        " --json --yes"
-    )
-    assert (said["done"], said["total"]) == (1, 2)
-
-    commit, made = _fails_on(0)
-    monkeypatch.setattr(codebase_checks, "_commit", commit)
-    assert cli.main(run) in (0, None)
-    out = capsys.readouterr()
-    assert json.loads(out.out) == {"reference": ref, "sent": True, "results": str(home), "run": home.name}
-    assert len(made) == 1 and "the latest commit was run before" in out.err and "1 of 2 past commits" in out.err
-    assert got["plan"].call_count == 1 and got["profile"].call_count == 1
-    sent = json.loads(gzip.decompress(got["checks"].calls[-1].request.content))
-    assert [c["commit"] for c in sent["repos"][0]["commits"]] == [2, 3] and sent["repos"][0]["tip"]["tests"]
-    assert set(sent) == {"schema", "tool_version", "repos", "seconds"}
-    assert json.loads((home / "checks.json").read_text()) == sent
-    reports = [json.loads(c.request.content) for c in got["progress"].calls]
-    assert all(set(r) == {"phase", "done", "total", "needs"} for r in reports)
-    assert [r["phase"] for r in reports][-1] == "done" and reports[-1]["done"] == reports[-1]["total"] == 2
-    assert {r["phase"] for r in reports} <= set(codeval_runs.PHASES) and all(r["needs"] is None for r in reports)
-    assert cli.main(["codeval", "status", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["state"] == "done"
-
-
-@respx.mock
-def test_a_failed_progress_report_never_fails_the_run(tested, capsys):
-    ref = "cv_" + "b" * 16
-    got = _server(ref, commits=((2,),))
-    got["progress"].mock(side_effect=httpx.ConnectError("no"))
-    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) in (0, None)
-    assert got["progress"].called and json.loads(capsys.readouterr().out)["sent"] is True
-
-
-@respx.mock
-def test_other_checks_asked_start_the_checks_afresh(tested, capsys, tmp_path, monkeypatch):
-    from metaphi import codeval_runs
-
-    ref = "cv_" + "c" * 16
-    got = _server(ref, commits=((2, 3),))
-    commit, _made = _fails_on(2)
-    monkeypatch.setattr(codebase_checks, "_commit", commit)
-    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) == 130
-    commit, made = _fails_on(0)
-    monkeypatch.setattr(codebase_checks, "_commit", commit)
-    assert cli.main(["codeval", str(tested), "--test", "echo again", "--yes", "--json"]) in (0, None)
-    assert len(made) == 2 and got["plan"].call_count == 2
-    kept = (_home(tmp_path) / codeval_runs.JOURNAL).read_text()
-    assert kept.count('"kind":"commit"') == 2
-
-
-@respx.mock
-def test_status_waits_until_the_run_moves_on(tmp_path, capsys, monkeypatch):
-    import threading
-
-    from metaphi import codeval_runs
-
-    monkeypatch.setattr(codeval_runs, "WAIT_POLL_S", 0.02)
-    home = tmp_path / "elsewhere" / "kennet-codeval" / "run_0123456789abcdef"
-    run = codeval_runs.Run(home, home.name, "kennet codeval ./core --yes --detach")
-    codeval_runs.register(home.name, home)
-    run.plan({"core": 3})
-    assert cli.main(["codeval", "status", "--json"]) == cli.LATER
-    said = json.loads(capsys.readouterr().out)
-    assert (said["state"], said["phase"], said["done"], said["total"]) == ("running", "profile", 0, 3)
-    assert said["next_step"] == f"kennet codeval status {home.name} --json --wait 600"
-
-    later = threading.Timer(0.2, run.put, ("core", "commit", 7, {"commit": 7}))
-    later.start()
-    began = time.monotonic()
-    assert cli.main(["codeval", "status", home.name, "--json", "--wait", "30"]) == cli.LATER
-    assert time.monotonic() - began < 10 and json.loads(capsys.readouterr().out)["done"] == 1
-    later.join()
-
-    run.needs({"code": "container_required", "ask": "?", "options": [], "action_url": None}, "kennet codeval x")
-    assert cli.main(["codeval", "status", "--json", "--wait", "30"]) == cli.NEEDS_PERSON
-    said = json.loads(capsys.readouterr().out)
-    assert said["needs"]["code"] == "container_required"
-    assert said["next_step"] == f"cd {tmp_path / 'elsewhere'} && kennet codeval x"
-    run.finished()
-    assert cli.main(["codeval", "status"]) == 0
-    assert capsys.readouterr().out.startswith(f"{home.name}  done  done  3 of 3")
-    assert cli.main(["codeval", "status", "run_ffffffffffffffff", "--json"]) == cli.FAILED
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "run_not_found"
-    assert cli.main(["codeval", "status", "../../etc", "--json"]) == cli.FAILED
-
-
-def test_a_worker_that_died_reads_as_stopped(tmp_path, capsys):
-    from metaphi import codeval_runs
-
-    home = tmp_path / "kennet-codeval" / "run_00000000000000aa"
-    codeval_runs.Run(home, home.name, "kennet codeval . --yes --detach")
-    codeval_runs.register(home.name, home)
-    dead = subprocess.Popen(["true"])
-    dead.wait()
-    codeval_runs.started(home, home.name, dead.pid, "kennet codeval . --yes --detach")
-    assert cli.main(["codeval", "status", "--json"]) == cli.FAILED
-    said = json.loads(capsys.readouterr().out)
-    assert said["state"] == "stopped" and said["next_step"] == "kennet codeval . --yes --detach"
-
-
-class _Started:
-    def __init__(self, calls, pid):
-        self.calls, self.pid = calls, pid
-
-    def __call__(self, command, **kw):
-        self.calls.append((command, kw))
-        return self
-
-
-@respx.mock
-def test_detach_starts_the_run_in_its_own_session_and_keeps_the_machine_awake(tested, capsys, tmp_path, monkeypatch):
-    import os
-    import sys
-
-    from metaphi import codeval_runs
-
-    calls: list = []
-    monkeypatch.setattr(codeval_runs, "_start", _Started(calls, os.getpid()))
-    monkeypatch.setattr(codeval_runs.sys, "platform", "darwin")
-    monkeypatch.setattr(codeval_runs.shutil, "which", lambda name: f"/usr/bin/{name}")
-    ref = "cv_" + "e" * 16
-    got = _server(ref, commits=((2,),))
-    assert cli.main(["codeval", str(tested), "--test", "true", "--detach", "--json"]) != 0
-    err = json.loads(capsys.readouterr().out)["error"]
-    assert err["code"] == "confirmation_required" and err["next_step"].endswith("--json --yes --detach")
-    assert not calls and not got["profile"].called
-
-    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--detach", "--json"]) == 0
-    said = json.loads(capsys.readouterr().out)
-    run = said["run"]
-    assert said["pid"] == os.getpid() and said["state"] == "running" and said["awake"] == "caffeinate"
-    assert said["next_step"] == f"kennet codeval status {run} --json --wait 600"
-    (worker, kw), (awake, _) = calls
-    assert worker[: len(codeval_runs._self())] == [sys.executable, "-m", "metaphi"]
-    assert worker[len(codeval_runs._self()) :] == [
-        "codeval",
-        str(tested),
-        "--test",
-        "true",
-        "--yes",
-        "--worker",
-        run,
-        "--json",
-    ]
-    assert kw["start_new_session"] and kw["stdin"] is subprocess.DEVNULL
-    assert awake == ["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())]
-    assert not got["profile"].called
-    assert cli.main(["codeval", "status", "--json"]) == cli.LATER
-    assert json.loads(capsys.readouterr().out)["run"] == run
-
-    assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--detach", "--json"]) == 0
-    again = json.loads(capsys.readouterr().out)
-    assert len(calls) == 2 and (again["run"], again["state"]) == (run, "running")
-    with monkeypatch.context() as m:
-        m.setattr(cli.os, "getpid", lambda: 1)
-        assert cli.main(["codeval", str(tested), "--test", "true", "--yes", "--json"]) == cli.FAILED
-    busy = json.loads(capsys.readouterr().out)["error"]
-    assert busy["code"] == "run_in_progress" and busy["next_step"] == said["next_step"]
-
-    assert cli.main(["codeval", *worker[len(codeval_runs._self()) + 1 :]]) in (0, None)
-    done = json.loads(capsys.readouterr().out)
-    assert done["run"] == run and done["sent"] is True and got["checks"].called
-    with codeval.profiled([str(tested)], lambda s: None) as (doc, _kept):
-        assert codeval.run_id(doc) == run
-    assert cli.main(["codeval", "status", run, "--json"]) == 0
-    said = json.loads(capsys.readouterr().out)
-    assert said["state"] == "done" and said["reference"] == ref and said["next_step"] is None
-
-
-def test_linux_keeps_awake_with_systemd_inhibit_when_there(monkeypatch):
-    from metaphi import codeval_runs
-
-    calls: list = []
-    monkeypatch.setattr(codeval_runs, "_start", _Started(calls, 1))
-    monkeypatch.setattr(codeval_runs.sys, "platform", "linux")
-    monkeypatch.setattr(codeval_runs.shutil, "which", lambda name: None)
-    assert codeval_runs.awake(42) is None and not calls
-    monkeypatch.setattr(codeval_runs.shutil, "which", lambda name: f"/usr/bin/{name}")
-    assert codeval_runs.awake(42) == "systemd-inhibit"
-    command, kw = calls[0]
-    assert command[0] == "/usr/bin/systemd-inhibit" and "--what=sleep:idle" in command and kw["start_new_session"]
-    assert command[-1] == "while kill -0 42 2>/dev/null; do sleep 30; done"

@@ -1,4 +1,5 @@
-"""What CodeVal runs besides the picked commits, drawn here from the profile and the seed `/picks` returned.
+"""What CodeVal runs besides the picked commits, drawn here from the profile and each repository's seed from `/picks`,
+and the facts of each commit `/picks` picks from.
 
 The service draws the same from the profile it receives and the seed it keeps, and refuses checks that differ, so
 these functions must stay identical to its own. A shared test vector (tests/test_codeval_draws.py) holds them so.
@@ -20,6 +21,13 @@ SNAPSHOT_BELOW = 10
 OPS = ("cmp", "logic", "arith", "bool")
 REVEAL = 64
 REVEAL_BYTES = 1024
+BUILD_FILES = frozenset(
+    [
+        *("makefile", "cmakelists.txt", "go.mod", "package.json", "pom.xml", "build.gradle", "build.gradle.kts"),
+        *("cargo.toml", "pyproject.toml", "setup.py", "requirements.txt", "gemfile", "composer.json", "pubspec.yaml"),
+        *("build.xml", "dockerfile"),
+    ]
+)
 NOT_CODE = frozenset(
     [
         *("md", "txt", "rst", "adoc", "pdf", "docx", "doc", "json", "yaml", "yml", "toml", "ini", "xml", "env"),
@@ -29,9 +37,9 @@ NOT_CODE = frozenset(
 )
 
 
-def draw(seed: str, what: bytes, n: int) -> random.Random:
-    """The draw of `what` (b"plant" or b"reveal") for the profile's `n`th repository."""
-    return random.Random(bytes.fromhex(seed) + what + n.to_bytes(2, "big"))
+def draw(seed: str, what: bytes) -> random.Random:
+    """The draw of `what` (b"plant" or b"reveal") from one repository's seed."""
+    return random.Random(bytes.fromhex(seed) + what)
 
 
 def candidates(repo: dict) -> tuple[list[int], list[int]]:
@@ -49,6 +57,48 @@ def candidates(repo: dict) -> tuple[list[int], list[int]]:
         lines = sum(max(x["added"], 0) + max(x["deleted"], 0) for x in src)
         (wide if len(src) >= WIDE[0] and lines > WIDE[1] else narrow).append(c["commit"])
     return wide, narrow
+
+
+def eras(repo: dict) -> dict[int, int]:
+    """Each first-parent commit's build era, from the root build files its history added and removed."""
+    files = {f["file"]: f for f in repo["files"]}
+    root = lambda i: files[i]["depth"] == 0 and files[i]["known_name"] in BUILD_FILES
+    have: set[str] = set()
+    seen: list[frozenset] = []
+    of = {}
+    for c in repo["commits"]:
+        if not c["first_parent"]:
+            continue
+        for x in c["files"]:
+            if x.get("old_file") and root(x["old_file"]):
+                have.discard(files[x["old_file"]]["known_name"])
+            if root(x["file"]):
+                (have.discard if x["status"] == "D" else have.add)(files[x["file"]]["known_name"])
+        if not seen or seen[-1] != frozenset(have):
+            seen.append(frozenset(have))
+        of[c["commit"]] = len(seen)
+    return of
+
+
+def facts(repo: dict) -> dict[int, dict]:
+    """What `/picks` needs of each first-parent commit to pick as `candidates` and `eras` do: numbers and booleans,
+    never names. The service recomputes them from the profile it is sent and refuses a difference."""
+    files, era = {f["file"]: f for f in repo["files"]}, eras(repo)
+    out = {}
+    for c in repo["commits"]:
+        if not c["first_parent"]:
+            continue
+        src = [x for x in c["files"] if files[x["file"]]["kind"] == "source"]
+        out[c["commit"]] = {
+            "has_parent": bool(c["parents"] and c["parents"][0]),
+            "source_files": len(src),
+            "source_lines": sum(max(x["added"], 0) + max(x["deleted"], 0) for x in src),
+            "test_code": any(
+                files[x["file"]]["kind"] == "test" and files[x["file"]]["ext"] not in NOT_CODE for x in c["files"]
+            ),
+            "era": era[c["commit"]],
+        }
+    return out
 
 
 def _spread(ids: list[int], n: int, era_of: dict[int, int], rng: random.Random) -> list[int]:
@@ -95,13 +145,13 @@ def reveal(repo: dict, rng: random.Random) -> list[int]:
     return sorted(rng.sample(ids, min(REVEAL, len(ids))))
 
 
-def drawn(doc: dict, seed: str) -> tuple[list[list[dict]], list[list[int]]]:
-    """Each repository's edits and revealed files, in profile order."""
+def drawn(doc: dict, seeds: list[str]) -> tuple[list[list[dict]], list[list[int]]]:
+    """Each repository's edits and revealed files, in profile order, from its own seed."""
     repos = doc["repos"]
     return (
-        [plant(r, draw(seed, b"plant", n)) for n, r in enumerate(repos)],
-        [reveal(r, draw(seed, b"reveal", n)) for n, r in enumerate(repos)],
+        [plant(r, draw(seed, b"plant")) for r, seed in zip(repos, seeds, strict=True)],
+        [reveal(r, draw(seed, b"reveal")) for r, seed in zip(repos, seeds, strict=True)],
     )
 
 
-__all__ = ["draw", "drawn", "plant", "reveal"]
+__all__ = ["draw", "drawn", "eras", "facts", "plant", "reveal"]

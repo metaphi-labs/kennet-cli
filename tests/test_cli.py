@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import re
 from urllib.parse import parse_qsl
 
 import httpx
@@ -279,15 +280,15 @@ def test_mnda_for_a_person_in_no_organization_names_org_create(capsys):
     assert got["code"] == "no_organization" and got["next_step"] == "kennet org create <name>"
 
 
-def test_the_partner_guide_names_only_commands_and_flags_the_parser_takes(capsys):
+def test_the_partner_guide_is_one_paragraph_naming_one_command_the_parser_takes(capsys):
     assert cli.main(["skill", "show", "partner"]) == 0
     guide = capsys.readouterr().out
-    assert guide == skill.PARTNER_GUIDE and f"kennet {cli.__version__}" in guide.splitlines()[0]
-    lines = [x.split("#")[0].strip() for x in guide.splitlines() if x.startswith("kennet ")]
-    assert len(lines) >= 4
-    for line in lines:
-        cli.parser().parse_args(line.split()[1:])
-    assert "skill show partner" in skill.PARTNER_STUB and skill.PARTNER_STUB.startswith("---\nname: kennet-partner\n")
+    assert guide == skill.PARTNER_GUIDE and guide.count("\n\n") == 0
+    commands = {c for c in re.findall(r"`(kennet [^`]+)`", guide) if not c.startswith("kennet codeval`")}
+    assert {c.split()[1] for c in commands} == {"codeval"}
+    cli.parser().parse_args(["codeval", "./core", "--json"])
+    assert "--yes" not in guide and "codeval send" not in guide and "codeval status" not in guide
+    assert skill.PARTNER_GUIDE in skill.PARTNER_STUB and skill.PARTNER_STUB.startswith("---\nname: kennet-partner\n")
 
 
 @respx.mock
