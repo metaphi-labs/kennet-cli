@@ -31,6 +31,10 @@ SCHEMA = "kennet.repo_metadata.v16"
 CHECKS_SCHEMA = "kennet.repo_checks.v4"
 LOGS_SCHEMA = "kennet.repo_logs.v2"
 LOG_CHUNK = 8 << 20
+LOGS_PART = 64 << 20  # logs past this go in parts of exactly this many bytes, the last one shorter
+LOGS_PARTS = 32
+MAX_LOGS = LOGS_PART * LOGS_PARTS  # 2 GiB gzipped: the most one run sends
+LOGS_DEID = "kennet-deid.json"  # the tar's last member: what was replaced, by kind
 NOTICE = (
     "Runs on this machine. Before the owner says yes at a terminal, only commit ids and times leave it, to pick the"
     " commits to test."
@@ -1261,6 +1265,23 @@ def post_logs(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep
     return _call("POST", f"/codeval/{ref}/logs", sleep, content=body, headers={"content-type": "application/gzip"})
 
 
+def post_logs_part(ref: str, n: int, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    """Part n of the logs: the tar's bytes from n * LOGS_PART on. The same part sent again is taken."""
+    headers = {"content-type": "application/octet-stream"}
+    return _call("POST", f"/codeval/{ref}/logs/parts/{n}", sleep, content=body, headers=headers)
+
+
+def complete_logs(ref: str, parts: list[str], sleep: Callable[[float], None] = time.sleep) -> list[int]:
+    """Join the parts sent: [] once the logs are received, else the parts the service names as not received."""
+    try:
+        _call("POST", f"/codeval/{ref}/logs/complete", sleep, json={"parts": parts})
+    except errors.MetaphiError as e:
+        if m := re.search(r"parts ([\d, ]+) were not received", str(e)):
+            return [int(n) for n in m.group(1).split(",")]
+        raise
+    return []
+
+
 def post_checks(ref: str, body: bytes, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     return _call(
         "POST",
@@ -1279,24 +1300,48 @@ PAYLOAD = "payload"
 PROFILE, CHECKS, LOGS = "profile.json.gz", "checks.json.gz", "logs.tar.gz"
 
 
-def bundle_sha256(checks: bytes, logs: bytes) -> str:
-    """The sha256 of the manifest of the checks and logs (`<sha256>  <file>` lines). The profile carries it, so the
-    three files sent are bound to each other."""
-    lines = "".join(f"{hashlib.sha256(b).hexdigest()}  {name}\n" for name, b in ((CHECKS, checks), (LOGS, logs)))
+def bundle_sha256(checks: str, logs: str) -> str:
+    """The sha256 of the manifest of the checks and logs, by their sha256s (`<sha256>  <file>` lines). The profile
+    carries it, so the three files sent are bound to each other."""
+    lines = f"{checks}  {CHECKS}\n{logs}  {LOGS}\n"
     return hashlib.sha256(lines.encode()).hexdigest()
+
+
+def sha256_of(f: Path) -> str:
+    h = hashlib.sha256()
+    with f.open("rb") as r:
+        while chunk := r.read(LOG_CHUNK):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[dict], pick_id: str) -> dict:
     """Write what would be sent into <home>/payload/, de-identified here, with its manifest.
-    Raises `deid.Unsafe`, and writes nothing, when a known identifier is left."""
+    Raises `deid.Unsafe`, and writes nothing, when a known identifier is left; past MAX_LOGS, says so."""
     checks, checks_said = checks_packed(report, kept)
-    logs, logs_said = logs_packed(home / "logs", pick_id, kept)
-    bundle = bundle_sha256(checks, logs)
-    profile = packed({**doc, "pick_id": pick_id, "bundle_sha256": bundle})
     out = home / PAYLOAD
     out.mkdir(exist_ok=True)
+    logs = out / LOGS
+    with tempfile.NamedTemporaryFile(dir=out, delete=False) as tmp:
+        try:
+            logs_said = _logs_tar(home / "logs", pick_id, kept, tmp, checks_said)
+        except BaseException:
+            Path(tmp.name).unlink(missing_ok=True)
+            raise
+    Path(tmp.name).replace(logs)
+    if (size := logs.stat().st_size) > MAX_LOGS:
+        logs.unlink()
+        raise errors.MetaphiError(
+            f"the logs of this run come to {size / (1 << 30):.1f} GiB gzipped, past the 2 GiB one run can send; "
+            "nothing was sent",
+            code="logs_too_large",
+            next_step="run `kennet codeval` on fewer repositories at a time, so each run's logs stay under 2 GiB",
+        )
+    logs_sha = sha256_of(logs)
+    bundle = bundle_sha256(hashlib.sha256(checks).hexdigest(), logs_sha)
+    profile = packed({**doc, "pick_id": pick_id, "bundle_sha256": bundle})
     files = []
-    for name, body, said in ((PROFILE, profile, None), (CHECKS, checks, checks_said), (LOGS, logs, logs_said)):
+    for name, body, said in ((PROFILE, profile, None), (CHECKS, checks, checks_said)):
         (out / name).write_bytes(body)
         files.append(
             {
@@ -1306,6 +1351,7 @@ def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[
                 **({"deidentified": said["replaced"]} if said else {}),
             }
         )
+    files.append({"file": LOGS, "bytes": size, "sha256": logs_sha, "deidentified": logs_said["replaced"]})
     manifest = {
         "pick_id": pick_id,
         "bundle_sha256": bundle,
@@ -1344,43 +1390,53 @@ def _scrubbers(kept: list[dict]) -> tuple[list[deid.Scrubber], str]:
     return [deid.Scrubber(k, model) for k in deid.known(kept)], said
 
 
-def logs_packed(root: Path, pick_id: str, kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
-    """Every log of the run, whole, as a tar.gz, de-identified here, with what was replaced by kind. Raises
+def logs_packed(root: Path, pick_id: str, kept: list[dict], checks: dict | None = None) -> tuple[bytes, dict]:
+    """`_logs_tar` as bytes."""
+    with tempfile.TemporaryFile() as f:
+        said = _logs_tar(root, pick_id, kept, f, checks)
+        f.seek(0)
+        return f.read(), said
+
+
+def _logs_tar(root: Path, pick_id: str, kept: list[dict], packed_file: IO[bytes], checks: dict | None) -> dict:
+    """Every log of the run, whole, as a tar.gz written to `packed_file`, de-identified here; returns what was
+    replaced by kind. Its last member, LOGS_DEID, counts what was replaced in the logs and in the checks. Raises
     `deid.Unsafe`, and nothing is sent, when a known identifier is still in what would be packed."""
     scrubbers, said = _scrubbers(kept)
     left: collections.Counter = collections.Counter()
-    with tempfile.TemporaryFile() as packed_file:
-        with tarfile.open(fileobj=packed_file, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
-
-            def add(name: str, size: int, body: IO[bytes]) -> None:
-                info = tarfile.TarInfo(name)
-                info.size, info.mode, info.mtime = size, 0o644, 0
-                tar.addfile(info, body)
-
-            about = json.dumps({"schema": LOGS_SCHEMA, "pick_id": pick_id, "tool_version": __version__}).encode()
-            add("kennet-logs.json", len(about), io.BytesIO(about))
-            for n, (local, scrub) in enumerate(zip(kept, scrubbers, strict=True)):
-                repo = local["name"]
-                for f in sorted((root / repo).rglob("*")) if (root / repo).is_dir() else []:
-                    if f.is_symlink() or not f.is_file():
-                        continue
-                    name = scrub.text(f"{n}/{f.relative_to(root / repo).as_posix()}")
-                    left |= scrub.known.left(name.encode("utf-8", "surrogateescape"))
-                    with tempfile.TemporaryFile() as clean:
-                        try:
-                            _scrubbed(f, scrub, clean, left)
-                        except OSError:
-                            continue
-                        size = clean.tell()
-                        clean.seek(0)
-                        add(name, size, clean)
-        deid.check(left, "the logs")
-        packed_file.seek(0)
-        body = packed_file.read()
     counts: collections.Counter = collections.Counter()
-    for scrub in scrubbers:
-        counts.update(scrub.counts)
-    return body, deid.summary(counts, said)
+    with tarfile.open(fileobj=packed_file, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+
+        def add(name: str, size: int, body: IO[bytes]) -> None:
+            info = tarfile.TarInfo(name)
+            info.size, info.mode, info.mtime = size, 0o644, 0
+            tar.addfile(info, body)
+
+        about = json.dumps({"schema": LOGS_SCHEMA, "pick_id": pick_id, "tool_version": __version__}).encode()
+        add("kennet-logs.json", len(about), io.BytesIO(about))
+        for n, (local, scrub) in enumerate(zip(kept, scrubbers, strict=True)):
+            repo = local["name"]
+            for f in sorted((root / repo).rglob("*")) if (root / repo).is_dir() else []:
+                if f.is_symlink() or not f.is_file():
+                    continue
+                name = scrub.text(f"{n}/{f.relative_to(root / repo).as_posix()}")
+                left |= scrub.known.left(name.encode("utf-8", "surrogateescape"))
+                with tempfile.TemporaryFile() as clean:
+                    try:
+                        _scrubbed(f, scrub, clean, left)
+                    except OSError:
+                        continue
+                    size = clean.tell()
+                    clean.seek(0)
+                    add(name, size, clean)
+        deid.check(left, "the logs")
+        for scrub in scrubbers:
+            counts.update(scrub.counts)
+        replaced = deid.summary(counts, said)
+        told = {"logs": replaced["replaced"], "checks": (checks or {}).get("replaced", {}), "model_pass": said}
+        body = json.dumps(told, sort_keys=True).encode()
+        add(LOGS_DEID, len(body), io.BytesIO(body))
+    return replaced
 
 
 def checks_packed(report: dict[str, Any], kept: list[dict]) -> tuple[bytes, dict[str, Any]]:

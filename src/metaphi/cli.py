@@ -432,45 +432,90 @@ def _send_screen(home: Path, manifest: dict) -> list[str]:
     return lines
 
 
-def _payload(home: Path) -> tuple[dict, dict[str, bytes]] | None:
-    """The run's payload as written when it finished, its bytes checked against its manifest; None if not whole."""
+def _payload(home: Path) -> dict | None:
+    """The run's manifest as written when it finished, its files' bytes checked against it and against its bundle
+    sha256; None if not whole."""
     from metaphi import codeval
 
     out = home / codeval.PAYLOAD
     try:
         manifest = json.loads((out / "manifest.json").read_text())
-        bodies = {f["file"]: (out / f["file"]).read_bytes() for f in manifest["files"]}
+        held = {f["file"]: codeval.sha256_of(out / f["file"]) for f in manifest["files"]}
+        if any(held[f["file"]] != f["sha256"] for f in manifest["files"]):
+            return None
+        if codeval.bundle_sha256(held[codeval.CHECKS], held[codeval.LOGS]) != manifest["bundle_sha256"]:
+            return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    if any(hashlib.sha256(bodies[f["file"]]).hexdigest() != f["sha256"] for f in manifest["files"]):
-        return None
-    return manifest, bodies
+    return manifest
 
 
-def _upload(home: Path, manifest: dict, bodies: dict[str, bytes], say: Callable[[str], None]) -> str:
-    """The three files, in order, as the bytes shown; a send cut short goes on where it stopped."""
-    from metaphi import codeval
-
-    receipt = home / "sent.json"
+def _receipt(home: Path, manifest: dict) -> dict:
+    """sent.json, for this payload: what of it was sent. A receipt for other bytes counts for nothing."""
     try:
-        got = json.loads(receipt.read_text())
+        got = json.loads((home / "sent.json").read_text())
     except (OSError, ValueError):
         got = {}
-    if got.get("bundle_sha256") != manifest["bundle_sha256"]:
+    if not isinstance(got, dict) or got.get("bundle_sha256") != manifest["bundle_sha256"]:
         got = {"bundle_sha256": manifest["bundle_sha256"], "files": []}
+    return got
+
+
+def _upload(home: Path, manifest: dict, say: Callable[[str], None]) -> str:
+    """The three files, in order, as the bytes shown; a send cut short goes on where it stopped. Logs past
+    LOGS_PART go in parts, then are joined; a part the service names as not received is sent again."""
+    from metaphi import codeval
+
+    out = home / codeval.PAYLOAD
+    got = _receipt(home, manifest)
 
     def keep() -> None:
-        receipt.write_text(json.dumps(got, indent=1))
+        (home / "sent.json").write_text(json.dumps(got, indent=1))
 
     if not got.get("id"):
-        got["id"] = codeval.post(bodies[codeval.PROFILE])["id"]
+        got["id"] = codeval.post((out / codeval.PROFILE).read_bytes())["id"]
         got["files"].append(codeval.PROFILE)
         keep()
-    for name, post in ((codeval.CHECKS, codeval.post_checks), (codeval.LOGS, codeval.post_logs)):
-        if name not in got["files"]:
-            post(got["id"], bodies[name])
-            got["files"].append(name)
-            keep()
+    if codeval.CHECKS not in got["files"]:
+        codeval.post_checks(got["id"], (out / codeval.CHECKS).read_bytes())
+        got["files"].append(codeval.CHECKS)
+        keep()
+    logs = out / codeval.LOGS
+    size = logs.stat().st_size
+    if codeval.LOGS not in got["files"] and size <= codeval.LOGS_PART:
+        codeval.post_logs(got["id"], logs.read_bytes())
+    elif codeval.LOGS not in got["files"]:
+        count = -(-size // codeval.LOGS_PART)
+        with logs.open("rb") as f:
+
+            def part(n: int) -> bytes:
+                f.seek(n * codeval.LOGS_PART)
+                return f.read(codeval.LOGS_PART)
+
+            shas = [hashlib.sha256(part(n)).hexdigest() for n in range(count)]
+            sent = set(got.get("parts_sent") or [])
+            for _ in range(3):
+                for n in range(count):
+                    if n not in sent:
+                        say(f"Sending the logs, part {n + 1} of {count}")
+                        codeval.post_logs_part(got["id"], n, part(n))
+                        sent.add(n)
+                        got["parts_sent"] = sorted(sent)
+                        keep()
+                missing = codeval.complete_logs(got["id"], shas)
+                if not missing:
+                    break
+                sent -= set(missing)
+            else:
+                raise errors.MetaphiError(
+                    f"the service still has not received logs parts {', '.join(map(str, missing))}",
+                    code="unavailable",
+                    retryable=True,
+                    next_step="run `kennet codeval` again in a terminal: the send goes on where it stopped",
+                )
+    if codeval.LOGS not in got["files"]:
+        got.pop("parts_sent", None)
+        got["files"].append(codeval.LOGS)
     got["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     keep()
     return got["id"]
@@ -534,8 +579,9 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
             assert held is not None
             for local, got in zip(kept, report["repos"], strict=True):
                 say(_result_line(local["name"], got))
-    manifest, bodies = held
+    manifest = held
     screen = _send_screen(home, manifest)
+    resuming = bool(_receipt(home, manifest).get("id"))
     if a.json or not _interactive():
         step = f"the owner runs `{_codeval_line(a)}` in a terminal to review and send"
         _out(
@@ -548,15 +594,18 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
             + _codeval_line(a),
         )
         return NEEDS_PERSON
-    print("\n".join(["", *screen, ""]))
-    try:
-        said = input(SEND_ASK).strip().lower()
-    except EOFError:
-        said = ""
-    if said not in ("y", "yes"):
-        print(f"Nothing sent. The payload stays in {home / codeval.PAYLOAD}")
-        return 0
-    _upload(home, manifest, bodies, say)
+    if resuming:
+        print(f"Going on with the send already said yes to: bundle sha256 {manifest['bundle_sha256']}, unchanged.")
+    else:
+        print("\n".join(["", *screen, ""]))
+        try:
+            said = input(SEND_ASK).strip().lower()
+        except EOFError:
+            said = ""
+        if said not in ("y", "yes"):
+            print(f"Nothing sent. The payload stays in {home / codeval.PAYLOAD}")
+            return 0
+    _upload(home, manifest, say)
     print(SENT)
     return 0
 

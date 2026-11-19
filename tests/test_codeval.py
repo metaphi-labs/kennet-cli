@@ -432,7 +432,8 @@ def test_logs_packed(tmp_path):
     (root / "other").mkdir()
     (root / "other" / "x.log").write_text("not this run's")
     (root / "secret-name" / "setup" / "turns.jsonl").write_text('{"token": "ghp_' + "a" * 36 + '"}')
-    body, cleared = codeval.logs_packed(root, "cv_" + "5" * 16, [{"name": "secret-name"}])
+    checks = {"replaced": {"email": 2}, "model": "x"}
+    body, cleared = codeval.logs_packed(root, "cv_" + "5" * 16, [{"name": "secret-name"}], checks)
     names, said = _unpacked(body)
     assert cleared == {"replaced": {"github_token": 1}, "model": "not run (KENNET_DEID_MODEL=off)"}
     assert b"ghp_" not in said["0/setup/turns.jsonl"]
@@ -441,8 +442,15 @@ def test_logs_packed(tmp_path):
         "0/setup/try-01.test.log",
         "0/setup/turns.jsonl",
         "0/steps.jsonl",
+        "kennet-deid.json",
         "kennet-logs.json",
     ]
+    assert names[-1] == codeval.LOGS_DEID, "what was de-identified is the tar's last member"
+    assert json.loads(said[codeval.LOGS_DEID]) == {
+        "logs": {"github_token": 1},
+        "checks": {"email": 2},
+        "model_pass": "not run (KENNET_DEID_MODEL=off)",
+    }
     assert said["0/big.log"] == b"A" * (1 << 20) + b"B" * (5 << 20) + b"Z", "every log goes in whole"
     assert said["kennet-logs.json"]["schema"] == codeval.LOGS_SCHEMA
 

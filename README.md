@@ -257,6 +257,7 @@ but for the last:
 | `not_manager` | `kennet org members` or `kennet keys` by a person in the organization who is not its owner or admin; the message says their role | `null` |
 | `confirmation_required` | `kennet keys revoke` away from a terminal, or under `--json`, without `--yes` | the same command with `--yes`, by id |
 | `test_command_missing`, `toolchain_missing` | `kennet codeval` found no build or test, or a tool it needs is missing (exit 1); finished commits are kept | install the tool, or the same command with `-- '<build and test command>'` |
+| `logs_too_large` | one `kennet codeval` run's logs come to more than 2 GiB gzipped; nothing was sent | `kennet codeval` on fewer repositories at a time |
 | `no_key`, `ambiguous_key` | `kennet keys revoke` names no live key, or a name several live keys share | `kennet keys list`; the revoke of one by id |
 | `secret_destination_required` | `kennet keys create --json` without `--show-secret`: nothing is made | the pipe form |
 | `name_taken`, `scope_not_held`, `too_many_keys` | `kennet keys create` with a name a live key holds, a scope the organization does not hold, or at its cap of live keys | `null`; `null`; `kennet keys list` |
@@ -393,7 +394,9 @@ When it is done, it writes everything that could be sent to `./kennet-codeval/<r
   de-identified on this machine: authors become the profile's author ids; the
   user, home folder, machine name, paths, remotes, emails, phone numbers, street addresses, internal hosts and
   secrets become typed placeholders; a small local model, downloaded once and checked by sha256, finds names the rest
-  miss. The packed bytes are then searched for every known identifier, and if one is left nothing is written.
+  miss. The packed bytes are then searched for every known identifier, and if one is left nothing is written. Its
+  last member, `kennet-deid.json`, counts what was replaced in the logs and the checks, by kind. One run sends up to
+  2 GiB of logs gzipped; past that it says so and sends nothing;
 - `manifest.json`: each file's size and sha256, what was de-identified in it by kind (never the values), whether the
   model ran, and the bundle's sha256.
 
@@ -401,7 +404,8 @@ Nothing is sent until you say so. Run the same command in a terminal: it shows e
 de-identified, the commands that ran and the bundle sha256, and asks `Send to Metaphi AI for commercial diligence?
 [y/N]`. Yes sends those exact bytes and prints `Sent. Metaphi AI will reach out if there is a commercial fit.` Away
 from a terminal (a coding agent, or `--json`) it never sends: it exits 6 with `next_step`, the command for you to run.
-Run again after sending, it says when it was sent.
+If a send is cut short, run the same command again: it goes on with the same bytes, checked against the bundle
+sha256, without asking again. Run again after sending, it says when it was sent.
 
 Builds and tests run with a fixed set of environment variables (`PATH`, `HOME`, locale and the like), never your
 keys or cloud credentials. Containers run with all but a few file-ownership capabilities dropped, no new privileges,

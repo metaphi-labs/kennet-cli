@@ -2,9 +2,11 @@
 
 import gzip
 import hashlib
+import io
 import json
 import shutil
 import sys
+import tarfile
 
 import httpx
 import pytest
@@ -82,6 +84,12 @@ def _server(picked=(2,), checks=200, logs=200):
         "profile": respx.post(f"{API}/codeval").mock(return_value=httpx.Response(200, json={"id": REF})),
         "checks": respx.post(f"{API}/codeval/{REF}/checks").mock(return_value=httpx.Response(checks, json={"id": REF})),
         "logs": respx.post(f"{API}/codeval/{REF}/logs").mock(return_value=httpx.Response(logs, json={"id": REF})),
+        "part": respx.post(url__regex=rf"{API}/codeval/{REF}/logs/parts/\d+$").mock(
+            return_value=httpx.Response(200, json={"object": "codeval_logs_part"})
+        ),
+        "complete": respx.post(f"{API}/codeval/{REF}/logs/complete").mock(
+            return_value=httpx.Response(200, json={"object": "codeval_logs"})
+        ),
     }
 
 
@@ -158,6 +166,14 @@ def test_at_a_terminal_the_owner_sees_exactly_what_is_sent_and_yes_sends_those_b
         f"/v1/kennet/codeval/{REF}/checks",
         f"/v1/kennet/codeval/{REF}/logs",
     ]
+    assert not got["part"].called, "logs within one part go as one body"
+    with tarfile.open(fileobj=io.BytesIO(got["logs"].calls[-1].request.content), mode="r:gz") as tar:
+        last = tar.getmembers()[-1]
+        assert last.name == codeval.LOGS_DEID and set(json.load(tar.extractfile(last))) == {
+            "logs",
+            "checks",
+            "model_pass",
+        }
 
     assert cli.main(["codeval", str(made)]) == 0
     assert "Already sent, on " in capsys.readouterr().out and got["profile"].call_count == 1
@@ -172,8 +188,91 @@ def test_a_send_cut_short_goes_on_where_it_stopped(made, capsys, monkeypatch):
     assert cli.main(["codeval", str(made)]) != 0
     assert got["profile"].call_count == 1 and not got["logs"].called
     got["checks"].mock(return_value=httpx.Response(200, json={"id": REF}))
+    monkeypatch.setattr("builtins.input", lambda q: pytest.fail("asked again for bytes already said yes to"))
     assert cli.main(["codeval", str(made)]) == 0
+    assert "Going on with the send already said yes to" in capsys.readouterr().out
     assert got["profile"].call_count == 1 and got["logs"].call_count == 1 and got["picks"].call_count == 1
+
+
+def _measured(made, tmp_path, monkeypatch, capsys, parts: int) -> bytes:
+    """Measure, then make the part size small enough that the logs go in `parts` parts."""
+    assert cli.main(["codeval", str(made)]) == cli.NEEDS_PERSON
+    capsys.readouterr()
+    logs = (_home(tmp_path) / codeval.PAYLOAD / codeval.LOGS).read_bytes()
+    monkeypatch.setattr(codeval, "LOGS_PART", -(-len(logs) // parts))
+    assert -(-len(logs) // codeval.LOGS_PART) == parts
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda q: "y")
+    return logs
+
+
+def _parts_sent(got) -> dict[int, bytes]:
+    return {int(c.request.url.path.rsplit("/", 1)[1]): c.request.content for c in got["part"].calls}
+
+
+@respx.mock
+def test_logs_past_one_part_go_in_parts_then_are_joined(made, capsys, tmp_path, monkeypatch):
+    got = _server()
+    logs = _measured(made, tmp_path, monkeypatch, capsys, parts=3)
+    assert cli.main(["codeval", str(made)]) == 0
+    sent = _parts_sent(got)
+    assert sorted(sent) == [0, 1, 2] and b"".join(sent[n] for n in range(3)) == logs
+    assert all(len(sent[n]) == codeval.LOGS_PART for n in (0, 1)), "every part but the last is LOGS_PART bytes"
+    assert json.loads(got["complete"].calls[-1].request.content) == {
+        "parts": [hashlib.sha256(sent[n]).hexdigest() for n in range(3)]
+    }
+    assert not got["logs"].called, "one run's logs go one way, never both"
+    assert _left(got)[-1] == f"/v1/kennet/codeval/{REF}/logs/complete"
+    assert json.loads((_home(tmp_path) / "sent.json").read_text())["files"][-1] == codeval.LOGS
+
+
+@respx.mock
+def test_a_part_the_service_did_not_receive_is_sent_again_and_only_it(made, capsys, tmp_path, monkeypatch):
+    got = _server()
+    _measured(made, tmp_path, monkeypatch, capsys, parts=3)
+    missing = {
+        "error": {
+            "type": "invalid_request_error",
+            "code": "bad_parameter",
+            "param": "parts",
+            "message": "parts: parts 1 were not received: send them, then complete",
+        }
+    }
+    got["complete"].side_effect = [
+        httpx.Response(400, json=missing),
+        httpx.Response(200, json={"object": "codeval_logs"}),
+    ]
+    assert cli.main(["codeval", str(made)]) == 0
+    sent = [int(c.request.url.path.rsplit("/", 1)[1]) for c in got["part"].calls]
+    assert sent == [0, 1, 2, 1] and got["complete"].call_count == 2
+
+
+@respx.mock
+def test_a_parts_send_cut_short_goes_on_from_the_part_it_stopped_at(made, capsys, tmp_path, monkeypatch):
+    got = _server()
+    _measured(made, tmp_path, monkeypatch, capsys, parts=3)
+    monkeypatch.setattr(codeval.time, "sleep", lambda s: None)
+    got["part"].side_effect = lambda request: httpx.Response(
+        503 if request.url.path.endswith("/2") else 200, json={"object": "codeval_logs_part"}
+    )
+    assert cli.main(["codeval", str(made)]) != 0
+    capsys.readouterr()
+    got["part"].side_effect = None
+    monkeypatch.setattr("builtins.input", lambda q: pytest.fail("asked again for bytes already said yes to"))
+    before = got["part"].call_count
+    assert cli.main(["codeval", str(made)]) == 0
+    assert [int(c.request.url.path.rsplit("/", 1)[1]) for c in got["part"].calls[before:]] == [2]
+    assert got["profile"].call_count == 1 and got["complete"].call_count == 1
+
+
+@respx.mock
+def test_logs_past_two_gib_are_refused_here_and_nothing_is_sent(made, capsys, monkeypatch):
+    got = _server()
+    monkeypatch.setattr(codeval, "MAX_LOGS", 100)
+    assert cli.main(["codeval", str(made), "--json"]) == cli.FAILED
+    err = json.loads(capsys.readouterr().out)["error"]
+    assert err["code"] == "logs_too_large" and "2 GiB" in err["message"] and "fewer repositories" in err["next_step"]
+    assert _left(got) == ["/v1/kennet/codeval/picks"]
 
 
 @respx.mock

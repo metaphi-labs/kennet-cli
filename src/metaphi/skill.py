@@ -210,6 +210,7 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `git_too_old` | `kennet codeval` needs a newer git. Tell the user; nothing was sent. |
 | `no_repository` | `kennet codeval` found no full git clone at the paths given; each path's reason is in the output. Tell the user to clone it in full and run the same command. |
 | `test_command_missing`, `toolchain_missing` | `kennet codeval` is stuck; finished work is kept. Tell the user the message and `next_step`; on their answer, run what it says. `kennet skill show partner` is the CodeVal guide. |
+| `logs_too_large` | One run's logs come to more than 2 GiB gzipped; nothing was sent. Tell the user, and run what `next_step` says. |
 | `deid_incomplete` | `kennet codeval` found a known identifier (an author, the user, a path or a host) left in the logs after de-identification, and sent nothing. Tell the user the message; it names kinds, never values. |
 | `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
 | `rate_limited_concurrent`, `rate_limited_daily` | Too many runs at once, or today. Wait for a run to end, or tell the user. |
