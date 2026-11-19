@@ -424,8 +424,7 @@ def test_logs_packed(tmp_path):
 
     root = tmp_path / "logs"
     (root / "secret-name" / "setup").mkdir(parents=True)
-    (root / "secret-name" / "setup" / "conversation.jsonl").write_text("cat src/main.c")
-    (root / "secret-name" / "setup" / "run-03.log").write_text("int main() {}")
+    (root / "secret-name" / "setup" / "try-01.test.log").write_text("1 passed")
     (root / "secret-name" / "setup" / "turns.jsonl").write_text("{}")
     (root / "secret-name" / "steps.jsonl").write_text("{}")
     (root / "secret-name" / "big.log").write_bytes(b"A" * (1 << 20) + b"B" * (5 << 20) + b"Z")
@@ -437,9 +436,14 @@ def test_logs_packed(tmp_path):
     names, said = _unpacked(body)
     assert cleared == {"replaced": {"github_token": 1}, "model": "not run (KENNET_DEID_MODEL=off)"}
     assert b"ghp_" not in said["0/setup/turns.jsonl"]
-    assert sorted(names) == ["0/big.log", "0/setup/turns.jsonl", "0/steps.jsonl", "kennet-logs.json"]
-    big = said["0/big.log"]
-    assert len(big) < codeval.LOG_FILE_MOST + 100 and big.startswith(b"A") and big.endswith(b"BZ")
+    assert sorted(names) == [
+        "0/big.log",
+        "0/setup/try-01.test.log",
+        "0/setup/turns.jsonl",
+        "0/steps.jsonl",
+        "kennet-logs.json",
+    ]
+    assert said["0/big.log"] == b"A" * (1 << 20) + b"B" * (5 << 20) + b"Z", "every log goes in whole"
     assert said["kennet-logs.json"]["schema"] == codeval.LOGS_SCHEMA
 
 

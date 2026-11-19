@@ -195,12 +195,17 @@ def test_the_checks_report_is_de_identified(seller):
     }
 
 
-def test_a_long_log_is_cut_at_line_ends():
-    data = b"".join(b"line %07d /Users/sseller\n" % i for i in range(300_000))
-    cut = codeval._cut(data)
-    head, _, tail = cut.partition(b"[... cut by kennet codeval ...]\n")
-    assert len(cut) <= codeval.LOG_FILE_MOST + 64
-    assert head.endswith(b"\n") and tail.startswith(b"line ") and b"/Users/sseller\n" in tail[:40]
+def test_a_long_log_goes_in_whole_de_identified_a_chunk_at_a_time(seller, tmp_path, monkeypatch):
+    import collections
+    import io
+
+    monkeypatch.setattr(codeval, "LOG_CHUNK", 4096)
+    data = b"".join(b"line %07d /Users/sseller\n" % i for i in range(3000)) + b"x" * 20_000 + b"\nend"
+    (tmp_path / "big.log").write_bytes(data)
+    scrub, out, left = deid.Scrubber(deid.known([SELLER])[0]), io.BytesIO(), collections.Counter()
+    codeval._scrubbed(tmp_path / "big.log", scrub, out, left)
+    assert out.getvalue() == data.replace(b"/Users/sseller", b"[home]") and not left
+    assert scrub.counts["home"] == 3000
 
 
 def test_the_model_is_off_when_asked():

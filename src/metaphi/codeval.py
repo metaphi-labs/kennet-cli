@@ -30,8 +30,7 @@ from metaphi.steps import Steps
 SCHEMA = "kennet.repo_metadata.v16"
 CHECKS_SCHEMA = "kennet.repo_checks.v4"
 LOGS_SCHEMA = "kennet.repo_logs.v2"
-LOG_FILE_MOST = 4 << 20
-NOT_PACKED = re.compile(r"(^|/)(conversation\.jsonl|run-\d+\.log)$")
+LOG_CHUNK = 8 << 20
 NOTICE = (
     "Runs on this machine. Before the owner says yes at a terminal, only commit ids and times leave it, to pick the"
     " commits to test."
@@ -1032,7 +1031,7 @@ def checked(
                     services.down()
                     codebase_setup.NETWORK[:] = ["--network", net] if net else []
             got["commands"] = _commands(found, plan.test)
-            got["toolchain"] = _toolchain(found, plan.test)
+            got["toolchain"] = _toolchain(found, plan.test, logs / "toolchain.log")
             if setup:
                 got["setup"] = setup
             if services:
@@ -1102,8 +1101,9 @@ def _commands(found: tuple | None, given: str | None) -> dict[str, str | None]:
 TOOLS = ("java", "mvn", "gradle", "go", "node", "npm", "python3", "cargo", "rustc", "gcc", "cmake", "dotnet", "make")
 
 
-def _toolchain(found: tuple | None, given: str | None) -> dict[str, str]:
-    """The versions of the tools the commands name, as this machine reports them; in a container, its image."""
+def _toolchain(found: tuple | None, given: str | None, log: Path) -> dict[str, str]:
+    """The versions of the tools the commands name, as this machine reports them (each answer whole in `log`); in a
+    container, its image."""
     recipe = found[0] if found else None
     if recipe is not None and recipe.image and found[1]:
         return {"image": recipe.image}
@@ -1122,9 +1122,13 @@ def _toolchain(found: tuple | None, given: str | None) -> dict[str, str]:
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
-        line = next((x.strip() for x in (got.stdout + got.stderr).splitlines() if x.strip()), "")
+        said = got.stdout + got.stderr
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as f:
+            f.write(f"$ {tool} {'-version' if tool == 'java' else '--version'}\n{said}\n")
+        line = next((x.strip() for x in said.splitlines() if x.strip()), "")
         if line:
-            out[tool] = line[:200]
+            out[tool] = line
     return out
 
 
@@ -1315,15 +1319,24 @@ def payload(home: Path, doc: dict[str, Any], report: dict[str, Any], kept: list[
     return manifest
 
 
-def _cut(data: bytes) -> bytes:
-    """A log over LOG_FILE_MOST keeps its head and tail, cut at line ends so no identifier is split."""
-    if len(data) <= LOG_FILE_MOST:
-        return data
-    head = data[: 512 << 10]
-    tail = data[-(LOG_FILE_MOST - (512 << 10)) :]
-    head = head[: head.rfind(b"\n") + 1] or head
-    tail = tail[tail.find(b"\n") + 1 :] if b"\n" in tail else tail
-    return head + b"[... cut by kennet codeval ...]\n" + tail
+def _scrubbed(f: Path, scrub: deid.Scrubber, out: IO[bytes], left: collections.Counter) -> None:
+    """One log, whole, de-identified into `out` a chunk at a time: each chunk ends at a line end (or is a line longer
+    than LOG_CHUNK four times over), so memory stays bounded and no identifier is split. Each de-identified chunk is
+    searched for known identifiers before it is kept."""
+    rest = b""
+    with f.open("rb") as src:
+        while True:
+            got = src.read(LOG_CHUNK)
+            data = rest + got
+            if got:
+                end = data.rfind(b"\n") + 1 or (len(data) if len(data) >= 4 * LOG_CHUNK else 0)
+                data, rest = data[:end], data[end:]
+            if data:
+                clean = scrub.bytes(data)
+                left |= scrub.known.left(clean)
+                out.write(clean)
+            if not got:
+                return
 
 
 def _scrubbers(kept: list[dict]) -> tuple[list[deid.Scrubber], str]:
@@ -1332,36 +1345,41 @@ def _scrubbers(kept: list[dict]) -> tuple[list[deid.Scrubber], str]:
 
 
 def logs_packed(root: Path, pick_id: str, kept: list[dict]) -> tuple[bytes, dict[str, Any]]:
-    """The run's logs as a tar.gz, de-identified here, with what was replaced by kind. Raises `deid.Unsafe`, and
-    nothing is sent, when a known identifier is still in the packed bytes."""
+    """Every log of the run, whole, as a tar.gz, de-identified here, with what was replaced by kind. Raises
+    `deid.Unsafe`, and nothing is sent, when a known identifier is still in what would be packed."""
     scrubbers, said = _scrubbers(kept)
-    buf, counts = io.BytesIO(), collections.Counter()
-    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+    left: collections.Counter = collections.Counter()
+    with tempfile.TemporaryFile() as packed_file:
+        with tarfile.open(fileobj=packed_file, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
 
-        def add(name: str, data: bytes) -> None:
-            info = tarfile.TarInfo(name)
-            info.size, info.mode, info.mtime = len(data), 0o644, 0
-            tar.addfile(info, io.BytesIO(data))
+            def add(name: str, size: int, body: IO[bytes]) -> None:
+                info = tarfile.TarInfo(name)
+                info.size, info.mode, info.mtime = size, 0o644, 0
+                tar.addfile(info, body)
 
-        add(
-            "kennet-logs.json",
-            json.dumps({"schema": LOGS_SCHEMA, "pick_id": pick_id, "tool_version": __version__}).encode(),
-        )
-        for n, (local, scrub) in enumerate(zip(kept, scrubbers, strict=True)):
-            repo = local["name"]
-            for f in sorted((root / repo).rglob("*")) if (root / repo).is_dir() else []:
-                name = f"{n}/{f.relative_to(root / repo).as_posix()}"
-                if f.is_symlink() or not f.is_file() or NOT_PACKED.search(name):
-                    continue
-                try:
-                    data = f.read_bytes()
-                except OSError:
-                    continue
-                add(scrub.text(name), scrub.bytes(_cut(data)))
+            about = json.dumps({"schema": LOGS_SCHEMA, "pick_id": pick_id, "tool_version": __version__}).encode()
+            add("kennet-logs.json", len(about), io.BytesIO(about))
+            for n, (local, scrub) in enumerate(zip(kept, scrubbers, strict=True)):
+                repo = local["name"]
+                for f in sorted((root / repo).rglob("*")) if (root / repo).is_dir() else []:
+                    if f.is_symlink() or not f.is_file():
+                        continue
+                    name = scrub.text(f"{n}/{f.relative_to(root / repo).as_posix()}")
+                    left |= scrub.known.left(name.encode("utf-8", "surrogateescape"))
+                    with tempfile.TemporaryFile() as clean:
+                        try:
+                            _scrubbed(f, scrub, clean, left)
+                        except OSError:
+                            continue
+                        size = clean.tell()
+                        clean.seek(0)
+                        add(name, size, clean)
+        deid.check(left, "the logs")
+        packed_file.seek(0)
+        body = packed_file.read()
+    counts: collections.Counter = collections.Counter()
     for scrub in scrubbers:
         counts.update(scrub.counts)
-    body = buf.getvalue()
-    _unsafe(gzip.decompress(body), scrubbers, "the logs")
     return body, deid.summary(counts, said)
 
 

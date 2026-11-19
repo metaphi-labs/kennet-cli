@@ -389,7 +389,8 @@ When it is done, it writes everything that could be sent to `./kennet-codeval/<r
   their text, file names or source;
 - `checks.json.gz`: each build and test (pass or fail, test counts, timings, error class, toolchain versions, the
   commands that ran) and the git blob ids of up to 64 source files, to tell whether the code is already public;
-- `logs.tar.gz`: build and test output, de-identified on this machine: authors become the profile's author ids; the
+- `logs.tar.gz`: every log of the run, whole (setup, build, each test run, each edit, the toolchain's versions),
+  de-identified on this machine: authors become the profile's author ids; the
   user, home folder, machine name, paths, remotes, emails, phone numbers, street addresses, internal hosts and
   secrets become typed placeholders; a small local model, downloaded once and checked by sha256, finds names the rest
   miss. The packed bytes are then searched for every known identifier, and if one is left nothing is written.
