@@ -241,11 +241,11 @@ _sleep = time.sleep
 AGAIN = "Nothing was sent. Run the same command for a new code."
 
 
-def device_start(scope: str | None = None) -> dict[str, Any]:
-    """Start a device sign-in, for `scope` alone when one is named: the code the person enters, where, and when it
-    expires."""
+def device_start() -> dict[str, Any]:
+    """Start a device sign-in: the code the person enters, where, and when it expires. The keys it gives hold what
+    the organization holds."""
     with _http() as h:
-        r = h.post("/device/code", data={"client_id": CLIENT_ID, **({"scope": scope} if scope else {})})
+        r = h.post("/device/code", data={"client_id": CLIENT_ID})
     if r.status_code != 200:
         raise _refused(r)
     started = _json(r)
@@ -259,7 +259,6 @@ def device_start(scope: str | None = None) -> dict[str, Any]:
         "page": started.get("verification_uri_complete") or started.get("verification_uri"),
         "interval": max(float(started.get("interval") or 5), 2.0),
         "expires_at": time.time() + float(started.get("expires_in") or SIGN_IN_S),
-        **({"scope": scope} if scope else {}),
     }
 
 
@@ -329,14 +328,12 @@ def pending() -> dict[str, Any] | None:
     return None
 
 
-def pending_login(
-    wait_s: float = 10.0, scope: str | None = None, then: str | None = None
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def pending_login(wait_s: float = 10.0, then: str | None = None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Sign in with no one waiting at a terminal: finish the device sign-in started on an earlier run (its code
     reused), or start one and keep it, with `then`, the command to run once it is approved. Answers (keys, the
     sign-in) once approved, or (None, the sign-in to show) while it is pending."""
     started = pending()
-    if started is not None and (scope is None or started.get("scope") == scope):
+    if started is not None:
         if then and started.get("then") != then:
             started = {**started, "then": then}
             config.save({**config.load(), PENDING: started})
@@ -351,7 +348,7 @@ def pending_login(
                 return None, started
             _forget_pending()
             return got, started
-    started = {**device_start(scope or (started or {}).get("scope")), **({"then": then} if then else {})}
+    started = {**device_start(), **({"then": then} if then else {})}
     config.save({**config.load(), PENDING: started})
     return None, started
 

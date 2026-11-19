@@ -925,7 +925,7 @@ def test_not_signed_in_with_no_terminal_starts_the_code_and_stops_at_once(tested
         assert said["sign_in"]["verification_uri_complete"].endswith("user_code=WDJB-MJHT")
         assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", said["sign_in"]["expires_at"])
     assert start.call_count == 1, "a rerun reuses the code still pending"
-    assert dict(parse_qsl(start.calls[0].request.content.decode()))["scope"] == "kennet:codeval:write"
+    assert dict(parse_qsl(start.calls[0].request.content.decode())) == {"client_id": "metaphi-cli"}
     assert token.call_count == 1 and not profile.called
 
     monkeypatch.setattr(accounts, "_sleep", lambda s: None)
@@ -952,6 +952,40 @@ def test_not_signed_in_with_no_terminal_starts_the_code_and_stops_at_once(tested
         "next_step": f"kennet codeval {tested} --json",
     }
     assert accounts.pending() is None
+
+
+@respx.mock
+def test_a_pending_code_is_reused_whatever_it_was_started_for(tested, capsys, monkeypatch):
+    monkeypatch.delenv("METAPHI_API_KEY")
+    left = {"device_code": "d", "user_code": "OLD-CODE", "url": "u", "page": "u", "interval": 5}
+    config.save({accounts.PENDING: {**left, "expires_at": time.time() + 600, "scope": "kennet:other"}})
+    start = respx.post(f"{A}/device/code")
+    respx.post(f"{A}/oauth/token").respond(400, json={"error": "authorization_pending"})
+    assert cli.main(["codeval", str(tested), "--json"]) == cli.AUTH
+    assert json.loads(capsys.readouterr().out)["sign_in"]["user_code"] == "OLD-CODE" and not start.called
+
+
+@respx.mock
+def test_a_sign_in_whose_keys_lack_codeval_says_so_and_sends_nothing(tested, capsys, monkeypatch):
+    monkeypatch.delenv("METAPHI_API_KEY")
+    left = {"device_code": "d", "user_code": "C", "url": "u", "page": "u", "interval": 5}
+    config.save({accounts.PENDING: {**left, "expires_at": time.time() + 600}})
+    respx.post(f"{A}/oauth/token").respond(json={"access_token": "tok"})
+    respx.post(f"{A}/keys/cli").respond(
+        json={
+            "email": "sam@acme.test",
+            "org": "org_acme",
+            "org_name": "Acme",
+            "scopes": ["kennet:twin"],
+            "api_key": "mai_sk_live_x",
+            "test_api_key": "mai_sk_test_x",
+        }
+    )
+    profile = respx.post(f"{API}/codeval")
+    assert cli.main(["codeval", str(tested), "--json"]) == cli.AUTH
+    said = json.loads(capsys.readouterr().out)["error"]
+    assert said["code"] == "insufficient_scope" and "Acme do not hold CodeVal" in said["message"]
+    assert "kennet:codeval:write" in said["message"] and not profile.called
 
 
 @respx.mock

@@ -421,7 +421,8 @@ Everything sent is kept, byte for byte, in the repository's state directory unde
 
 ### Signing in
 
-CodeVal always signs in with a browser code, for the scope `kennet:codeval:write`. At a terminal it opens the page
+CodeVal always signs in with a browser code; the keys it hands this machine hold what the organization holds, and
+CodeVal needs `kennet:codeval:write` among them (`insufficient_scope` otherwise). At a terminal it opens the page
 (`--no-browser` only prints it) and waits. Away from a terminal, or under `--json`, it starts the code and stops at
 once with exit 3:
 

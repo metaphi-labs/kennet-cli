@@ -1263,7 +1263,13 @@ def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
     if key == cfg.get("api_key") and cfg.get("api_key_from") == "login" and isinstance(cfg.get("scopes"), list):
         if SCOPE in cfg["scopes"]:
             return
-        raise _named(errors.AuthError("this API key does not hold access to CodeVal", code="insufficient_scope"))
+        org = cfg.get("org_name") or cfg.get("org") or "this organization"
+        raise _named(
+            errors.AuthError(
+                f"signed in, but the keys for {org} do not hold CodeVal; nothing was sent",
+                code="insufficient_scope",
+            )
+        )
     _call("GET", "/codeval/access", sleep, answered=False)
 
 

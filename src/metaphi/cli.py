@@ -396,10 +396,11 @@ def _codeval_line(a: argparse.Namespace) -> str:
 
 
 def _codeval_signin(a: argparse.Namespace, say: Callable[[str], None], stream: IO[str]) -> None:
-    """Make sure this machine holds keys with kennet:codeval:write; if not, sign in by device code, for that scope
-    alone. At a terminal: open the browser (unless --no-browser), print the address and code, and wait. Anywhere
-    else, or with --json: start the code (or reuse one still pending) and stop at once, exit 3, with what an agent
-    relays and the command that waits for the approval."""
+    """Make sure this machine holds keys with kennet:codeval:write; if not, sign in by device code. The keys a
+    sign-in gives hold what the organization holds; without CodeVal they are refused after sign-in. At a terminal:
+    open the browser (unless --no-browser), print the address and code, and wait. Anywhere else, or with --json:
+    start the code (or reuse one still pending) and stop at once, exit 3, with what an agent relays and the command
+    that waits for the approval."""
     from metaphi import codeval
 
     try:
@@ -412,9 +413,8 @@ def _codeval_signin(a: argparse.Namespace, say: Callable[[str], None], stream: I
         with contextlib.suppress(accounts.Error):
             codeval.key_ready()
             return
-    scope = codeval.SCOPE
     if a.json or not _interactive():
-        got, started = accounts.pending_login(0.0, scope, _codeval_line(a))
+        got, started = accounts.pending_login(0.0, _codeval_line(a))
         if got is None:
             sign_in = accounts.shown(started)
             e = accounts.need(
@@ -426,8 +426,8 @@ def _codeval_signin(a: argparse.Namespace, say: Callable[[str], None], stream: I
             raise e
     else:
         started = accounts.pending()
-        if started is None or started.get("scope") != scope:
-            started = accounts.device_start(scope)
+        if started is None:
+            started = accounts.device_start()
             config.save({**config.load(), accounts.PENDING: started})
         say("")
         code = palette.paint(started["user_code"], "accent", stream, bold=True)
