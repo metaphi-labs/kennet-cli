@@ -1,5 +1,5 @@
 """The edits and revealed files drawn here must be the service's own: a fixed profile and seeds give fixed draws, the
-same vector as kennet's tests/data/codeval_draws.json."""
+same vector the service tests its own draws against."""
 
 import json
 from pathlib import Path
