@@ -499,13 +499,7 @@ def codebase_hours(h: float) -> str:
     return about(h * 3600).removeprefix("about ")
 
 
-IN_USE = frozenset(["key_mismatch", "profile_mismatch", "superseded"])
-
-
-def _held_elsewhere(e: errors.MetaphiError) -> bool:
-    """The service's answer that another machine or clone holds the run: another key, tip or measure, or a batch it
-    already holds other results for (a 400 with no code of its own)."""
-    return e.code in IN_USE or (e.code == "parameter_invalid" and "already answered with other results" in e.message)
+IN_USE = frozenset(["key_mismatch", "profile_mismatch", "superseded", "batch_answered"])
 
 
 def _in_use(a: argparse.Namespace, org: str) -> errors.MetaphiError:
@@ -604,7 +598,7 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
                     try:
                         got, _path = codeval.send_results(local, run, results)
                     except errors.MetaphiError as e:
-                        if _held_elsewhere(e):
+                        if e.code in IN_USE:
                             raise _in_use(a, org) from None
                         raise
                     got.setdefault("run", run)

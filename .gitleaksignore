@@ -1,0 +1,2 @@
+# A fake AWS secret in a test (tests/test_codeval.py), committed before it was built at runtime; never a real key.
+e0fdb50f8ae169ff7383bdc848fefc9b96fcf9f8:tests/test_codeval.py:generic-api-key:812

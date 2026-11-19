@@ -892,7 +892,8 @@ def _command(tmp_path) -> str:
 
 @respx.mock
 def test_a_signed_in_run_with_no_terminal_goes_end_to_end(tested, tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI-hunter2")
+    fake = "fake-" + "aws-" + "secret"  # built at runtime: no literal that looks like a key
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", fake)
     (tested / "calc.py").write_text("def add(a, b):\n    return a + b\ndef mul(a, b):\n    return a * b\n")
     git(tested, "commit", "-qam", "plain")
     _signed_in()
@@ -935,12 +936,22 @@ def test_a_signed_in_run_with_no_terminal_goes_end_to_end(tested, tmp_path, caps
     ]
     assert sent["tip"]["tests"][0]["passed"] == 2
     wire = gzip.decompress(results.calls[0].request.content).decode()
-    for word in ("hunter2", "test_mul", "calc.py", "falcon_calc", str(tmp_path), "pytest", "PYTHONPATH", "assert "):
+    for word in (
+        "hunter2",
+        fake,
+        "test_mul",
+        "calc.py",
+        "falcon_calc",
+        str(tmp_path),
+        "pytest",
+        "PYTHONPATH",
+        "assert ",
+    ):
         assert word not in wire, word
     assert (local.home / "sent" / "results-1.json").read_text() == wire
     assert (local.home / "sent" / "profile-1.json").read_bytes() == gzip.decompress(posted.calls[0].request.content)
     env = (tmp_path / "env.txt").read_text()
-    assert "AWS_SECRET_ACCESS_KEY" not in env and "hunter2" not in env and "METAPHI_API_KEY" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env and fake not in env and "METAPHI_API_KEY" not in env
 
 
 def _measured_side(log: str) -> dict:
@@ -1693,12 +1704,8 @@ def test_a_batch_already_answered_with_other_results_stops_as_in_use(tested, tmp
     _, local = _profile(tested)
     asked = _next(local.kept["paths"], commits=[], mutants=[])
     respx.post(f"{API}/codeval").respond(json={"run": "cv_20", "object": "codeval", "measure": 0, "next": asked})
-    answered = {
-        "type": "invalid_request_error",
-        "code": "parameter_invalid",
-        "message": "batch: batch 1 was already answered with other results",
-    }
-    respx.post(f"{API}/codeval/cv_20/results").respond(400, json={"error": answered})
+    answered = {"type": "invalid_request_error", "code": "batch_answered", "message": "m", "batch": 1}
+    respx.post(f"{API}/codeval/cv_20/results").respond(409, json={"error": answered})
     assert cli.main(["codeval", str(tested), "--json", "--", _command(tmp_path)]) == 6
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "in_use"
 
