@@ -53,6 +53,16 @@ def _read(path: Path) -> dict[str, Any]:
     return got if isinstance(got, dict) else {}
 
 
+def _write_lines(path: Path, lines: list[str]) -> None:
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        tmp.write_text("".join(lines))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def index() -> Path:
     return config.home() / "codeval"
 
@@ -149,11 +159,18 @@ class Run:
             self.data.update(fields)
             self._save()
 
-    def forget(self) -> None:
-        """A run asked for other checks: what the last one finished does not count."""
+    def forget(self, keep: tuple[str, ...] = ()) -> None:
+        """A run asked for other checks: what the last one finished does not count, but for the kinds kept."""
         with self.lock:
-            self.units.clear()
-            (self.home / JOURNAL).unlink(missing_ok=True)
+            self.units = {k: row for k, row in self.units.items() if k[1] in keep}
+            lines = [
+                json.dumps({"repo": r, "kind": kind, "key": key, "row": row}, separators=(",", ":")) + "\n"
+                for (r, kind, key), row in self.units.items()
+            ]
+            if lines:
+                _write_lines(self.home / JOURNAL, lines)
+            else:
+                (self.home / JOURNAL).unlink(missing_ok=True)
 
     def counts(self) -> tuple[int, int]:
         with self.lock:
@@ -191,7 +208,10 @@ class Run:
         assert name in PHASES, name
         if self.data.get("phase") == name:
             return
-        self.write(phase=name)
+        if name == "checks":
+            self.write(phase=name, checks_at=time.time(), checks_from=self.counts()[0])
+        else:
+            self.write(phase=name)
         self.report()
 
     def finished(self) -> None:
@@ -218,9 +238,10 @@ class Run:
             h.post(f"/codeval/{self.ref}/progress", json=body, timeout=REPORT)
 
 
-def started(home: Path, run: str, pid: int, resume: str) -> None:
+def started(home: Path, run: str, pid: int, resume: str, **more: Any) -> None:
     data = {
         **_read(home / STATE),
+        **more,
         "run": run,
         "state": "running",
         "pid": pid,
@@ -275,7 +296,21 @@ def view(run: str, home: Path) -> dict[str, Any]:
         "needs": needs,
         "error": error,
         "next_step": step,
+        "left_s": left(s, state),
+        "local": bool(s.get("local")),
+        "asked": s.get("asked"),
     }
+
+
+def left(s: dict[str, Any], state: str, now: float | None = None) -> int | None:
+    """Seconds of checks left, from the pace of the units this process has finished; None until one has."""
+    at, start, done, total = s.get("checks_at"), s.get("checks_from"), s.get("done") or 0, s.get("total") or 0
+    if state != "running" or s.get("phase") != "checks" or not isinstance(at, (int, float)):
+        return None
+    if not isinstance(start, int) or done <= start or done >= total:
+        return None
+    took = (now or time.time()) - at
+    return round(took / (done - start) * (total - done))
 
 
 def _elsewhere(home: Path) -> bool:
@@ -358,6 +393,7 @@ def detach(home: Path, argv: list[str]) -> tuple[int, str | None]:
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
+            cwd=home.parent.parent,
         )
     return child.pid, awake(child.pid)
 

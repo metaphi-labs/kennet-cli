@@ -397,6 +397,17 @@ def _sent(
         say(f"The server received {got.get('bytes')} bytes for {name}, not the {len(body)} sent ({ledger})")
 
 
+def _previewed(home: Path) -> bytes | None:
+    """The profile a dry run of this run wrote and the person has seen: sent as it is, not made again."""
+    try:
+        rows = json.loads((home / "sent" / "sent.json").read_text())
+        row = next(r for r in rows if r.get("file") == "codeval.json.gz")
+        body = (home / "sent" / "codeval.json.gz").read_bytes()
+    except (OSError, ValueError, StopIteration, AttributeError):
+        return None
+    return body if row.get("sent") is False and hashlib.sha256(body).hexdigest() == row.get("sha256") else None
+
+
 def _codeval_key(a: argparse.Namespace, say: Callable[[str], None]) -> None:
     from metaphi import codeval
 
@@ -474,7 +485,8 @@ def _codeval_words(a: argparse.Namespace, paths: list[str] | None = None, deep: 
 
 def _codeval_tail(a: argparse.Namespace) -> list[str]:
     detached = bool(getattr(a, "detach", False) or getattr(a, "worker", None))
-    return [*(["--json"] if a.json else []), "--yes", *(["--detach"] if detached else [])]
+    sends = ["--dry-run"] if getattr(a, "dry_run", False) else ["--yes"]
+    return [*(["--json"] if a.json else []), *sends, *(["--detach"] if detached else [])]
 
 
 def _codeval_again(a: argparse.Namespace, deep: bool | None = None) -> str:
@@ -505,7 +517,7 @@ def _needs_block(a: argparse.Namespace, e: errors.MetaphiError, missing: list[st
                     + shlex.join(tail),
                 }
             )
-            if not a.deep:
+            if not a.deep and not getattr(a, "dry_run", False):
                 options.append(
                     {
                         "label": f"Let a model set up {given}; this sends the contents of the files it reads to "
@@ -528,7 +540,7 @@ def _needs_block(a: argparse.Namespace, e: errors.MetaphiError, missing: list[st
             {"label": "Docker or Podman is running now: run it again", "run": _codeval_again(a)},
             {"label": "Run without --deep", "run": _codeval_again(a, deep=False)},
         ]
-    return {"code": e.code, "ask": ask, "options": options, "action_url": e.action_url}
+    return {"code": e.code, "ask": ask, "options": options, "action_url": e.action_url, "repos": missing or []}
 
 
 def _needed(
@@ -599,44 +611,65 @@ def cmd_codeval(a: argparse.Namespace) -> int | None:
         raise
 
 
-def _codeval_detach(a: argparse.Namespace, say: Callable[[str], None], stream: IO[str]) -> int:
+def codeval_detached(a: argparse.Namespace, base: Path, run: str | None = None) -> dict[str, Any]:
+    """Start `kennet codeval` in a session of its own under base/kennet-codeval/<run>; one already running is
+    left as it is. With run, the repositories must still be at the commits that named it."""
     from metaphi import codeval, codeval_runs
 
-    _codeval_key(a, say)
     paths = codeval.repositories(a.paths or ["."])
-    run = codeval.run_key(paths)
-    if run is None:
+    named = codeval.run_key(paths)
+    if named is None:
         raise errors.MetaphiError("no repository to read: give full git clones or git URLs", code="no_repository")
-    home = Path.cwd() / CODEVAL_HOME / run
+    if run is not None and named != run:
+        raise errors.MetaphiError(
+            f"the repositories have new commits since {run} was measured; measure them again",
+            code="run_changed",
+        )
+    home = base / CODEVAL_HOME / named
     home.mkdir(parents=True, exist_ok=True)
-    now = codeval_runs.view(run, home)
+    now = codeval_runs.view(named, home)
     if now["state"] == "running":
-        said = {"run": run, "pid": now["pid"], "state": "running", "results": str(home), "next_step": now["next_step"]}
-        _out(a, said, f"{run} is already running (pid {now['pid']}).", f"Next: {now['next_step']}")
-        return 0
-    if not a.json:
-        for line in (*codeval.sent_lines(a.deep), codeval.TAKES):
-            say(line)
-    argv = [*_codeval_words(a)[1:], "--yes", "--worker", run, *(["--json"] if a.json else [])]
+        return {"run": named, "pid": now["pid"], "state": "running", "results": str(home), "started": False}
+    sends = ["--dry-run"] if a.dry_run else ["--yes"]
+    argv = [*_codeval_words(a)[1:], *sends, "--worker", named, *(["--json"] if a.json else [])]
     pid, awake = codeval_runs.detach(home, argv)
-    codeval_runs.started(home, run, pid, _codeval_again(a))
-    codeval_runs.register(run, home)
-    step = f"kennet codeval status {run} --json --wait 600"
-    said = {
-        "run": run,
+    asked = {"paths": list(a.paths), "build": a.build, "test": a.test}
+    codeval_runs.started(home, named, pid, _codeval_again(a), local=bool(a.dry_run), asked=asked)
+    codeval_runs.register(named, home)
+    return {
+        "run": named,
         "pid": pid,
         "state": "running",
         "results": str(home),
         "log": str(home / codeval_runs.LOG),
         "awake": awake,
-        "next_step": step,
+        "started": True,
     }
+
+
+def _codeval_detach(a: argparse.Namespace, say: Callable[[str], None], stream: IO[str]) -> int:
+    from metaphi import codeval
+
+    if not a.dry_run:
+        _codeval_key(a, say)
+    got = codeval_detached(a, Path.cwd())
+    run = got.pop("run")
+    step = f"kennet codeval status {run} --json --wait 600"
+    if not got.pop("started"):
+        said = {"run": run, **got, "next_step": step}
+        _out(a, said, f"{run} is already running (pid {got['pid']}).", f"Next: {step}")
+        return 0
+    if not a.json:
+        for line in codeval.sent_lines(a.deep) if a.dry_run else (*codeval.sent_lines(a.deep), codeval.TAKES):
+            say(line)
+    pid = got["pid"]
+    said = {"run": run, **got, "next_step": step}
     _out(
         a,
         said,
         "",
         palette.paint("\u2713", "ok", stream) + f" Started {run} in the background (pid {pid}).",
-        f"Its log: {home / codeval_runs.LOG}",
+        f"Its log: {got['log']}",
         f"Next: {step}",
     )
     return 0
@@ -656,9 +689,7 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
     commits = not a.dry_run
     if a.dry_run and a.yes:
         raise errors.MetaphiError("--dry-run sends nothing: give --dry-run or --yes", code="dry_run_with_yes")
-    if a.dry_run and a.detach:
-        raise errors.MetaphiError("--dry-run runs here: give --dry-run or --detach", code="dry_run_with_detach")
-    if a.detach and not a.yes:
+    if a.detach and not a.yes and not a.dry_run:
         raise _unconfirmed(a)
     if worker:
         held["run"] = codeval_runs.Run(Path.cwd() / CODEVAL_HOME / worker, worker, _codeval_again(a))
@@ -708,6 +739,7 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
         (home / "codeval.json").write_text(json.dumps(doc, indent=1))
         run = held.get("run") or codeval_runs.Run(home, name, _codeval_again(a) if commits else None)
         held["run"] = run
+        run.write(local=not commits)
         codeval_runs.register(name, home)
 
         def sent_profile() -> str:
@@ -715,7 +747,7 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
                 return (home / "reference").read_text().strip()
             except OSError:
                 pass
-            body = codeval.packed(doc)
+            body = _previewed(home) or codeval.packed(doc)
             with steps.step("send"):
                 answer = codeval.post(body)
             _sent(home, "codeval.json.gz", "/codeval", body, answer, say)
@@ -742,9 +774,12 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
         asked = {"test": a.test, "build": a.build, "deep": a.deep, "commits": commits}
         done, report = home / "checks.json", None
         try:
-            same = json.loads((home / "asked.json").read_text()) == asked
+            before = json.loads((home / "asked.json").read_text())
         except (OSError, ValueError):
-            same = False
+            before = None
+        same = before == asked
+        # the latest commit measured before sending stands once the person says yes: only the commits to send differ
+        tip_stands = isinstance(before, dict) and {**before, "commits": commits} == asked
         if same and done.is_file():
             try:
                 report = json.loads(done.read_text())
@@ -755,7 +790,7 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
             for sent in ("checks.sent", "logs.sent"):
                 (home / sent).unlink(missing_ok=True)
             if not same:
-                run.forget()
+                run.forget(("tip",) if tip_stands else ())
                 (home / "plan.json").unlink(missing_ok=True)
                 (home / "asked.json").write_text(json.dumps(asked))
             planned: dict = {}
@@ -819,9 +854,19 @@ def _codeval(a: argparse.Namespace, held: dict[str, Any]) -> int | None:
             _sent(home, "checks.json.gz", "/codeval/<reference>/checks", codeval.packed(report), None, say)
             logs, redactions = codeval.logs_packed(home / "logs", "", [k["name"] for k in kept])
             _sent(home, "logs.tar.gz", "/codeval/<reference>/logs", logs, None, say, redacted=redactions)
+            result = {"reference": None, "sent": False, "results": str(home), "run": name}
+            if missing:
+                run.phase("done")
+                return _needed(
+                    a,
+                    run,
+                    errors.MetaphiError("no build or test found", code="test_command_missing"),
+                    [given for given, _ in missing],
+                    result,
+                )
             run.finished()
             if a.json:
-                print(json.dumps({"reference": None, "sent": False, "results": str(home), "run": name}, indent=2))
+                print(json.dumps(result, indent=2))
             else:
                 say(
                     "Nothing sent (--dry-run). What would be sent is in "
@@ -916,6 +961,12 @@ def cmd_codeval_status(a: argparse.Namespace) -> int:
     if got["state"] == "needs_person":
         return NEEDS_PERSON
     return AUTH if (got.get("error") or {}).get("type") == "auth_error" else FAILED
+
+
+def cmd_mcp(a: argparse.Namespace) -> int:
+    from metaphi import codeval_mcp
+
+    return codeval_mcp.serve()
 
 
 def _live(a: argparse.Namespace) -> str:
@@ -2208,6 +2259,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_codeval_status)
 
     s = sub.add_parser(
+        "mcp",
+        help="CodeVal as a local MCP server over stdio, for a coding agent: `claude mcp add codeval -- kennet mcp`",
+    )
+    s.set_defaults(fn=cmd_mcp)
+
+    s = sub.add_parser(
         "tail",
         help="follow a run live: each trial's timeline, the step it is on, and the last lines "
         "its sandboxes wrote; two or more runs side by side, a row per stage",
@@ -2290,7 +2347,7 @@ def main(argv: list[str] | None = None) -> int:
     p = parser()
     a = p.parse_args(argv)
     update.hold()
-    notifier = None if a.command in (None, "update") else update.Notifier(getattr(a, "json", False))
+    notifier = None if a.command in (None, "update", "mcp") else update.Notifier(getattr(a, "json", False))
     try:
         return _run(p, a)
     finally:
