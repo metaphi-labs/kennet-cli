@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<testsuite name="com.secretco.LedgerTest" tests="2" failures="1">
+  <testcase classname="com.secretco.LedgerTest" name="postsHunter2"><failure message="expected:&lt;5&gt; but was:&lt;4&gt;"/></testcase>
+  <testcase classname="com.secretco.LedgerTest" name="voids"/>
+</testsuite>

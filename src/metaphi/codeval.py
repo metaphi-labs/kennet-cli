@@ -31,6 +31,7 @@ import httpx
 
 from metaphi import __version__, api, codebase_checks, codebase_env, codebase_sites, codeval_runs, config, errors
 from metaphi import codebase_reading as reading
+from metaphi import codeval_extract as extract
 from metaphi import codeval_schema as schema
 from metaphi.o200k import tokens as _tokens
 
@@ -1295,6 +1296,10 @@ def step(raw: dict[str, Any], key: bytes) -> dict[str, Any]:
     out: dict[str, Any] = {"exit": code, "seconds": min(int(raw.get("seconds") or 0), STEP_MOST), "log": _log(raw)}
     if error:
         out["error"] = error
+    named = schema.defs()["Step"]["properties"]
+    for k in ("step", "class", "compile_kind"):
+        if k in named and raw.get(k) is not None:
+            out[k] = raw[k]
     for k in ("reported", "passed", "report"):
         if raw.get(k) is not None:
             out[k] = raw[k]
@@ -1648,6 +1653,8 @@ def measured(local: Local, bench: Bench, nxt: dict[str, Any], say: Callable[[str
     if nxt["tip"] and raw.get("tip"):
         out["tip"] = side(raw["tip"], key)
     out["seconds"] = min(round(time.monotonic() - began), STEP_MOST)
+    if "rules" in schema.defs()["Results"]["properties"]:
+        out["rules"] = extract.rules_hash()
     return out
 
 

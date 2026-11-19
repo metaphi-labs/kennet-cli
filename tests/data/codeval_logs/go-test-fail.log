@@ -1,0 +1,7 @@
+{"Time":"2026-01-01T00:00:00Z","Action":"start","Package":"acme.test/ledger"}
+{"Time":"2026-01-01T00:00:00Z","Action":"run","Package":"acme.test/ledger","Test":"TestPostHunter2"}
+{"Time":"2026-01-01T00:00:00Z","Action":"output","Package":"acme.test/ledger","Test":"TestPostHunter2","Output":"    ledger_test.go:12: balance for SecretCo was 4, want 5\n"}
+{"Time":"2026-01-01T00:00:00Z","Action":"fail","Package":"acme.test/ledger","Test":"TestPostHunter2","Elapsed":0.01}
+{"Time":"2026-01-01T00:00:00Z","Action":"run","Package":"acme.test/ledger","Test":"TestVoid"}
+{"Time":"2026-01-01T00:00:00Z","Action":"pass","Package":"acme.test/ledger","Test":"TestVoid","Elapsed":0}
+{"Time":"2026-01-01T00:00:00Z","Action":"fail","Package":"acme.test/ledger","Elapsed":0.02}

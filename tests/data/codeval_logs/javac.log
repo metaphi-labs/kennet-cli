@@ -1,0 +1,3 @@
+[ERROR] COMPILATION ERROR :
+[ERROR] /w/src/main/java/com/secretco/Ledger.java:[3,5] cannot find symbol
+  symbol:   variable hunter2

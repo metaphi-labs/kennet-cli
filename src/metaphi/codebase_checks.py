@@ -11,7 +11,6 @@ import sys
 import tempfile
 import threading
 import time
-import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import IO, Any
 
 from metaphi import codebase_reading as reading
 from metaphi import codebase_setup, errors, live
+from metaphi import codeval_extract as extract
 from metaphi.codebase_setup import Recipe, Shell, allowed
 from metaphi.steps import NONE, Steps
 
@@ -151,28 +151,7 @@ def _write(repo: Path, tree: dict[str, tuple[str, str]], into: Path) -> None:
 
 
 def _junit(d: Path) -> dict[str, str] | None:
-    files = sorted(d.rglob("*.xml"))
-    if not files:
-        return None
-    got: dict[str, str] = {}
-    for f in files:
-        try:
-            root = ET.parse(f).getroot()
-        except (ET.ParseError, OSError):
-            continue
-        for case in root.iter("testcase"):
-            outcome = (
-                "error"
-                if case.find("error") is not None
-                else "failed"
-                if case.find("failure") is not None
-                else "skipped"
-                if case.find("skipped") is not None
-                else "passed"
-            )
-            key = f"{case.get('classname', '')}\0{case.get('name', '')}"
-            got[key] = max(got.get(key, outcome), outcome, key=RANK.__getitem__)
-    return got
+    return extract.junit_files(sorted(d.rglob("*.xml"))) or None
 
 
 def outcomes(cases: dict[str, str] | None) -> dict[str, str]:
@@ -303,21 +282,58 @@ def _ran(code: int | None, took: float, log: Path | None = None) -> dict[str, An
     return {**({"log": str(log)} if log is not None else {}), "exit": code, "seconds": round(took)}
 
 
-def _tested(code: int | None, took: float, cases: dict[str, str] | None, log: Path) -> dict[str, Any]:
+def _classed(row: dict[str, Any], why: dict[str, Any]) -> dict[str, Any]:
+    """A run with why it ended: the class, step and kind of compile error from the shipped rules, and the schema's
+    error word for that class. `rule` names the rule that decided; it stays on this machine."""
+    return {
+        **row,
+        "error": extract.error(why["class"]),
+        **{k: why[k] for k in ("class", "step", "compile_kind", "rule")},
+    }
+
+
+def _tested(
+    code: int | None,
+    took: float,
+    cases: dict[str, str] | None,
+    log: Path,
+    found: extract.Found | None = None,
+    limit_s: float | None = None,
+) -> dict[str, Any]:
+    found = found or extract.Found()
+    cases = {**found.cases, **(cases or {})} or None
+    said = set((cases or {}).values())
+    found.classes += [c for o, c in (("error", "test_error"), ("failed", "test_assertion")) if o in said]
     ran = [v for v in (cases or {}).values() if v != "skipped"]
     if ran:
         report, counts = "junit", (len(ran), ran.count("passed"))
+    elif found.counts:
+        report, counts = "summary", found.counts
     else:
         counts = reading.counted(log)
         report = "summary" if counts else None
-    return {
-        **_ran(code, took, log),
-        "error": reading.error_class(code, log) if code != 0 or not counts or counts[0] != counts[1] else None,
-        "report": report,
-        "reported": counts[0] if counts else None,
-        "passed": counts[1] if counts else None,
-        "cases": outcomes(cases),
-    }
+    why = extract.classify("test", code, log, found, counts, took, limit_s)
+    return _classed(
+        {
+            **_ran(code, took, log),
+            "report": report,
+            "reported": counts[0] if counts else None,
+            "passed": counts[1] if counts else None,
+            "cases": outcomes(cases),
+        },
+        why,
+    )
+
+
+def _flaky(rows: list[dict[str, Any]]) -> None:
+    extract.flaky(rows)
+    for r in rows:
+        if "class" in r:
+            r["error"] = extract.error(r["class"])
+
+
+def _found(log: Path, junit: Path, src: Path, since: float) -> extract.Found:
+    return extract.read(extract._text(log), junit, src, since)
 
 
 def _side(
@@ -370,11 +386,11 @@ def _ran_side(
     elif recipe.image:
         build = (
             f"({recipe.setup or 'true'}) || echo 'setup failed at this commit; building on the set-up image' >&2; "
-            f"({recipe.build or 'true'})"
+            f"({extract.structured(recipe.build or 'true')})"
         )
     else:
-        build = f"({recipe.setup or 'true'}) && ({recipe.build or 'true'})"
-    test = recipe.test if recipe else plan.test
+        build = f"({recipe.setup or 'true'}) && ({extract.structured(recipe.build or 'true')})"
+    test = extract.structured(recipe.test) if recipe else plan.test
     tests = env.get("KENNET_TESTS", "")
     side: dict[str, Any] = {"tests": []}
     seconds = plan.run_minutes * 60
@@ -386,6 +402,7 @@ def _ran_side(
 
     before = _installed(shell.src) if measure is not None else 0
     if build:
+        since = time.time() - 1
         with logs.open(f"{label}.build.log") as log, plan.steps.step("build", at=label):
             path = Path(log.name)
             code, took = _run(
@@ -396,7 +413,10 @@ def _ran_side(
                 log,
                 peaks,
             )
-        side["build"] = {**_ran(code, took, path), "error": reading.error_class(code, path)}
+        found = _found(path, junit, shell.src, since)
+        side["build"] = _classed(
+            _ran(code, took, path), extract.classify("build", code, path, found, None, took, seconds)
+        )
         shown("build", code, path)
         if code is None:
             shell.stop()
@@ -411,6 +431,7 @@ def _ran_side(
             shell.extra = {"GOFLAGS": given}
     for n in range(runs):
         shell.empty()
+        since = time.time() - 1
         with logs.open(f"{label}.test-{n + 1}.log") as log, plan.steps.step("test", at=label):
             path = Path(log.name)
             code, took = _run(
@@ -431,7 +452,8 @@ def _ran_side(
             )
         except (shutil.Error, OSError):
             pass
-        side["tests"].append(_tested(code, took, _junit(junit), path))
+        cases = {**(_junit(junit) or {}), **extract.junit_files(extract.reports(shell.src, since))}
+        side["tests"].append(_tested(code, took, cases, path, _found(path, junit, shell.src, since), seconds))
         shown(f"test {n + 1}", code, path)
         if measure is not None and n == 0:
             shell.extra = {}
@@ -440,13 +462,16 @@ def _ran_side(
         if code is None:
             shell.stop()
             break
+    _flaky(side["tests"])
     if measure is not None and side["tests"] and side["tests"][0]["exit"] is not None:
         if shell.offline():
             shell.empty()
+            since = time.time() - 1
             with logs.open(f"{label}.offline.log") as log, plan.steps.step("offline", at=label):
                 path = Path(log.name)
                 code, took = _run(shell.line(test, tests), shell.src, shell.env(tests), seconds, log)
-            side["offline"] = _tested(code, took, _junit(junit), path)
+            found = _found(path, junit, shell.src, since)
+            side["offline"] = _tested(code, took, _junit(junit), path, found, seconds)
             if code is None:
                 shell.stop()
         side["memory_peak_bytes"] = shell.memory_peak()

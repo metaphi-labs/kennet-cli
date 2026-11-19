@@ -419,6 +419,15 @@ The results, one per batch:
 
 Everything sent is kept, byte for byte, in the repository's state directory under `sent/`; the done line names it.
 
+Why a build or test failed is read here, by rules shipped with this release. CodeVal turns on the toolchain's
+structured output where the command names the tool (`go test -json`, cargo `--message-format=json`, pytest JUnit XML,
+Jest `--json`, Bazel's build event file, and GCC 13+ SARIF for CMake and configure builds) and reads the reports
+Surefire and Gradle write anyway. What those do not say is read from the log by the rule pack
+(`metaphi/data/codeval_rules.json`): patterns and templates mapped to a fixed list of classes, environmental ends from
+the exit code, signal, wall clock and memory limit, and tables of compiler codes, where an unknown code counts as
+`other`. Only the class leaves the machine, and each Results body names the pack by its sha256 (`rules`). Metaphi AI
+never sends rules; a new rule is a new release. No model is used.
+
 ### Signing in
 
 CodeVal always signs in with a browser code; the keys it hands this machine hold what the organization holds, and

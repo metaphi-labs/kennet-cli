@@ -1,0 +1,6 @@
+{"ImportPath":"acme.test/ledger [acme.test/ledger.test]","Action":"build-output","Output":"# acme.test/ledger\n"}
+{"ImportPath":"acme.test/ledger [acme.test/ledger.test]","Action":"build-output","Output":"ledger/post.go:3:2: undefined: hunter2Total\n"}
+{"ImportPath":"acme.test/ledger [acme.test/ledger.test]","Action":"build-fail"}
+{"Time":"2026-01-01T00:00:00Z","Action":"start","Package":"acme.test/ledger"}
+{"Time":"2026-01-01T00:00:00Z","Action":"output","Package":"acme.test/ledger","Output":"FAIL\tacme.test/ledger [build failed]\n"}
+{"Time":"2026-01-01T00:00:00Z","Action":"fail","Package":"acme.test/ledger","Elapsed":0,"FailedBuild":"acme.test/ledger [acme.test/ledger.test]"}

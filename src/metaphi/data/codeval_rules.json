@@ -1,0 +1,112 @@
+{
+  "pack": "kennet.codeval.rules.v1",
+  "steps": ["setup", "dep_resolve", "compile", "test_compile", "test", "lint", "package"],
+  "classes": [
+    "ok", "dep_unresolved", "dep_conflict", "build_config", "compile_source", "compile_test", "link",
+    "test_assertion", "test_error", "test_timeout", "test_flaky", "quality_gate", "env_network", "env_resource",
+    "env_timeout", "env_toolchain_missing", "env_permission", "cancelled", "unknown"
+  ],
+  "compile_kinds": ["missing_symbol", "type_mismatch", "syntax", "semantic", "other"],
+  "exits": {
+    "126": "env_permission",
+    "127": "env_toolchain_missing",
+    "130": "cancelled",
+    "137": "env_resource",
+    "143": "cancelled",
+    "-2": "cancelled",
+    "-9": "env_resource",
+    "-15": "cancelled"
+  },
+  "memory_share": 0.95,
+  "patterns": [
+    {"id": "env.oom.java", "class": "env_resource", "re": "java\\.lang\\.OutOfMemoryError"},
+    {"id": "env.oom.node", "class": "env_resource", "re": "JavaScript heap out of memory"},
+    {"id": "env.oom.alloc", "class": "env_resource", "re": "Cannot allocate memory|virtual memory exhausted|fatal error: out of memory"},
+    {"id": "env.disk", "class": "env_resource", "re": "No space left on device|ENOSPC"},
+    {"id": "env.toolchain.sh", "class": "env_toolchain_missing", "re": "(?:^|: )[\\w.+-]+: (?:command )?not found$"},
+    {"id": "env.toolchain.exec", "class": "env_toolchain_missing", "re": "executable file not found in \\$PATH"},
+    {"id": "env.toolchain.jdk", "class": "env_toolchain_missing", "re": "(?i)invalid (?:target|source) release|Unable to locate a Java Runtime|JAVA_HOME is not (?:set|defined)"},
+    {"id": "dep.npm.conflict", "class": "dep_conflict", "step": "dep_resolve", "re": "npm (?:ERR!|error) code ERESOLVE"},
+    {"id": "dep.npm.missing", "class": "dep_unresolved", "step": "dep_resolve", "re": "npm (?:ERR!|error) code E(?:404|TARGET|NOTARGET)"},
+    {"id": "dep.pip.conflict", "class": "dep_conflict", "step": "dep_resolve", "re": "ResolutionImpossible|conflicting dependencies"},
+    {"id": "dep.pip.missing", "class": "dep_unresolved", "step": "dep_resolve", "re": "No matching distribution found for"},
+    {"id": "dep.maven.missing", "class": "dep_unresolved", "step": "dep_resolve", "re": "Could not resolve dependencies for project|Could not find artifact"},
+    {"id": "dep.gradle.missing", "class": "dep_unresolved", "step": "dep_resolve", "re": "Could not resolve all (?:files|dependencies|artifacts) for configuration"},
+    {"id": "dep.cargo.conflict", "class": "dep_conflict", "step": "dep_resolve", "re": "failed to select a version for"},
+    {"id": "dep.cargo.missing", "class": "dep_unresolved", "step": "dep_resolve", "re": "no matching package named"},
+    {"id": "dep.go.conflict", "class": "dep_conflict", "step": "dep_resolve", "re": "ambiguous import: found package"},
+    {"id": "dep.go.missing", "class": "dep_unresolved", "step": "dep_resolve", "re": "cannot find module providing package|: unknown revision |missing go\\.sum entry"},
+    {"id": "dep.bundler.conflict", "class": "dep_conflict", "step": "dep_resolve", "re": "Bundler could not find compatible versions"},
+    {"id": "dep.bundler.missing", "class": "dep_unresolved", "step": "dep_resolve", "re": "Could not find gem '"},
+    {"id": "dep.composer.conflict", "class": "dep_conflict", "step": "dep_resolve", "re": "Your requirements could not be resolved to an installable set of packages"},
+    {"id": "env.network", "class": "env_network", "re": "Temporary failure in name resolution|Could not resolve host|getaddrinfo ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Connection timed out|Network is unreachable"},
+    {"id": "link.gnu", "class": "link", "step": "compile", "re": "undefined reference to `|ld returned \\d+ exit status|cannot find -l\\w"},
+    {"id": "link.darwin", "class": "link", "step": "compile", "re": "ld: symbol\\(s\\) not found|Undefined symbols for architecture"},
+    {"id": "link.msvc", "class": "link", "step": "compile", "re": "\\bLNK(?:2019|2001|1120)\\b"},
+    {"id": "config.cmake", "class": "build_config", "step": "setup", "re": "CMake Error|Could not find a package configuration file"},
+    {"id": "config.autotools", "class": "build_config", "step": "setup", "re": "^configure: error:"},
+    {"id": "config.make", "class": "build_config", "step": "setup", "re": "No rule to make target|\\*\\*\\* missing separator"},
+    {"id": "config.gradle", "class": "build_config", "step": "setup", "re": "A problem occurred configuring (?:root )?project|Could not find method"},
+    {"id": "config.maven", "class": "build_config", "step": "setup", "re": "Non-resolvable parent POM|The project .* has \\d+ errors?|Unknown lifecycle phase"},
+    {"id": "gate.coverage", "class": "quality_gate", "step": "lint", "re": "(?i)coverage (?:failure|check failed)|Rule violated for|FAIL Required test coverage"},
+    {"id": "gate.lint", "class": "quality_gate", "step": "lint", "re": "^\\s*✖ \\d+ problems?|would reformat|Checkstyle violations|spotless.*violations|^Found \\d+ errors?\\.$"},
+    {"id": "test.timeout", "class": "test_timeout", "step": "test", "re": "panic: test timed out after|Exceeded timeout of \\d+ ?ms|Timeout - Async callback was not invoked|\\+{8} Timeout \\+{8}"},
+    {"id": "compile.rust", "class": "compile", "step": "compile", "re": "error: could not compile `"},
+    {"id": "compile.java", "class": "compile", "step": "compile", "re": "COMPILATION ERROR|Compilation failed; see the compiler error output|compileJava FAILED|compileTestJava FAILED"},
+    {"id": "compile.ts", "class": "compile", "step": "compile", "re": "error TS\\d{4}:"},
+    {"id": "compile.go", "class": "compile", "step": "compile", "re": "\\[build failed\\]|\\[setup failed\\]"},
+    {"id": "compile.c", "class": "compile", "step": "compile", "re": "^\\S+:\\d+:\\d+: (?:fatal )?error: "},
+    {"id": "compile.py", "class": "compile", "step": "compile", "re": "^(?:SyntaxError|IndentationError|ModuleNotFoundError|ImportError): |ERROR collecting "},
+    {"id": "test.assert", "class": "test_assertion", "step": "test", "re": "AssertionError|assertion failed|^\\s*--- FAIL: |^\\s*Expected[: ]|expected:<.*> but was:<|^FAILED |Tests failed|^test result: FAILED"},
+    {"id": "test.error", "class": "test_error", "step": "test", "re": "^panic: |Traceback \\(most recent call last\\)|Segmentation fault|SIGSEGV|Exception in thread"},
+    {"id": "env.permission", "class": "env_permission", "re": "Permission denied|EACCES|Operation not permitted"}
+  ],
+  "templates": [
+    {"id": "t.go.fail", "class": "test_assertion", "step": "test", "t": "FAIL <*> <*>"},
+    {"id": "t.go.buildfail", "class": "compile", "step": "compile", "t": "FAIL <*> [build failed]"},
+    {"id": "t.cargo.compile", "class": "compile", "step": "compile", "t": "error: could not compile <*> (<*>) due to <*> previous <*>"},
+    {"id": "t.pytest.collect", "class": "compile", "step": "test_compile", "t": "ERROR collecting <*>"}
+  ],
+  "kinds": [
+    {"kind": "missing_symbol", "re": "cannot find symbol|was not declared in this scope|undeclared identifier|undefined: \\w|unresolved (?:name|import)|cannot find (?:name|module|type|value)|has no (?:attribute|member)|does not exist|is not defined|NameError|ModuleNotFoundError|ImportError"},
+    {"kind": "type_mismatch", "re": "incompatible types|mismatched types|cannot convert|invalid conversion|cannot use .* as .* value|is not assignable to|TypeError|expected .* arguments?, (?:got|found)"},
+    {"kind": "syntax", "re": "SyntaxError|IndentationError|syntax error|expected .* before|expected one of|unexpected token|';' expected|Unexpected end of"},
+    {"kind": "semantic", "re": "declared and not used|imported and not used|borrow|moved value|unreachable|might not have been initialized|missing return"}
+  ],
+  "code_res": {
+    "rustc": "error\\[(E\\d{4})\\]",
+    "tsc": "error (TS\\d{4,5}):",
+    "csc": "error (CS\\d{4}):"
+  },
+  "codes": {
+    "rustc": {
+      "E0412": "missing_symbol", "E0425": "missing_symbol", "E0432": "missing_symbol", "E0433": "missing_symbol",
+      "E0599": "missing_symbol", "E0609": "missing_symbol", "E0560": "missing_symbol", "E0405": "missing_symbol",
+      "E0308": "type_mismatch", "E0277": "type_mismatch", "E0061": "type_mismatch", "E0369": "type_mismatch",
+      "E0382": "semantic", "E0499": "semantic", "E0502": "semantic", "E0505": "semantic", "E0384": "semantic",
+      "E0596": "semantic", "E0597": "semantic", "E0106": "semantic"
+    },
+    "tsc": {
+      "TS2304": "missing_symbol", "TS2307": "missing_symbol", "TS2339": "missing_symbol", "TS2305": "missing_symbol",
+      "TS2552": "missing_symbol", "TS2322": "type_mismatch", "TS2345": "type_mismatch", "TS2554": "type_mismatch",
+      "TS2769": "type_mismatch", "TS2741": "type_mismatch", "TS1005": "syntax", "TS1128": "syntax", "TS1109": "syntax",
+      "TS7006": "semantic", "TS2564": "semantic", "TS18048": "semantic"
+    },
+    "csc": {
+      "CS0246": "missing_symbol", "CS0103": "missing_symbol", "CS1061": "missing_symbol", "CS0234": "missing_symbol",
+      "CS0029": "type_mismatch", "CS1503": "type_mismatch", "CS0266": "type_mismatch", "CS1002": "syntax",
+      "CS1513": "syntax", "CS1525": "syntax", "CS0161": "semantic", "CS0165": "semantic"
+    },
+    "gcc": {
+      "-Wimplicit-function-declaration": "missing_symbol", "-Wincompatible-pointer-types": "type_mismatch",
+      "-Wint-conversion": "type_mismatch", "-Wreturn-type": "semantic", "-Wunused-variable": "semantic"
+    }
+  },
+  "bazel": {
+    "tests": {"FLAKY": "test_flaky", "TIMEOUT": "test_timeout", "FAILED": "test_assertion", "INCOMPLETE": "test_error",
+              "REMOTE_FAILURE": "env_network", "FAILED_TO_BUILD": "compile", "TOOL_HALTED_BEFORE_TESTING": "cancelled"},
+    "aborted": {"OUT_OF_MEMORY": "env_resource", "TIME_OUT": "env_timeout", "USER_INTERRUPTED": "cancelled",
+                "LOADING_FAILURE": "build_config", "ANALYSIS_FAILURE": "build_config",
+                "REMOTE_ENVIRONMENT_FAILURE": "env_network"}
+  }
+}

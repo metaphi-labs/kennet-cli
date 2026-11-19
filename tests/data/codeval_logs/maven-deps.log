@@ -1,0 +1,1 @@
+[ERROR] Failed to execute goal on project ledger: Could not resolve dependencies for project com.secretco:ledger:jar:1.0: Could not find artifact com.secretco:hunter2:jar:2.0
