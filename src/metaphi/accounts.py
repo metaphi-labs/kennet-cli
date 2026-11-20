@@ -172,6 +172,7 @@ def _keep(body: dict[str, Any], token: str) -> None:
         "no_api_key",
         "no_api_key_code",
         "no_api_key_org",
+        "no_codeval",
         "invitation",
         "step_up",
     ):
@@ -185,6 +186,8 @@ def _keep(body: dict[str, Any], token: str) -> None:
             cfg["org_name"] = body["org_name"]
         if isinstance(body.get("scopes"), list):
             cfg["scopes"] = [x for x in body["scopes"] if isinstance(x, str)]
+        if isinstance(body.get("no_codeval"), str) and body["no_codeval"]:
+            cfg["no_codeval"] = body["no_codeval"]  # the step that opens CodeVal to the org, as accounts said it
     else:
         if cfg.get("api_key_from") == "login":
             cfg.pop("api_key", None)

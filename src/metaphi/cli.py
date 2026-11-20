@@ -24,9 +24,11 @@ import httpx
 from metaphi import __version__, accounts, agents, config, errors, palette, skill, update
 
 FAILED, AUTH, LATER, UPGRADE, NEEDS_PERSON = 1, 3, 4, 5, 6
-# kennet codeval: install a tool, give a command, fix the machine the tip ended on, or choose where the run goes on
-# (another machine or clone holds it, or it cannot be restarted again)
-PERSON_MUST_ACT = frozenset(["toolchain_missing", "test_command_missing", "environment", "in_use", "restart_limit"])
+# kennet codeval: install a tool, give a command, fix the machine the tip ended on, choose where the run goes on
+# (another machine or clone holds it, or it cannot be restarted again), or have an owner or admin open CodeVal
+PERSON_MUST_ACT = frozenset(
+    ["toolchain_missing", "test_command_missing", "environment", "in_use", "restart_limit", "codeval_not_open"]
+)
 
 
 def status(error: errors.MetaphiError) -> int:
@@ -411,6 +413,13 @@ def _codeval_signin(a: argparse.Namespace, say: Callable[[str], None], stream: I
     except accounts.Error as e:
         if e.code not in ("not_signed_in", "no_api_key", "insufficient_scope", "invalid_api_key"):
             raise
+    except errors.MetaphiError as e:
+        if e.code != "codeval_not_open":
+            raise
+        with contextlib.suppress(accounts.Error):  # opened since? the keys this sign-in holds now, with no browser
+            accounts.pickup()
+        codeval.key_ready()
+        return
     if accounts.pickup() is not None:
         with contextlib.suppress(accounts.Error):
             codeval.key_ready()

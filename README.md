@@ -449,7 +449,9 @@ never sends rules; a new rule is a new release. No model is used.
 ### Signing in
 
 CodeVal always signs in with a browser code; the keys it hands this machine hold what the organization holds, and
-CodeVal needs `kennet:codeval:write` among them (`insufficient_scope` otherwise). At a terminal it opens the page
+CodeVal needs `kennet:codeval:write` among them. When the organization has not opened CodeVal and the person is not
+an owner or admin, it stops with exit 6 (`codeval_not_open`) and prints the step the sign-in service gave, word for
+word (an owner or admin runs `kennet login` once); with no such step, `insufficient_scope`. At a terminal it opens the page
 (`--no-browser` only prints it) and waits. Away from a terminal, or under `--json`, it starts the code and stops at
 once with exit 3:
 
@@ -473,6 +475,7 @@ pending. A denied or expired code exits 3: `Nothing was sent. Run the same comma
 | 1 | failed | show the error |
 | 5 | this version is too old for the service | upgrade |
 | 6 | a person must act: no toolchain, or no test command found | ask them; rerun with `-- <test command>` |
+| 6 | `codeval_not_open`: the organization has not opened CodeVal | relay the message word for word; an owner or admin runs `kennet login` once, then run the same command |
 
 ### Runs that take hours
 

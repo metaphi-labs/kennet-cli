@@ -1442,11 +1442,22 @@ def get_run(run: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, 
 SCOPE = "kennet:codeval:write"
 
 
+def not_open(step: str) -> errors.MetaphiError:
+    """The organization has not opened CodeVal, and only an owner or admin can: the step as accounts said it."""
+    return errors.MetaphiError(step, code="codeval_not_open")
+
+
 def key_ready(sleep: Callable[[float], None] = time.sleep) -> None:
-    key, cfg = api.key(None, False), config.load()
+    cfg = config.load()
+    said = cfg.get("no_api_key")
+    if cfg.get("no_api_key_code") == "codeval_not_open" and said and not config.api_key(None, False):
+        raise not_open(said)
+    key = api.key(None, False)
     if key == cfg.get("api_key") and cfg.get("api_key_from") == "login" and isinstance(cfg.get("scopes"), list):
         if SCOPE in cfg["scopes"]:
             return
+        if isinstance(cfg.get("no_codeval"), str) and cfg["no_codeval"]:
+            raise not_open(cfg["no_codeval"])
         org = cfg.get("org_name") or cfg.get("org") or "this organization"
         raise _named(
             errors.AuthError(
