@@ -1,0 +1,2 @@
+{"reason":"compiler-message","package_id":"ledger 0.1.0","message":{"level":"error","code":{"code":"E9999","explanation":null},"message":"something hunter2","rendered":"error[E9999]"}}
+{"reason":"build-finished","success":false}

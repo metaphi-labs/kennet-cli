@@ -1,0 +1,3 @@
+{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"GNU C17"}},"results":[
+ {"level":"error","message":{"text":"'hunter2_total' was not declared in this scope"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"ledger.c"}}}]},
+ {"level":"warning","ruleId":"-Wunused-variable","message":{"text":"unused variable 'SecretCo'"}}]}]}

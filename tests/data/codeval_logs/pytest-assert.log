@@ -1,0 +1,2 @@
+FAILED tests/test_ledger.py::test_posts_hunter2 - AssertionError: SecretCo balance 4 != 5
+========================= 1 failed, 1 passed in 0.12s ==========================

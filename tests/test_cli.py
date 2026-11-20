@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import json
+import re
+import shlex
 from urllib.parse import parse_qsl
 
 import httpx
@@ -283,10 +285,10 @@ def test_the_partner_guide_names_only_commands_and_flags_the_parser_takes(capsys
     assert cli.main(["skill", "show", "partner"]) == 0
     guide = capsys.readouterr().out
     assert guide == skill.PARTNER_GUIDE and f"kennet {cli.__version__}" in guide.splitlines()[0]
-    lines = [x.split("#")[0].strip() for x in guide.splitlines() if x.startswith("kennet ")]
+    lines = re.findall(r"`(kennet [^`]+)`", guide)
     assert len(lines) >= 4
     for line in lines:
-        cli.parser().parse_args(line.split()[1:])
+        cli.parser().parse_args(shlex.split(line)[1:])
     assert "skill show partner" in skill.PARTNER_STUB and skill.PARTNER_STUB.startswith("---\nname: kennet-partner\n")
 
 

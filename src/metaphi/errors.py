@@ -102,7 +102,7 @@ def from_object(error: dict[str, Any]) -> MetaphiError:
         value = error.get(key)
         return value if isinstance(value, str) and value else None
 
-    return cls(
+    got = cls(
         text("message") or text("code") or "the call failed",
         code=text("code"),
         type=kind if isinstance(kind, str) else None,
@@ -111,3 +111,8 @@ def from_object(error: dict[str, Any]) -> MetaphiError:
         run_id=text("run_id"),
         action_url=text("action_url"),
     )
+    if tip := text("filed_tip"):  # profile_mismatch: the tip the CodeVal run measures, as data
+        got.context["filed_tip"] = tip
+    if isinstance(error.get("measure"), int):  # superseded: the CodeVal run's live measure, as data
+        got.context["measure"] = error["measure"]
+    return got

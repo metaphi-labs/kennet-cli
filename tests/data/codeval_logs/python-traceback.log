@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/w/ledger.py", line 3, in <module>
+    raise RuntimeError("hunter2 for SecretCo")
+RuntimeError: hunter2 for SecretCo

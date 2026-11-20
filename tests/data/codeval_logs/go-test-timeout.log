@@ -1,0 +1,3 @@
+{"Time":"2026-01-01T00:00:00Z","Action":"run","Package":"acme.test/ledger","Test":"TestSlow"}
+{"Time":"2026-01-01T00:10:00Z","Action":"output","Package":"acme.test/ledger","Test":"TestSlow","Output":"panic: test timed out after 10m0s\n"}
+{"Time":"2026-01-01T00:10:00Z","Action":"fail","Package":"acme.test/ledger","Test":"TestSlow","Elapsed":600}

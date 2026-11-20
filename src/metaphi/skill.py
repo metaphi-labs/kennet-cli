@@ -51,7 +51,7 @@ their data goes.
   | 3 | A sign-in or a key is needed. `error.next_step` is the command, or null when only the user can clear it. |
   | 4 | The same call may work later: the service is unavailable, a limit is reached, or a wait ran out. |
   | 5 | This version of `kennet` is too old for the service (`upgrade_required`). |
-  | 6 | `kennet codeval` needs the user to decide: `needs.ask` is the question, `needs.options` the commands. |
+  | 6 | `kennet codeval` needs the user to act: install the tool the message names, or give the build-and-test command. |
 
 - On an error, read `error.code` and find it in the table in step 4. `error.next_step` is always there: the next command
   to run (add `--json` to it), or null when no command clears it. `error.advice`, when there, is what the user does that
@@ -204,15 +204,21 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `step_up_required` | A change to the organization needs a recent sign-in. Step 2, from its start, then the same command once more. |
 | `no_api_key` | Signed in, and no key came with the sign-in. If `next_step` is `kennet org create <name>`, the user is in no organization: make theirs (step 1). If it is `kennet login`, run `kennet login --json` once: it saves the keys, with no browser, if access was given since. If it comes back `no_api_key` again, tell the user the message and stop. |
 | `invalid_api_key`, `missing_api_key` | The key was revoked or replaced, often by a later sign-in elsewhere. Step 2, or the user sets a new `METAPHI_API_KEY`. |
+| `codeval_not_open` | `kennet codeval` needs the user (exit 6): their organization has not opened CodeVal, and only an owner or admin can. Tell them the message word for word (it names the step); once an owner or admin has run `kennet login`, run the same command. |
 | `insufficient_scope` | The key does not hold access to what the command reaches. Run `kennet login --json` once: a signed-in machine is handed new keys with no browser. If it repeats, tell the user. |
 | `auth_unavailable`, `unavailable`, `balance_unavailable`, `unreachable` | The service could not answer; nothing was started. Wait `retry_after_s` (30 seconds when absent), run the same command once more, then stop and tell the user with the `request_id`. |
 | `run_unavailable` | The twin started and failed on Metaphi AI's side; nothing was written or charged. "Upload the trace again" means run `next_step`, `kennet twin <file>`, with the options you used before. Do that once. If it fails the same way, stop and give the user both `run_id`s. |
 | `git_too_old` | `kennet codeval` needs a newer git. Tell the user; nothing was sent. |
 | `no_repository` | `kennet codeval` found no full git clone at the paths given; each path's reason is in the output. Tell the user to clone it in full and run the same command. |
-| `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes`, `dry_run_with_detach` | `kennet codeval` was given flags that do not go together. Fix the flags and run it again; nothing ran or was sent. |
-| `container_required`, `test_command_missing` | `kennet codeval` needs the user (exit 6): put `needs.ask` to them, word for word, and on their answer run the `needs.options` command it picks, or `next_step`. `kennet skill show partner` is the CodeVal guide. |
-| `run_not_found`, `bad_wait` | `kennet codeval status` found no such run on this machine, or `--wait` was negative. `kennet codeval status --json` names the run updated last. |
-| `run_in_progress` | That `kennet codeval` run is already going in another process. Run `next_step` to follow it. |
+| `sign_in_required` | `kennet codeval` needs the user's sign-in (exit 3): give them `sign_in.verification_uri` and `sign_in.user_code` word for word, then run `next_step`. `kennet skill show partner` is the CodeVal guide. |
+| `sign_in_pending` | `kennet login --wait` is still waiting for the approval (exit 4): run `next_step` again. |
+| `toolchain_missing`, `test_command_missing` | `kennet codeval` needs the user (exit 6): tell them the message; on their answer run `next_step`. |
+| `environment` | `kennet codeval` needs the user (exit 6): the latest commit ended in this machine's environment (network, memory or disk, time, permissions); that was sent. Tell them the message; once it is fixed, run the same command. |
+| `in_use` | `kennet codeval` needs the user (exit 6): another machine or clone is measuring this repository (the service said `key_mismatch`, `profile_mismatch`, `superseded` for a newer measure, or `batch_answered` for a batch it already holds other results for). Tell them the message word for word; run `next_step` (the same command with `--restart`, which replaces that measurement) only on their yes. `profile_gone` is not shown: when the commit a run was filed at is rewritten away in this clone, CodeVal restarts at the current tip itself and says so in one line. |
+| `restart_limit` | `kennet codeval` needs the user (exit 6): this repository was measured afresh as many times as a run takes and cannot be restarted again. Tell them the message; the live measurement goes on where it runs, with no `--restart`. |
+| `unreadable` | `kennet codeval`: git could not read a repository given. Tell the user; nothing was sent for it. |
+| `bad_wait` | `--wait` takes seconds, 0 or more. |
+| `schema_refused` | `kennet codeval` refused to send a value outside its schema, or to follow an instruction outside it (more than a batch can answer, or a blob id below the privacy floor); nothing was sent or run. Tell the user the message. |
 | `confirmation_required` | Nothing was sent. Ask the user; on yes, run `next_step`, the same command with `--yes`. |
 | `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
 | `rate_limited_concurrent`, `rate_limited_daily` | Too many runs at once, or today. Wait for a run to end, or tell the user. |
@@ -401,7 +407,7 @@ PARTNER_NAME = "kennet-partner"
 
 PARTNER_STUB = f"""---
 name: {PARTNER_NAME}
-description: Running CodeVal with the `kennet` CLI, which builds and tests git repositories on this machine and sends counts, ids and logs to Metaphi AI, and putting a mutual NDA in place with Metaphi AI. Use when the user asks to run CodeVal, mentions `kennet codeval`, `kennet mnda` or metaphi.ai/partners.
+description: Running CodeVal with the `kennet` CLI, which measures git repositories on this machine and sends Metaphi AI typed measurements (no source code, logs, file paths, author names or commit text; public dependency names and standard build-file names are included); and a mutual NDA with Metaphi AI. Use when the user asks to run CodeVal, mentions `kennet codeval`, `kennet mnda` or metaphi.ai/partners.
 ---
 {MARK}
 
@@ -421,119 +427,28 @@ pip install kennet                       # or anywhere with Python 3.10+
 
 PARTNER_GUIDE = f"""# Kennet CodeVal (kennet {__version__})
 
-`kennet codeval` reads git repositories on this machine, builds and tests them in a temporary copy, and sends the
-measurements to Metaphi AI. `kennet mnda` puts a mutual NDA in place between the user's organization and Metaphi AI.
+Run `kennet codeval <paths> --json` (paths are full git clones or git URLs; add `-- '<command>'` when the user gives
+the command that builds and tests). It measures the repositories here and sends Metaphi AI typed measurements: no
+source code, logs, file paths, author names or commit text. Public dependency names and standard build-file names are
+included. Exactly what: https://docs.metaphi.ai/kennet/data-licensing/codeval#data-collected. The
+browser sign-in is the user's one step: on exit 3 (`sign_in_required`) give them `sign_in.verification_uri` and
+`sign_in.user_code` word for word, never asking them to paste anything back, then run `next_step`
+(`kennet login --wait 300 --json`; exit 4 means still waiting, run it again) and then the `next_step` it prints. A
+run can take hours; if it stops, the same command goes on from the last finished unit. When done it prints
+`{{"org", "repos": [{{"name", "run", "state", "sent"}}]}}`: tell the user each `run` and that `sent` holds exactly
+what was sent.
 
-## Rules
+| Exit | Meaning | Next |
+| --- | --- | --- |
+| 0 | done | report each run |
+| 1 | failed | tell the user `error.message` and `request_id` |
+| 3 | sign-in needed, denied or expired | relay the address and code, run `next_step` |
+| 4 | still waiting, or try later | run `next_step`, or the same command after `retry_after_s` |
+| 5 | `kennet` is too old | ask, run `next_step`, then the same command |
+| 6 | the user must act | tell them the message (a tool to install, or the build-and-test command to give) |
 
-- Add `--json` to every `kennet` command. stdout is one JSON object, the result or `{{"error": {{...}}}}`; progress
-  is on stderr. Decide from `error.code` and `error.next_step`, never from message text. Exit 0 done; 1 failed;
-  2 the command line was wrong; 3 a sign-in is needed (`next_step`); 4 try the same call later, or, from
-  `kennet codeval status`, still running; 5 `kennet` is too old (`next_step` upgrades it: ask, run it, go on);
-  6 the user must decide (`needs`).
-- Never ask the user to paste a token, key or code into the chat.
-- Nothing is sent without the user's yes. At their terminal `kennet codeval` asks; under `--json` or away from a
-  terminal it sends only with `--yes`. Tell the user what is sent (below) and ask before adding `--yes`.
-- Only `--deep` sends file contents: never add it without asking in those words.
-- Never add `--yes` or `--deep` on your own, also not to a command from `needs.options`: run one only after the
-  user chose it.
-
-## 1. Sign in
-
-```sh
-kennet login --json
-```
-
-It opens the sign-in page in the user's browser, or, over SSH or with `--device`, prints a link and a code to enter
-in any browser. `"keys": true` means the organization's keys are saved. `no_api_key` with `reason`
-`no_organization`: ask what their company is called, run `kennet org create "<name>" --json`, then
-`kennet login --json` again.
-
-## 2. CodeVal
-
-Name each repository: a path to a full git clone, or a git URL. A run takes hours on a large repository, so run
-it in the background and come back for it, in this session or a later one:
-
-```sh
-kennet codeval ./their-repo --dry-run --json                 # first: what would be sent; nothing is sent
-kennet codeval ./their-repo --yes --detach --json            # on the user's yes: starts it, returns its run id
-kennet codeval status <run> --json --wait 600                # come back: returns when it moves on, ends or needs them
-kennet codeval ./core ./billing https://github.com/acme/ledger.git --yes --detach --json
-```
-
-It reads each repository's history, then builds and tests its latest commit and a few past commits Metaphi AI
-names, in temporary copies on this machine, in Docker or Podman when one is running. It also runs the tests on small
-single-line edits Metaphi AI names; only results leave the machine. What is sent:
-
-- counts and ids for files, folders, commits and authors;
-- the shape of commit messages, never their text;
-- build and test output and logs, with common secret and token patterns replaced;
-- the git ids of files Metaphi AI names;
-- while it runs, how far it is (a phase and counts) and which of the codes below it waits on.
-
-File names, author names, commit messages and source are not sent, except that `--deep` sends the contents of files
-read to set up the build. Everything is kept in `./kennet-codeval/<run>/`; what was sent, byte for byte, is
-in `sent/`, listed with sha256 sums in `sent/sent.json`. `--dry-run` writes `sent/` and sends nothing.
-
-- `--detach` (always with `--yes`) prints `{{"run", "pid", "state": "running", "results", "log", "next_step"}}`
-  and exits 0; the run goes on in its own session, keeping the machine awake, and writes to `log`. Tell the user it
-  has started and the run id.
-- `kennet codeval status <run> --json --wait <seconds>` reads the run on this machine. Without a run id it is the
-  run updated last, from any directory. It prints `{{"run", "state", "phase", "done", "total", "reference",
-  "results", "needs", "error", "next_step"}}`; `phase` is `profile`, `plan`, `setup`, `checks`, `logs` or `done`,
-  and `done` of `total` counts past commits and edits. Exit 0 `done` (tell the user `reference`); 4 `running`
-  (run `next_step`, the same wait, again); 6 `needs_person`; 1 `failed` or `stopped`; 3 a sign-in is needed.
-- `needs_person` (exit 6, from `status` or from the run itself): put `needs.ask` to the user, word for word, with
-  `needs.action_url` when there is one. Each of `needs.options` is `{{"label", "run"}}`: run the one they choose,
-  filling any `<build>` or `<test>` with the commands they agree to. `needs.code` is `test_command_missing` (no
-  build or test found: read the repository's README, CI configuration and build files, ask first as that is
-  content, and propose the commands) or `container_required` (`--deep` needs Docker or Podman running).
-- `stopped` or `failed`: the run ended early (the machine slept or restarted, or the process was stopped).
-  `next_step` is the same command: it goes on from the last finished commit; finished work is never run or sent
-  twice.
-- Without `--detach`, the command runs in the foreground and prints `{{"reference": "cv_...", "sent": true,
-  "results": "<directory>", "run"}}` when done.
-- `confirmation_required`: nothing was sent. Ask the user; on yes run `next_step`.
-- `--dry-run` builds and tests the latest commit only.
-
-## 3. A mutual NDA, only if the user wants one
-
-CodeVal never needs one. When the user asks for an NDA with Metaphi AI:
-
-```sh
-kennet mnda --json
-```
-
-`status` is `signed` (`signed_at`), `pending` (`url` is where the user signs it) or `none`. For `none`, on the
-user's yes:
-
-```sh
-kennet mnda sign --json
-```
-
-It answers `pending` with its `url`: give the user the link to sign in the browser. `kennet mnda --json` shows
-`signed` once both sides have.
-
-## 4. Errors
-
-| `error.code` | What to do |
-| --- | --- |
-| `not_signed_in`, `login_expired`, `login_refused` | Step 1. |
-| `no_api_key` | Read `reason`: `no_organization` is in step 1; `awaiting_approval` means Metaphi AI approves the organization and mails the user; anything else, run `kennet login --json` once, then tell the user the message. |
-| `no_organization` | From `kennet mnda`: make the organization as in step 1, then the same command. |
-| `insufficient_scope` | `kennet login --json` once, then the same command. If it repeats, tell the user the message. |
-| `confirmation_required` | Ask the user; on yes run `next_step`. |
-| `container_required`, `test_command_missing` | Exit 6: put `needs.ask` to the user and run the option they choose (step 2). |
-| `run_not_found` | `kennet codeval status` knows no such run on this machine: `kennet codeval status --json` names the last one. |
-| `run_in_progress` | The run is already going in another process: run `next_step` to follow it. |
-| `git_too_old` | Ask the user to update git; nothing was sent. |
-| `no_repository` | No full git clone at a path given; each path's reason is in the output. Ask the user to clone it in full, then run the same command. |
-| `build_without_test`, `deep_with_test`, `dry_run_with_deep`, `dry_run_with_yes`, `dry_run_with_detach`, `bad_wait` | The flags do not go together: fix them. |
-| `network`, `service_unavailable`, `unavailable` | Nothing changed. Wait `retry_after_s` (30 seconds when absent), run the same command once more, then tell the user with `request_id`. |
-| `upgrade_required` | Ask the user, run `next_step`, then the same command. |
-| anything else | If `retryable`, wait and try once more. Else tell the user the message and `request_id`. |
-
-`kennet skill show` is the guide to the rest of the CLI.
+A mutual NDA is never needed for CodeVal. If the user wants one: `kennet mnda --json`, then on their yes
+`kennet mnda sign --json` and give them its `url`.
 """
 
 SKILLS = {NAME: STUB, PARTNER_NAME: PARTNER_STUB}

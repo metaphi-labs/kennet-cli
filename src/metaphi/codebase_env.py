@@ -14,23 +14,23 @@ from typing import Any
 import yaml
 
 CI = (
-    ("github", re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")),
-    ("gitlab", re.compile(r"^\.gitlab-ci\.ya?ml$")),
-    ("circleci", re.compile(r"^\.circleci/config\.ya?ml$")),
-    ("jenkins", re.compile(r"(^|/)Jenkinsfile$")),
-    ("azure", re.compile(r"^(azure-pipelines|\.azure-pipelines/[^/]+)\.ya?ml$")),
-    ("bitbucket", re.compile(r"^bitbucket-pipelines\.ya?ml$")),
-    ("travis", re.compile(r"^\.travis\.ya?ml$")),
-    ("buildkite", re.compile(r"^\.buildkite/[^/]+\.ya?ml$")),
-    ("drone", re.compile(r"^\.drone\.ya?ml$")),
-    ("woodpecker", re.compile(r"^\.woodpecker(\.ya?ml|/[^/]+\.ya?ml)$")),
+    ("github", re.compile(r"^\.github/workflows/[^/]+\.ya?ml\Z")),
+    ("gitlab", re.compile(r"^\.gitlab-ci\.ya?ml\Z")),
+    ("circleci", re.compile(r"^\.circleci/config\.ya?ml\Z")),
+    ("jenkins", re.compile(r"(^|/)Jenkinsfile\Z")),
+    ("azure", re.compile(r"^(azure-pipelines|\.azure-pipelines/[^/]+)\.ya?ml\Z")),
+    ("bitbucket", re.compile(r"^bitbucket-pipelines\.ya?ml\Z")),
+    ("travis", re.compile(r"^\.travis\.ya?ml\Z")),
+    ("buildkite", re.compile(r"^\.buildkite/[^/]+\.ya?ml\Z")),
+    ("drone", re.compile(r"^\.drone\.ya?ml\Z")),
+    ("woodpecker", re.compile(r"^\.woodpecker(\.ya?ml|/[^/]+\.ya?ml)\Z")),
     ("teamcity", re.compile(r"^\.teamcity/")),
     ("bamboo", re.compile(r"^bamboo-specs/")),
-    ("cloudbuild", re.compile(r"^cloudbuild\.ya?ml$")),
+    ("cloudbuild", re.compile(r"^cloudbuild\.ya?ml\Z")),
 )
-COMPOSE = re.compile(r"(^|/)(docker-)?compose[\w.-]*\.ya?ml$", re.IGNORECASE)
-DOCKERFILE = re.compile(r"(^|/)(Dockerfile|Containerfile)([.\w-]*)$|\.dockerfile$", re.IGNORECASE)
-DEVCONTAINER = re.compile(r"^\.devcontainer(\.json$|/)")
+COMPOSE = re.compile(r"(^|/)(docker-)?compose[\w.-]*\.ya?ml\Z", re.IGNORECASE)
+DOCKERFILE = re.compile(r"(^|/)(Dockerfile|Containerfile)([.\w-]*)\Z|\.dockerfile\Z", re.IGNORECASE)
+DEVCONTAINER = re.compile(r"^\.devcontainer(\.json\Z|/)")
 VENDORED = re.compile(r"(^|/)(vendor|node_modules|third_party|external|deps|testdata)/", re.IGNORECASE)
 WAIT_SECONDS = 240
 

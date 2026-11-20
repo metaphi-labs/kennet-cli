@@ -1,0 +1,3 @@
+/usr/bin/ld: ledger.o: in function `post':
+ledger.c:(.text+0x1f): undefined reference to `hunter2_total'
+collect2: error: ld returned 1 exit status

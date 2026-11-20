@@ -105,7 +105,7 @@ def test_containers_are_hardened_and_join_the_runs_network(tmp_path, monkeypatch
         ),
     )
     monkeypatch.setattr(codebase_setup, "NETWORK", ["--network", "kennet-net"])
-    codebase_setup.limits.cache_clear()
+    codebase_setup._info.cache_clear()
     codebase_setup.Shell("docker", "golang:1.22", tmp_path, tmp_path)
     run = seen[-1]
     assert run[run.index("--network") + 1] == "kennet-net" and "host" not in run
@@ -118,7 +118,9 @@ def test_containers_are_hardened_and_join_the_runs_network(tmp_path, monkeypatch
         f"--memory={17179869184 * 3 // 4}",
     ):
         assert flag in run, flag
-    codebase_setup.limits.cache_clear()
+    codebase_setup.Shell("docker", "golang:1.22", tmp_path, tmp_path, memory=3 << 30)
+    assert f"--memory={3 << 30}" in seen[-1], "a container's share when several run at once"
+    codebase_setup._info.cache_clear()
 
 
 def test_build_environment_is_allowlisted():

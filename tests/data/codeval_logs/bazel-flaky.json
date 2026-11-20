@@ -1,0 +1,4 @@
+{"id":{"started":{}},"started":{"uuid":"x","command":"test"}}
+{"id":{"testSummary":{"label":"//ledger:hunter2_test"}},"testSummary":{"overallStatus":"FLAKY","totalRunCount":2}}
+{"id":{"testSummary":{"label":"//ledger:void_test"}},"testSummary":{"overallStatus":"PASSED","totalRunCount":1}}
+{"id":{"buildFinished":{}},"finished":{"exitCode":{"name":"SUCCESS"}}}

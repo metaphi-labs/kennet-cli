@@ -271,4 +271,26 @@ def counted(log: Path) -> tuple[int, int] | None:
     return None
 
 
-__all__ = ["READERS", "counted"]
+MISSING = (
+    re.compile(r"(?m)(?:^|: )([\w.+-]+): (?:command )?not found$"),
+    re.compile(r"(?m)^(?:/bin/)?(?:ba|z|da)?sh: (?:line \d+: )?([\w.+-]+): (?:command )?not found"),
+    re.compile(r"exec: \"?([\w.+-]+)\"?: executable file not found"),
+)
+JDK = re.compile(r"(?i)invalid (?:target|source) release:? (?:1\.)?(\d+)|requires (?:Java|JDK) (\d+)")
+JAVA = re.compile(r"Unable to locate a Java Runtime|JAVA_HOME is not (?:set|defined)")
+
+
+def missing(log: Path) -> str | None:
+    """The tool the log says is not installed here, as a person would name it ("java", "JDK 8"), or None."""
+    t = _text(log)
+    if m := JDK.search(t):
+        return f"JDK {m.group(1) or m.group(2)}"
+    if JAVA.search(t):
+        return "java"
+    for pattern in MISSING:
+        if m := pattern.search(t):
+            return m.group(1)
+    return None
+
+
+__all__ = ["READERS", "counted", "missing"]
