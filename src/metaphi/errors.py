@@ -65,7 +65,7 @@ class BillingError(MetaphiError):
 
 
 class AuthError(MetaphiError):
-    type = "auth_error"
+    type = "authentication_error"
 
 
 class RateLimitError(MetaphiError):
@@ -91,7 +91,15 @@ class APIError(MetaphiError):
 BY_TYPE: dict[str, type[MetaphiError]] = {
     c.type: c
     for c in (BillingError, AuthError, RateLimitError, InvalidRequestError, IdempotencyError, RunError, APIError)
-}
+} | {"auth_error": AuthError}
+
+# Codes a command acts on, each with the name the accounts service still says.
+AUTH_TYPES = ("authentication_error", "auth_error")
+CREDIT_EXHAUSTED = ("credit_exhausted", "out_of_credit")
+KEY_GONE = ("api_key_invalid", "api_key_missing", "invalid_api_key", "missing_api_key")
+NO_ACCESS = ("permission_denied", "insufficient_scope")
+QUOTA = ("quota_exceeded", "test_runs_used")
+NOT_FOUND = ("resource_not_found", "resource_missing")
 
 
 def from_object(error: dict[str, Any]) -> MetaphiError:

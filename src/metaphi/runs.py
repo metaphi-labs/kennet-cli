@@ -39,9 +39,9 @@ def read(
         try:
             return api.send(h, "GET", f"/runs/{run_id}/events", sleep, params=params, timeout=WAIT_S + 30.0).json()
         except errors.MetaphiError as e:
-            if e.code == "resource_missing":
+            if e.code in errors.NOT_FOUND:
                 e.message = f"{repo} holds no run {run_id} of your organization's"
-            elif e.code == "insufficient_scope":
+            elif e.code in errors.NO_ACCESS:
                 e.message += "; `kennet login` hands this machine keys that follow runs"
                 e.next_step = "kennet login"
             raise

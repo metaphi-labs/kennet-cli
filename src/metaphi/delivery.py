@@ -34,9 +34,9 @@ def _need(message: str, code: str, next_step: str | None = None, retryable: bool
 
 
 def _named(e: errors.MetaphiError) -> errors.MetaphiError:
-    if e.code == "resource_missing":
+    if e.code in errors.NOT_FOUND:
         e.next_step = "kennet delivery list"
-    elif e.code == "insufficient_scope":
+    elif e.code in errors.NO_ACCESS:
         e.message += "; `kennet login` hands this machine keys that do"
         e.next_step = "kennet login"
     return e
@@ -58,7 +58,7 @@ def latest(name: str, sleep: Callable[[float], None] = time.sleep) -> str:
     for d in held(sleep):
         if d["name"] == name and not d.get("newer"):
             return d["id"]
-    raise _need(f"your organization holds no delivery named {name!r}", "resource_missing", "kennet delivery list")
+    raise _need(f"your organization holds no delivery named {name!r}", "resource_not_found", "kennet delivery list")
 
 
 def show(delivery: str, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:

@@ -13,7 +13,7 @@ import httpx
 from metaphi import accounts, api, errors
 from metaphi.api import UPLOAD, Tries, client, send
 
-ENDED = ("completed", "failed")
+ENDED = ("completed", "failed", "cancelled", "expired")
 FIRST_WAIT_S = 1.0
 MAX_WAIT_S = 15.0
 CONSISTENCY_KEY = "KENNET_CONSISTENCY_KEY"
@@ -238,7 +238,7 @@ def twin(
                 headers={"idempotency-key": idempotency_key or uuid.uuid4().hex},
             ).json()
         except errors.MetaphiError as e:
-            if e.code == "test_runs_used":
+            if e.code in errors.QUOTA:
                 e.message = f"its free test run is used; run it live: {again(str(trace))}"
                 e.retryable, e.retry_after_s, e.next_step = False, None, again(str(trace))
             raise
