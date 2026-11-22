@@ -34,9 +34,9 @@ PERSON_MUST_ACT = frozenset(
 def status(error: errors.MetaphiError) -> int:
     if error.code == "upgrade_required":
         return UPGRADE
-    if error.code == "test_runs_used":
+    if error.code in errors.QUOTA:
         return FAILED
-    if error.type == "auth_error":
+    if error.type in errors.AUTH_TYPES:
         return AUTH
     if error.code in PERSON_MUST_ACT:
         return NEEDS_PERSON
@@ -228,7 +228,7 @@ def _key_status(key: str | None, source: str) -> tuple[dict | None, errors.Metap
     from metaphi.twin import check
 
     e = check(key)
-    if e is not None and e.code == "insufficient_scope" and check(key, "/codeval/access") is None:
+    if e is not None and e.code in errors.NO_ACCESS and check(key, "/codeval/access") is None:
         e = None
     return {"source": source, "hint": _hint(key), "status": "ok" if e is None else e.code or "error"}, e
 
@@ -261,7 +261,7 @@ def cmd_whoami(a: argparse.Namespace) -> None:
                 with contextlib.suppress(config.Error):
                     left[o["id"]] = accounts.available(o["id"])
         (live, refused), (test, _) = asked[0].result(), asked[1].result()
-    gone = refused is not None and refused.code in ("invalid_api_key", "missing_api_key")
+    gone = refused is not None and refused.code in errors.KEY_GONE
     invitations = _invitations(cfg, orgs) if cfg.get("token") else []
     invitation = invitations[0] if invitations and (live is None or refused is not None) else None
     cfg = {k: v for k, v in cfg.items() if k != "invitation"}
@@ -378,11 +378,11 @@ def cmd_twin(a: argparse.Namespace) -> None:
         try:
             got = run()
         except errors.BillingError as e:
-            if e.code != "out_of_credit" or a.json or not _interactive() or not _refill(e):
+            if e.code not in errors.CREDIT_EXHAUSTED or a.json or not _interactive() or not _refill(e):
                 raise
             got = run()
     except errors.MetaphiError as e:
-        if e.code == "test_runs_used":
+        if e.code in errors.QUOTA:
             e.next_step = _live(a)
             e.message = f"its free test run is used; run it live: {e.next_step}"
         raise
@@ -411,7 +411,7 @@ def _codeval_signin(a: argparse.Namespace, say: Callable[[str], None], stream: I
         codeval.key_ready()
         return
     except accounts.Error as e:
-        if e.code not in ("not_signed_in", "no_api_key", "insufficient_scope", "invalid_api_key"):
+        if e.code not in ("not_signed_in", "no_api_key", *errors.NO_ACCESS, *errors.KEY_GONE):
             raise
     except errors.MetaphiError as e:
         if e.code != "codeval_not_open":
@@ -2039,15 +2039,15 @@ def _run(p: argparse.ArgumentParser, a: argparse.Namespace) -> int:
     except config.Error as e:
         error = e if isinstance(e, errors.MetaphiError) else errors.MetaphiError(str(e))
         advice = getattr(error, "advice", None)
-        if error.code == "out_of_credit":
+        if error.code in errors.CREDIT_EXHAUSTED:
             error.action_url = _credit_url(error)
             error.next_step = None if advice else "kennet credits buy"
-        elif error.code in ("invalid_api_key", "missing_api_key"):
+        elif error.code in errors.KEY_GONE:
             error.next_step = "kennet login"
         if getattr(a, "json", False):
             print(json.dumps({"error": error.to_dict(), **error.context}, indent=2))
         print(f"error: {error}", file=sys.stderr)
-        if error.code == "out_of_credit":
+        if error.code in errors.CREDIT_EXHAUSTED:
             print(
                 advice or f"Add credit: {error.action_url}  or run: kennet credits buy --amount <amount>",
                 file=sys.stderr,

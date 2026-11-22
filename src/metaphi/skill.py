@@ -63,7 +63,7 @@ their data goes.
   argument. Keys are saved by `kennet login` or come from `METAPHI_API_KEY`.
 - An organization has one free test run in all (`--test`): a real twin through the same pipeline, of a file up
   to 2 MiB. Spend it on a representative file, and ask the user which one before you do. Once it is used the
-  refusal is `test_runs_used` (exit 1; `next_step` is the same command without `--test`): runs from then on are
+  refusal is `quota_exceeded` (exit 1; `next_step` is the same command without `--test`): runs from then on are
   live. A live run draws the organization's credit:
   ask the user before the first one, even after a good test run.
 - `kennet` says nothing about new releases under `--json`. What install.sh installed updates itself in the
@@ -186,7 +186,7 @@ comes back for it. `--no-wait` returns once the file is uploaded and the twin ex
 twin that then fails says so at `twins wait` or `twins get`, with the same error object.
 
 Several files: one `kennet twin` per file, with one `--key-file` for all of them. Start each with `--no-wait`,
-then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end before starting the next.
+then `twins wait` each id.
 
 ## 4. Errors
 
@@ -203,11 +203,13 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `not_signed_in`, `login_expired`, `login_refused` | Step 2, from its start. |
 | `step_up_required` | A change to the organization needs a recent sign-in. Step 2, from its start, then the same command once more. |
 | `no_api_key` | Signed in, and no key came with the sign-in. If `next_step` is `kennet org create <name>`, the user is in no organization: make theirs (step 1). If it is `kennet login`, run `kennet login --json` once: it saves the keys, with no browser, if access was given since. If it comes back `no_api_key` again, tell the user the message and stop. |
-| `invalid_api_key`, `missing_api_key` | The key was revoked or replaced, often by a later sign-in elsewhere. Step 2, or the user sets a new `METAPHI_API_KEY`. |
+| `api_key_invalid`, `api_key_missing` (older services: `invalid_api_key`, `missing_api_key`) | The key was revoked or replaced, often by a later sign-in elsewhere. Step 2, or the user sets a new `METAPHI_API_KEY`. |
 | `codeval_not_open` | `kennet codeval` needs the user (exit 6): their organization has not opened CodeVal, and only an owner or admin can. Tell them the message word for word (it names the step); once an owner or admin has run `kennet login`, run the same command. |
-| `insufficient_scope` | The key does not hold access to what the command reaches. Run `kennet login --json` once: a signed-in machine is handed new keys with no browser. If it repeats, tell the user. |
-| `auth_unavailable`, `unavailable`, `balance_unavailable`, `unreachable` | The service could not answer; nothing was started. Wait `retry_after_s` (30 seconds when absent), run the same command once more, then stop and tell the user with the `request_id`. |
-| `run_unavailable` | The twin started and failed on Metaphi AI's side; nothing was written or charged. "Upload the trace again" means run `next_step`, `kennet twin <file>`, with the options you used before. Do that once. If it fails the same way, stop and give the user both `run_id`s. |
+| `permission_denied` (older services: `insufficient_scope`) | The key does not hold access to what the command reaches. Run `kennet login --json` once: a signed-in machine is handed new keys with no browser. If it repeats, tell the user. |
+| `service_unavailable`, `internal_error`, `unavailable`, `unreachable` | The service could not answer; nothing was started. Wait `retry_after_s` (30 seconds when absent), run the same command once more, then stop and tell the user with the `request_id`. |
+| `deadline_exceeded` | The twin was not completed within 24 hours (status `expired`), a fault on the service's side; nothing was written or charged. Run `next_step`, `kennet twin <file>`, with the options you used before, once. If it ends the same way, stop and give the user the `run_id` and `request_id`. |
+| `input_invalid` | The trace is not JSON, JSON Lines or UTF-8 text (status `failed`); nothing was charged. Tell the user; do not retry. |
+| `input_expired` | The upload was no longer held when the twin ran; nothing was charged. Run the same command again once. |
 | `git_too_old` | `kennet codeval` needs a newer git. Tell the user; nothing was sent. |
 | `no_repository` | `kennet codeval` found no full git clone at the paths given; each path's reason is in the output. Tell the user to clone it in full and run the same command. |
 | `sign_in_required` | `kennet codeval` needs the user's sign-in (exit 3): give them `sign_in.verification_uri` and `sign_in.user_code` word for word, then run `next_step`. `kennet skill show partner` is the CodeVal guide. |
@@ -220,11 +222,9 @@ then `twins wait` each id. On `rate_limited_concurrent`, wait for one to end bef
 | `bad_wait` | `--wait` takes seconds, 0 or more. |
 | `schema_refused` | `kennet codeval` refused to send a value outside its schema, or to follow an instruction outside it (more than a batch can answer, or a blob id below the privacy floor); nothing was sent or run. Tell the user the message. |
 | `confirmation_required` | Nothing was sent. Ask the user; on yes, run `next_step`, the same command with `--yes`. |
-| `out_of_credit` | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
-| `rate_limited_concurrent`, `rate_limited_daily` | Too many runs at once, or today. Wait for a run to end, or tell the user. |
+| `credit_exhausted` (older services: `out_of_credit`) | Nothing was started. Give the user `error.action_url` to add credit, or run `kennet credits buy --amount <dollars> --no-browser`, show them the Stripe link it prints, and let it wait for the payment. Then run the same command again. Never choose the amount yourself. |
 | `timed_out` | The twin goes on. Run `next_step`. |
-| `twin_unclean`, `session_failed` | The run failed and cost nothing. If `retryable`, run it once more; else tell the user with the `run_id`. |
-| `not_text`, `too_large` | The file cannot be twinned as it is. Tell the user. |
+| `file_unsupported`, `file_empty`, `request_too_large` | The file cannot be twinned as it is. Tell the user. |
 | anything else | If `retryable` is true, wait `retry_after_s` (10 seconds when absent) and try once more. Else, or if it fails again, tell the user the message and `request_id`. |
 
 ## 5. Balance
@@ -288,7 +288,7 @@ pull each image the lock names. Each answer's `next_step` is the command that fo
 - `newer` on a delivery names a later version your organization holds. A held-out set, when there is one, is a
   delivery of its own and is never part of a training pull.
 
-Errors: `resource_missing` (no such delivery for your organization; `kennet delivery list`), `insufficient_scope` (this
+Errors: `resource_not_found` (no such delivery for your organization; `kennet delivery list`), `permission_denied` (this
 machine's keys predate deliveries; `kennet login --json` replaces them, with no browser), `directory_in_use` (the
 directory holds another delivery; `next_step` names a free one), `tree_mismatch` (a download was not the locked tree and
 was thrown away; run the pull again), `not_a_delivery` (`verify` was pointed at a directory with no lock it can read),
@@ -373,7 +373,7 @@ Create a key only in the pipe form, straight into the secret store that keeps it
   `name_taken` (a live key has that name; pick another or revoke it), `scope_not_held` (the organization does not
   hold that scope), `too_many_keys` (it holds the most live keys it may; revoke an unused one first),
   `already_revoked` (it was revoked meanwhile; nothing to do), `awaiting_approval` and `no_access` (it holds
-  nothing a key could carry yet: step 1's table). A refusal with `"type": "auth_error"` and another code, or
+  nothing a key could carry yet: step 1's table). A refusal with `"type": "authentication_error"` and another code, or
   none (`not_cli_client`: the sign-in is not this CLI's), is the server's sentence: run `kennet login --json`
   once (step 2), then the same command.
 

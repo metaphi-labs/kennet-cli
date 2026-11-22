@@ -1260,7 +1260,7 @@ def _named(e: errors.MetaphiError) -> errors.MetaphiError:
             "the measurement it holds goes on"
         )
         e.next_step = "continue the live measurement: run `kennet codeval` without --restart where it runs"
-    elif e.code == "insufficient_scope":
+    elif e.code in errors.NO_ACCESS:
         e.message += (
             "; it takes kennet:codeval:write. `kennet login` hands this machine keys that hold it "
             "once your organization does"
