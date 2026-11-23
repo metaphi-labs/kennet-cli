@@ -33,7 +33,7 @@ Source = "https://github.com/metaphi-labs/kennet-cli"
 Issues = "https://github.com/metaphi-labs/kennet-cli/issues"
 
 [build-system]
-requires = ["hatchling==1.32.4"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.ruff]
