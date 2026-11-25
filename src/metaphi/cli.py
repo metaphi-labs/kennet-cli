@@ -706,7 +706,7 @@ def cmd_twins_wait(a: argparse.Namespace) -> None:
 
 def _size(n: object) -> str:
     n = float(n) if isinstance(n, (int, float)) else 0.0
-    return f"{n / 1e6:.1f} MB" if n >= 1e5 else f"{n / 1e3:.1f} kB"
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB" if n >= 1e5 else f"{n / 1e3:.1f} kB"
 
 
 def _delivery_line(d: dict) -> str:
@@ -741,6 +741,22 @@ def _tally(tasks: list, field: str) -> str:
     return ", ".join(f"{k} {n}" for k, n in sorted(seen.items(), key=lambda kv: -kv[1]))
 
 
+def _newest(versions: list[str]) -> str:
+    return max(versions, key=lambda v: [int(x) for x in re.findall(r"\d+", v)])
+
+
+def _needs(tasks: list) -> list[str]:
+    docker = [t["docker"] for t in tasks if isinstance(t.get("docker"), dict)]
+    said = []
+    for part, name in (("engine", "Docker Engine"), ("compose", "Docker Compose")):
+        least = [x[part] for x in docker if x.get(part)]
+        if least:
+            said.append(f"{name} {_newest(least)} or later")
+    if any(t.get("network_mode") == "no-network" for t in tasks):
+        said.append("Harbor's no-network mode, which pulls its own alpine and gogost/gost images")
+    return [f"  needs     {'; '.join(said)}"] if said else []
+
+
 def cmd_delivery_show(a: argparse.Namespace) -> None:
     from metaphi import delivery
 
@@ -750,13 +766,16 @@ def cmd_delivery_show(a: argparse.Namespace) -> None:
     lines = [
         f"{d['id']}  delivered {d.get('delivered') or '-'}",
         f"  tasks     {d['task_count']}" + (f"  ({kinds})" if kinds else ""),
-        f"  images    {d['image_count']}, each pinned by digest, in {d.get('registry') or '-'}",
+        f"  images    {d['image_count']}, each pinned by digest, in {d.get('registry') or '-'}"
+        + (f"; {_size(d['image_bytes'])} to pull" if d.get("image_bytes") else "")
+        + (f", for {', '.join(d['platforms'])}" if d.get("platforms") else ""),
         f"  download  {_size(d.get('bytes'))}",
         (
             f"  a run     up to {_most(tasks, 'cpus')} CPUs, {_most(tasks, 'memory_mb')} MB memory, "
             f"{_most(tasks, 'storage_mb')} MB disk; the agent up to {_most(tasks, 'agent_timeout_s')} s, "
             f"grading up to {_most(tasks, 'verifier_timeout_s')} s"
         ),
+        *_needs(tasks),
         *([f"  newer     {d['newer']}  (kennet delivery diff {d['id']} {d['newer']})"] if d.get("newer") else []),
     ]
     if a.tasks:

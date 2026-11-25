@@ -123,6 +123,23 @@ def test_list_and_show_say_what_the_organization_holds(home, capsys):
 
 
 @respx.mock
+def test_show_says_what_a_run_asks_and_a_third_kind_of_lock_pulls(home, capsys):
+    made = served(home, "set@0.1.0", TASKS)
+    made["view"].update(image_bytes=13_900_000_000, platforms=["linux/amd64"])
+    made["view"]["tasks"][0].update(network_mode="no-network", docker={"engine": "25.0", "compose": "2.24.0"})
+    respx.get(f"{API}/deliveries/set@0.1.0").respond(json=made["view"])
+    assert cli.main(["delivery", "show", "set@0.1.0"]) == 0
+    said = capsys.readouterr().out
+    assert "; 13.9 GB to pull, for linux/amd64" in said
+    assert "needs     Docker Engine 25.0 or later; Docker Compose 2.24.0 or later; Harbor's no-network mode" in said
+    lock = {**made["lock"], "lock": 3, "repository": "images-a"}
+    respx.get(f"{API}/deliveries/set@0.1.0/lock").respond(content=json.dumps(lock).encode())
+    code, got, _ = run(capsys, "pull", "set@0.1.0")
+    assert code == 0 and got["fetched"] == ["one", "two"]
+    assert run(capsys, "verify", "set-0.1.0")[1]["ok"]
+
+
+@respx.mock
 def test_pull_fetches_what_differs_and_verify_checks_it_offline(home, capsys):
     made = served(home, "set@0.1.0", TASKS)
     code, got, _ = run(capsys, "delivery", "pull", "set@0.1.0", "--dry-run")
