@@ -25,7 +25,7 @@ ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 TASK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 TREE = re.compile(r"sha256:[0-9a-f]{64}")
-KINDS = (1, 2)
+KINDS = (1, 2, 3)
 GRADING = "tests/"
 
 
